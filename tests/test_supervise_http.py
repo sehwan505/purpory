@@ -1,0 +1,317 @@
+from __future__ import annotations
+
+import json
+import threading
+from http.client import HTTPConnection
+from pathlib import Path
+
+import pytest
+
+from purpory.supervise.library import ContextService
+from purpory.supervise.serve.server import ContextHTTPServer
+
+
+@pytest.fixture
+def context_server(tmp_path: Path):
+    service = ContextService(db_path=tmp_path / "context.db", root=tmp_path)
+    service.set_topic("decision.database", value="PostgreSQL", kind="decision")
+    server = ContextHTTPServer(
+        ("127.0.0.1", 0),
+        service,
+        "read-secret",
+        "write-secret",
+        "agent-secret",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _request(server: ContextHTTPServer, method: str, path: str, **kwargs):
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+    connection.request(method, path, **kwargs)
+    response = connection.getresponse()
+    body = json.loads(response.read())
+    connection.close()
+    return response.status, body
+
+
+def test_read_api_accepts_query_token(context_server: ContextHTTPServer) -> None:
+    status, body = _request(context_server, "GET", "/api/view?t=read-secret")
+    assert status == 200
+    assert body["topics"][0]["key"] == "decision.database"
+
+
+def test_model_status_api_reports_managed_runtime_state(
+    context_server: ContextHTTPServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PURPORY_HOME", str(tmp_path / "purpory-home"))
+
+    status, body = _request(context_server, "GET", "/api/model/status?t=read-secret")
+
+    assert status == 200
+    assert body["installed"] is False
+    assert body["providerSource"] == "none"
+
+
+def test_graph_api_imports_snapshot_and_bounds_response(
+    context_server: ContextHTTPServer,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "purpory-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "auth", "label": "Auth", "source_file": "src/auth.py"},
+                    {"id": "token", "label": "Token", "source_file": "src/token.py"},
+                ],
+                "links": [{"source": "auth", "target": "token", "relation": "calls"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status, body = _request(
+        context_server,
+        "GET",
+        "/api/graph?t=read-secret&limit=1&edgeLimit=1",
+    )
+
+    assert status == 200
+    assert body["totalNodes"] == 2
+    assert body["totalLinks"] == 1
+    assert len(body["nodes"]) == 1
+    assert body["truncated"] is True
+
+
+def test_read_api_rejects_bad_token(context_server: ContextHTTPServer) -> None:
+    status, body = _request(context_server, "GET", "/api/view?t=wrong")
+    assert status == 401
+    assert "token" in body["error"]
+
+
+def test_mutation_rejects_query_token_before_body(context_server: ContextHTTPServer) -> None:
+    status, body = _request(context_server, "POST", "/api/topics?t=read-secret")
+    assert status == 403
+    assert "query tokens" in body["error"]
+
+
+def test_mutation_requires_write_header(context_server: ContextHTTPServer) -> None:
+    payload = json.dumps({"key": "decision.deploy", "value": "Blue-green", "kind": "decision"})
+    status, _ = _request(
+        context_server,
+        "POST",
+        "/api/topics",
+        body=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert status == 401
+    status, body = _request(
+        context_server,
+        "POST",
+        "/api/topics",
+        body=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Token": "write-secret",
+        },
+    )
+    assert status == 201
+    assert body["action"] == "created"
+
+
+def test_mutation_rejects_cross_origin(context_server: ContextHTTPServer) -> None:
+    payload = json.dumps({"key": "decision.deploy", "value": "Blue-green"})
+    status, body = _request(
+        context_server,
+        "POST",
+        "/api/topics",
+        body=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Token": "write-secret",
+            "Origin": "https://attacker.example",
+        },
+    )
+    assert status == 403
+    assert "cross-origin" in body["error"]
+
+
+def test_agent_token_can_prepare_context_but_cannot_curate_topics(
+    context_server: ContextHTTPServer,
+) -> None:
+    payload = json.dumps(
+        {
+            "message": "database",
+            "sessionId": "agent-session",
+            "tokenBudget": 512,
+        }
+    )
+    status, body = _request(
+        context_server,
+        "POST",
+        "/api/context/prepare",
+        body=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Agent-Token": "agent-secret",
+        },
+    )
+    assert status == 200
+    assert body["action"] == "retrieve"
+
+    status, _ = _request(
+        context_server,
+        "POST",
+        "/api/topics",
+        body=json.dumps({"key": "decision.bad", "value": "bad"}),
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Agent-Token": "agent-secret",
+        },
+    )
+    assert status == 401
+
+
+def test_agent_token_cannot_enable_preparation_input_retention(
+    context_server: ContextHTTPServer,
+) -> None:
+    status, body = _request(
+        context_server,
+        "POST",
+        "/api/context/prepare",
+        body=json.dumps({"message": "private", "sessionId": "agent-session", "retainInput": True}),
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Agent-Token": "agent-secret",
+        },
+    )
+    assert status == 403
+    assert "human mutation token" in body["error"]
+
+
+def test_removed_agent_primitives_are_not_exposed(
+    context_server: ContextHTTPServer,
+) -> None:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Purpory-Token": "write-secret",
+    }
+    for path in (
+        "/api/gate",
+        "/api/pull",
+        "/api/request",
+        "/api/context/push",
+        "/api/context/catalog",
+        "/api/context/search",
+        "/api/context/expand",
+        "/api/context/path",
+        "/api/context/deliver",
+    ):
+        status, _ = _request(
+            context_server,
+            "POST",
+            path,
+            body="{}",
+            headers=headers,
+        )
+        assert status == 404, path
+
+
+def test_context_decisions_and_feedback_api(context_server: ContextHTTPServer) -> None:
+    payload = json.dumps({"message": "hello", "sessionId": "agent-session"})
+    _, decision = _request(
+        context_server,
+        "POST",
+        "/api/context/prepare",
+        body=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Agent-Token": "agent-secret",
+        },
+    )
+    status, decisions = _request(
+        context_server,
+        "GET",
+        "/api/context/decisions?t=read-secret&limit=10",
+    )
+    assert status == 200
+    assert decisions[0]["id"] == decision["decisionId"]
+
+    status, feedback = _request(
+        context_server,
+        "POST",
+        f"/api/context/decisions/{decision['decisionId']}/feedback",
+        body=json.dumps({"verdict": "correct"}),
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Token": "write-secret",
+        },
+    )
+    assert status == 200
+    assert feedback["verdict"] == "correct"
+
+
+def test_static_dashboard_is_packaged(context_server: ContextHTTPServer) -> None:
+    connection = HTTPConnection("127.0.0.1", context_server.server_port, timeout=2)
+    connection.request("GET", "/")
+    response = connection.getresponse()
+    body = response.read().decode("utf-8")
+    connection.close()
+    assert response.status == 200
+    assert "Purpory" in body
+    assert "Content-Security-Policy" in response.headers
+
+
+def test_serve_viz_endpoints(context_server: ContextHTTPServer, monkeypatch, tmp_path) -> None:
+    (tmp_path / "graph.html").write_text("<html>Graph</html>", encoding="utf-8")
+    (tmp_path / "GRAPH_TREE.html").write_text("<html>Tree</html>", encoding="utf-8")
+    (tmp_path / "purpory-callflow.html").write_text("<html>Callflow</html>", encoding="utf-8")
+
+    import purpory.paths
+
+    monkeypatch.setattr(
+        purpory.paths, "out_path", lambda *parts: tmp_path / Path(*parts) if parts else tmp_path
+    )
+
+    connection = HTTPConnection("127.0.0.1", context_server.server_port, timeout=2)
+    connection.request("GET", "/api/viz/graph.html?t=read-secret")
+    response = connection.getresponse()
+    body = response.read().decode("utf-8")
+    connection.close()
+    assert response.status == 200
+    assert body == "<html>Graph</html>"
+    assert "Content-Security-Policy" in response.headers
+    assert "unpkg.com" in response.headers["Content-Security-Policy"]
+
+    connection = HTTPConnection("127.0.0.1", context_server.server_port, timeout=2)
+    connection.request("HEAD", "/api/viz/graph.html?t=read-secret")
+    response = connection.getresponse()
+    body = response.read()
+    connection.close()
+    assert response.status == 200
+    assert body == b""
+    assert int(response.headers["Content-Length"]) == len("<html>Graph</html>")
+
+    connection = HTTPConnection("127.0.0.1", context_server.server_port, timeout=2)
+    connection.request("GET", "/api/viz/wrong.html?t=read-secret")
+    response = connection.getresponse()
+    response.read()
+    connection.close()
+    assert response.status == 404
+
+    connection = HTTPConnection("127.0.0.1", context_server.server_port, timeout=2)
+    connection.request("GET", "/api/viz/graph.html")
+    response = connection.getresponse()
+    response.read()
+    connection.close()
+    assert response.status == 401
