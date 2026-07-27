@@ -29,7 +29,7 @@ npm --prefix ui run build
 uv run purpory update .
 uv run purpory remember decision.database.engine \
   --value "PostgreSQL is the transactional source of truth" \
-  --kind decision
+  --category intent
 
 PURPORY_SESSION=agent-1 uv run purpory prepare \
   "인증 흐름이 데이터베이스와 어떻게 연결되는지 설명해줘" \
@@ -42,6 +42,8 @@ The product context surface has three commands:
 
 ```text
 purpory remember <key> --value <text> | --source <pointer>
+purpory remember <key> --value <text> --category intent|knowledge|reference
+purpory remember <key> --value <text> --global-request --rationale <text>
 purpory remember --list [--prefix <key>]
 purpory remember --batch <changes.json> [--apply]
 purpory prepare "<request>" [--path <active-path>] [--budget 2000] [--no-retain-input]
@@ -52,6 +54,10 @@ purpory dashboard [--port <port>]
 again with the new need and the same session ID. The delivery history suppresses unchanged context
 that session has already received, so the protocol does not require public catalog, search, expand,
 path, pull, or push stages.
+
+Retrieval is deterministic and explainable. It records raw observed-use counters, applies a
+90-day review signal rather than expiration, and exposes Korean/English developer-memory term
+expansions in search metadata instead of relying on an LLM-generated utility score.
 
 Local CLI and Claude Code/Codex preflight requests retain their input text in the decision audit by
 default so feedback can be interpreted. Use `--no-retain-input` for the CLI or set
@@ -78,7 +84,7 @@ to review and trust project hooks with `/hooks`. See
 
 ## Agent API
 
-Agents use one mutation route with `X-Purpory-Agent-Token`:
+Agents use one preparation route with `X-Purpory-Agent-Token`:
 
 ```http
 POST /api/context/prepare
@@ -98,6 +104,12 @@ ready rendered context, omissions, audit identity, and optional clarification. I
 search, graph connection, expansion, path, rendering, budgeting, hashing, and deduplication remain
 domain primitives rather than public protocol steps.
 
+Agents may also raise non-authoritative `POST /api/global-memory/requests` and
+`POST /api/memory/reviews` proposals. They cannot edit, approve, reject, or resolve them. Project
+memory writes apply immediately; a global write is impossible until a human inspects every field,
+optionally edits it, and explicitly approves it in the dashboard. Rejected proposals remain in the
+audit.
+
 ## Local Model
 
 The routing model is optional. Deterministic fallback remains usable when it is absent.
@@ -110,8 +122,8 @@ purpory model status
 ```
 
 Purpory reuses the Hugging Face disk cache and keeps weights in one warm `transformers serve`
-process. The model emits constrained JSON only; Purpory validates its terms, selects canonical
-nodes, applies the token budget, and records the exact delivered bytes. See
+process. The small classifier emits exactly one of `SKIP`, `SEARCH`, or `ASK`; Purpory performs
+deterministic retrieval, applies the token budget, and records the exact delivered bytes. See
 [`docs/GATEWAY.md`](docs/GATEWAY.md).
 
 ## Code Graph
@@ -147,6 +159,8 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) and
 
 - The dashboard and managed inference bind only to `127.0.0.1`.
 - Read, human mutation, and agent execution tokens have separate privileges.
+- Agent tokens can raise reviewable proposals but cannot curate or approve human memory.
+- Routing review is exception-based; routine decisions remain auditable without requiring labels.
 - Query tokens never authorize mutations; cross-origin mutations are rejected.
 - Request logs contain only the method and sanitized path.
 - Human-owned memory cannot be overwritten by derived graph seeds.

@@ -52,7 +52,8 @@ Purpory validates the proposal against actual memory and code evidence before pr
 
 Qwen runs in a warm loopback `transformers serve` process. Purpory owns the installation manifest,
 pinned revision, PID, endpoint, readiness checks, and logs. The model never selects authoritative
-node IDs, and its response must pass a closed JSON schema. Provider construction and process side
+node IDs, and its response must be exactly one closed enum value. Purpory expands it into a
+schema-validated internal proposal. Provider construction and process side
 effects stay in CLI adapters; `ContextService` receives the provider as a dependency.
 
 ### Naming Contract
@@ -79,8 +80,8 @@ the dashboard does not require `graph.html` to display structural context.
 
 `context_nodes`, `context_edges`, and `context_events` are canonical. Code symbols, memories,
 sessions, paths, and requests use the same identity and relationship machinery. Indexed operational
-projections support fast topic views, current session delivery, requests, and recall without
-creating a second source of truth.
+projections support fast topic views, current session delivery, requests, memory versions, evidence
+reviews, raw usage, global approvals, and recall without creating a second source of truth.
 
 ### Storage Vocabulary
 
@@ -97,11 +98,17 @@ or delete it.
 Delivery events store the SHA-256 of the exact rendered artifact. Pointer files and graph slices are
 resolved before hashing, so later source changes never pretend an agent saw new bytes.
 
-Manual `remember <key>` entries remain global. Reconciliation batches are project-scoped and use
-the existing `decision`, `note`, and `doc-ref` kinds; a project value overrides a global value with
-the same key only inside that project. Preview is read-only, apply is one SQLite transaction, and
-an expected content hash prevents silent concurrent overwrites. Applied before/after values are
-recorded as one `memory.reconciled` event without storing a transcript.
+Manual `remember <key>` entries and reconciliation batches are project-scoped. User categories
+`intent`, `knowledge`, and `reference` map to the internal `decision`, `note`, and `doc-ref` kinds;
+a project value overrides a global value with the same key only inside that project. Preview is
+read-only, apply is one SQLite transaction, and an expected content hash prevents silent concurrent
+overwrites. Actual changes retain one current and at most two superseded versions.
+
+Global memory can be written only through a separate request. Agents may propose it; humans inspect
+and may edit every field before approving or rejecting. Initial, proposed, and final values remain
+auditable. A newer approval of the same key makes an older pending request stale until a human saves
+it again. Changed external evidence creates a content-addressed `needs_review` item instead of
+silently changing intent.
 
 ## Public Contract
 
@@ -110,7 +117,8 @@ Purpory deliberately exposes one context-preparation operation:
 1. CLI: `purpory prepare "<request>"`.
 2. HTTP: `POST /api/context/prepare`.
 
-`remember` stores human knowledge, lists visible memory, or previews/applies a small atomic batch;
+`remember` stores project knowledge, lists visible memory, previews/applies an atomic batch, or
+raises a global-memory approval request;
 `dashboard` opens supervision. Discovery, search, graph
 connection, expansion, path finding, rendering, budgeting, and delivery are internal domain
 operations. Native Claude Code and Codex hooks invoke `prepare` before each user prompt; other
@@ -123,7 +131,7 @@ adapters may call it directly with a stable session ID.
    fallback.
 3. Generate bounded FTS5 and active-path candidate pools from canonical SQLite nodes.
 4. Validate query terms against the returned vocabulary and rank by lexical evidence, path,
-   authority, freshness, recall, and prior session delivery.
+   authority, 90-day freshness, recall, prior session delivery, and raw observed-use counters.
 5. Connect distinct concepts through bounded graph paths when useful.
 6. Resolve inline memory, live pointers, or bounded structural neighborhoods.
 7. Pack evidence under the token budget, hash exact bytes, and record delivery events.
@@ -140,4 +148,6 @@ adapters may call it directly with a stable session ID.
 - Local CLI and native preflight input text is retained by default for meaningful audit feedback;
   callers can opt out, and its SHA-256 is always audited.
 - Agent-token HTTP requests remain hash-only and cannot enable raw-input retention.
+- Agent tokens can create reviewable global-memory and evidence-conflict proposals but cannot edit,
+  approve, reject, or resolve them.
 - Model failure is audited and falls back to deterministic evidence search.
