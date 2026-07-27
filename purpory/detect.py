@@ -483,8 +483,12 @@ def extract_pdf_text(path: Path) -> str:
             if text:
                 pages.append(text)
         return "\n".join(pages)
-    except Exception:
-        return ""
+    except ImportError as exc:
+        raise RuntimeError(
+            'PDF extraction requires pypdf; install it with `pip install "purpory[pdf]"`'
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"could not extract PDF text from {path}: {exc}") from exc
 
 
 def docx_to_markdown(path: Path) -> str:
@@ -523,10 +527,13 @@ def docx_to_markdown(path: Path) -> str:
             for row in rows[1:]:
                 lines.append("| " + " | ".join(row) + " |")
         return "\n".join(lines)
-    except ImportError:
-        return ""
-    except Exception:
-        return ""
+    except ImportError as exc:
+        raise RuntimeError(
+            'DOCX extraction requires python-docx; install it with '
+            '`pip install "purpory[office]"`'
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"could not convert DOCX file {path}: {exc}") from exc
 
 
 def xlsx_to_markdown(path: Path) -> str:
@@ -555,10 +562,13 @@ def xlsx_to_markdown(path: Path) -> str:
                     sections.append("| " + " | ".join(row) + " |")
         wb.close()
         return "\n".join(sections)
-    except ImportError:
-        return ""
-    except Exception:
-        return ""
+    except ImportError as exc:
+        raise RuntimeError(
+            'XLSX extraction requires openpyxl; install it with '
+            '`pip install "purpory[office]"`'
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"could not convert XLSX file {path}: {exc}") from exc
 
 
 def xlsx_extract_structure(path: Path) -> dict:
@@ -572,13 +582,16 @@ def xlsx_extract_structure(path: Path) -> dict:
 
     try:
         import openpyxl
-    except ImportError:
-        return {"nodes": [], "edges": []}
+    except ImportError as exc:
+        raise RuntimeError(
+            'XLSX extraction requires openpyxl; install it with '
+            '`pip install "purpory[office]"`'
+        ) from exc
 
     try:
         wb = openpyxl.load_workbook(str(path), read_only=False, data_only=True)
-    except Exception:
-        return {"nodes": [], "edges": []}
+    except Exception as exc:
+        raise RuntimeError(f"could not load XLSX structure from {path}: {exc}") from exc
 
     # F-035: typo fix — was `_re.sub` (NameError, but unreachable because the
     # whole xlsx codepath is currently behind a feature flag / not yet wired
@@ -631,8 +644,10 @@ def xlsx_extract_structure(path: Path) -> dict:
                                     col_nid = _nid(stem, tbl.name, str(col_name))
                                     _add(col_nid, str(col_name))
                                     _edge(tbl_nid, col_nid, "contains")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"could not extract table structure from {path}: {exc}"
+                        ) from exc
         else:
             # Fallback: first non-empty row as column headers
             for row in ws.iter_rows(max_row=1, values_only=True):
@@ -643,10 +658,7 @@ def xlsx_extract_structure(path: Path) -> dict:
                         _edge(sheet_nid, col_nid, "contains")
                 break
 
-    try:
-        wb.close()
-    except Exception:
-        pass
+    wb.close()
 
     return {"nodes": nodes, "edges": edges}
 
@@ -654,8 +666,8 @@ def xlsx_extract_structure(path: Path) -> dict:
 def convert_office_file(path: Path, out_dir: Path) -> Path | None:
     """Convert a .docx or .xlsx to a markdown sidecar in out_dir.
 
-    Returns the path of the converted .md file, or None if conversion failed
-    or the required library is not installed.
+    Returns the path of the converted .md file, or None when the converter
+    produced no readable text. Dependency, parse, and I/O failures propagate.
     """
     ext = path.suffix.lower()
     if ext == ".docx":
@@ -687,12 +699,11 @@ def convert_office_file(path: Path, out_dir: Path) -> Path | None:
     # when the source is newer bumps the sidecar's mtime/content, which the
     # incremental hash check then correctly picks up. An unchanged source keeps
     # its (newer-or-equal) sidecar untouched so it never churns (#1226).
-    try:
-        if out_path.exists() and os.stat(_os_path(out_path)).st_mtime >= os.stat(_os_path(path)).st_mtime:
-            return out_path
-    except OSError:
-        if out_path.exists():
-            return out_path
+    if (
+        out_path.exists()
+        and os.stat(_os_path(out_path)).st_mtime >= os.stat(_os_path(path)).st_mtime
+    ):
+        return out_path
     out_path.write_text(
         f"<!-- converted from {path.name} -->\n\n{text}",
         encoding="utf-8",
@@ -701,18 +712,15 @@ def convert_office_file(path: Path, out_dir: Path) -> Path | None:
 
 
 def count_words(path: Path) -> int:
-    try:
-        ext = path.suffix.lower()
-        if ext == ".pdf":
-            return len(extract_pdf_text(path).split())
-        if ext == ".docx":
-            return len(docx_to_markdown(path).split())
-        if ext == ".xlsx":
-            return len(xlsx_to_markdown(path).split())
-        with open(_os_path(path), encoding="utf-8", errors="ignore") as f:
-            return len(f.read().split())
-    except Exception:
-        return 0
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        return len(extract_pdf_text(path).split())
+    if ext == ".docx":
+        return len(docx_to_markdown(path).split())
+    if ext == ".xlsx":
+        return len(xlsx_to_markdown(path).split())
+    with open(_os_path(path), encoding="utf-8", errors="ignore") as f:
+        return len(f.read().split())
 
 
 # Directory names to always skip - venvs, caches, build artifacts, deps

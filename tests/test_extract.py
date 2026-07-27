@@ -1261,6 +1261,85 @@ def test_extract_parallel_returns_false_on_broken_pool(tmp_path, monkeypatch, ca
     assert "__main__" in out, "warning must hint at the Windows __main__ guard idiom"
 
 
+def test_extract_parallel_propagates_individual_worker_failure(tmp_path, monkeypatch):
+    """A single failed file must fail the AST pass instead of becoming an empty slot."""
+    import concurrent.futures
+    from purpory import extract as extract_mod
+
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, *args, **kwargs):
+            future = concurrent.futures.Future()
+            future.set_exception(RuntimeError("worker defect"))
+            return future
+
+    monkeypatch.setattr(
+        concurrent.futures,
+        "ProcessPoolExecutor",
+        lambda *args, **kwargs: FakePool(),
+    )
+    source = tmp_path / "source.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="AST extraction worker failed"):
+        extract_mod._extract_parallel(
+            [(0, source)],
+            [None],
+            tmp_path,
+            2,
+            1,
+        )
+
+
+def test_safe_extract_propagates_extractor_defects(tmp_path):
+    from purpory.extract import _safe_extract
+
+    def broken(_path):
+        raise RuntimeError("extractor defect")
+
+    with pytest.raises(RuntimeError, match="extractor defect"):
+        _safe_extract(broken, tmp_path / "source.py")
+
+
+@pytest.mark.parametrize(
+    ("function_name", "suffix", "message"),
+    [
+        ("extract_svelte", ".svelte", "Svelte import extraction failed"),
+        ("extract_astro", ".astro", "Astro import extraction failed"),
+    ],
+)
+def test_template_import_pass_failures_are_not_hidden(
+    tmp_path,
+    monkeypatch,
+    function_name,
+    suffix,
+    message,
+):
+    from purpory import extract as extract_mod
+
+    monkeypatch.setattr(
+        extract_mod,
+        "_extract_generic",
+        lambda *_args, **_kwargs: {"nodes": [], "edges": []},
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read failed")),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        getattr(extract_mod, function_name)(tmp_path / f"component{suffix}")
+
+
 # ---------------------------------------------------------------------------
 # Bash extractor tests (#866)
 # ---------------------------------------------------------------------------

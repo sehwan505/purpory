@@ -130,7 +130,8 @@ try:
         _txt = _saved.read_text(encoding='utf-8').strip()
         if _txt:
             _root = Path(_txt)
-    _rebuild_code(_root, changed_paths=changed, force=_force)
+    if not _rebuild_code(_root, changed_paths=changed, force=_force):
+        raise RuntimeError('Purpory rebuild reported failure')
     # Refresh the work-memory lessons doc when saved Q&A outcomes exist
     # (best-effort; never fails the hook).
     try:
@@ -171,7 +172,8 @@ try:
         _txt = _saved.read_text(encoding='utf-8').strip()
         if _txt:
             _root = Path(_txt)
-    _rebuild_code(_root, force=_force)
+    if not _rebuild_code(_root, force=_force):
+        raise RuntimeError('Purpory rebuild reported failure')
     # Refresh the work-memory lessons doc when saved Q&A outcomes exist
     # (best-effort; never fails the hook).
     try:

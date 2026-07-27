@@ -40,8 +40,8 @@ def backup_if_protected(out_dir: Path) -> "Path | None":
     - .purpory_labels.json contains at least one non-default community label
       (graph has been curated by a human or skill).
 
-    Returns the backup folder path, or None if no backup was taken.
-    Never raises — backup failure prints a warning but never blocks the write.
+    Returns the backup folder path, or None if no backup was needed.
+    A required backup failure raises and blocks the protected overwrite.
     Set PURPORY_NO_BACKUP=1 to disable.
     """
     if os.environ.get("PURPORY_NO_BACKUP"):
@@ -56,9 +56,11 @@ def backup_if_protected(out_dir: Path) -> "Path | None":
     if labels_file.exists():
         try:
             labels = json.loads(labels_file.read_text(encoding="utf-8"))
-            is_curated = any(v != f"Community {k}" for k, v in labels.items())
-        except Exception:
-            pass
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"could not inspect curated labels in {labels_file}: {exc}") from exc
+        if not isinstance(labels, dict):
+            raise ValueError(f"community labels must contain a JSON object: {labels_file}")
+        is_curated = any(v != f"Community {k}" for k, v in labels.items())
 
     if not is_semantic and not is_curated:
         return None
@@ -85,21 +87,14 @@ def backup_if_protected(out_dir: Path) -> "Path | None":
         for name in _BACKUP_ARTIFACTS:
             src = out / name
             if src.exists():
-                try:
-                    shutil.copy2(src, backup_dir / name)
-                    copied += 1
-                except Exception:
-                    pass
-        if copied:
-            print(f"[purpory] backed up {reason} graph ({copied} files) -> {backup_dir.name}/")
-        return backup_dir
-    except Exception as exc:
-        import sys
-
-        print(
-            f"[purpory] warning: backup failed ({exc}) - continuing with overwrite", file=sys.stderr
-        )
-        return None
+                shutil.copy2(src, backup_dir / name)
+                copied += 1
+    except (OSError, shutil.Error) as exc:
+        raise RuntimeError(f"could not back up protected graph in {out}: {exc}") from exc
+    if copied == 0:
+        raise RuntimeError(f"protected graph in {out} had no readable artifacts to back up")
+    print(f"[purpory] backed up {reason} graph ({copied} files) -> {backup_dir.name}/")
+    return backup_dir
 
 
 def _obsidian_tag(name: str) -> str:

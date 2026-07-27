@@ -1,4 +1,4 @@
-"""Community detection on NetworkX graphs. Uses Leiden (graspologic) if available, falls back to Louvain (networkx). Splits oversized communities. Returns cohesion scores."""
+"""Deterministic community detection with an explicitly selected algorithm."""
 from __future__ import annotations
 import contextlib
 import inspect
@@ -19,11 +19,20 @@ def _suppress_output():
     return contextlib.redirect_stdout(io.StringIO())
 
 
-def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
+_CLUSTER_ALGORITHMS = frozenset({"louvain", "leiden"})
+
+
+def _partition(
+    G: nx.Graph,
+    resolution: float = 1.0,
+    *,
+    algorithm: str = "louvain",
+) -> dict[str, int]:
     """Run community detection. Returns {node_id: community_id}.
 
-    Tries Leiden (graspologic) first — best quality.
-    Falls back to Louvain (built into networkx) if graspologic is not installed.
+    ``algorithm`` is explicit so installing an optional package never changes
+    graph structure. Leiden requires the ``purpory[leiden]`` extra; Louvain is
+    provided by NetworkX and is the stable default.
 
     resolution > 1.0 → more, smaller communities.
     resolution < 1.0 → fewer, larger communities.
@@ -44,8 +53,20 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
     for src, tgt, attrs in edge_rows:
         stable.add_edge(src, tgt, **attrs)
 
-    try:
-        from graspologic.partition import leiden
+    if algorithm not in _CLUSTER_ALGORITHMS:
+        raise ValueError(
+            f"unsupported clustering algorithm {algorithm!r}; "
+            f"choose one of {sorted(_CLUSTER_ALGORITHMS)}"
+        )
+
+    if algorithm == "leiden":
+        try:
+            from graspologic.partition import leiden
+        except ImportError as exc:
+            raise RuntimeError(
+                'Leiden clustering requires graspologic; install it with '
+                '`pip install "purpory[leiden]"` or choose algorithm="louvain"'
+            ) from exc
         lsig = inspect.signature(leiden).parameters
         kwargs: dict = {}
         if "random_seed" in lsig:
@@ -64,10 +85,7 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
         finally:
             sys.stderr = old_stderr
         return result
-    except ImportError:
-        pass
 
-    # Fallback: networkx louvain (available since networkx 2.7).
     # Inspect kwargs to stay compatible across NetworkX versions — max_level
     # was added in a later release and prevents hangs on large sparse graphs.
     kwargs: dict = {"seed": 42, "threshold": 1e-4, "resolution": resolution}
@@ -137,23 +155,31 @@ def cluster(
     G: nx.Graph,
     resolution: float = 1.0,
     exclude_hubs_percentile: float | None = None,
+    *,
+    algorithm: str = "louvain",
 ) -> dict[int, list[str]]:
-    """Run Leiden community detection. Returns {community_id: [node_ids]}.
+    """Run the selected community algorithm. Returns {community_id: [node_ids]}.
 
     Community IDs are stable across runs: 0 = largest community after splitting.
     Oversized communities (> 25% of graph nodes, min 10) are split by running
-    a second Leiden pass on the subgraph.
+    a second pass with the same explicitly selected algorithm on the subgraph.
 
     Accepts directed or undirected graphs. DiGraphs are converted to undirected
-    internally since Louvain/Leiden require undirected input.
+    internally since Louvain and Leiden require undirected input.
 
-    resolution: passed to Leiden/Louvain. >1.0 = more smaller communities,
+    resolution: passed to the selected algorithm. >1.0 = more smaller communities,
         <1.0 = fewer larger communities. Default 1.0.
+    algorithm: ``"louvain"`` (default) or explicit ``"leiden"``.
     exclude_hubs_percentile: if set (0-100), nodes whose degree exceeds this
         percentile are excluded from partitioning and reattached to their
         majority-vote neighbour community afterwards. Useful for staging/utility
         super-hubs that inflate god-node rankings (#919).
     """
+    if algorithm not in _CLUSTER_ALGORITHMS:
+        raise ValueError(
+            f"unsupported clustering algorithm {algorithm!r}; "
+            f"choose one of {sorted(_CLUSTER_ALGORITHMS)}"
+        )
     if G.number_of_nodes() == 0:
         return {}
     if G.is_directed():
@@ -180,7 +206,7 @@ def cluster(
 
     raw: dict[int, list[str]] = {}
     if connected.number_of_nodes() > 0:
-        partition = _partition(connected, resolution=resolution)
+        partition = _partition(connected, resolution=resolution, algorithm=algorithm)
         for node, cid in partition.items():
             raw.setdefault(cid, []).append(node)
 
@@ -213,7 +239,9 @@ def cluster(
     final_communities: list[list[str]] = []
     for nodes in raw.values():
         if len(nodes) > max_size:
-            final_communities.extend(_split_community(G, nodes))
+            final_communities.extend(
+                _split_community(G, nodes, resolution=resolution, algorithm=algorithm)
+            )
         else:
             final_communities.append(nodes)
 
@@ -222,7 +250,12 @@ def cluster(
     second_pass: list[list[str]] = []
     for nodes in final_communities:
         if len(nodes) >= _COHESION_SPLIT_MIN_SIZE and cohesion_score(G, nodes) < _COHESION_SPLIT_THRESHOLD:
-            splits = _split_community(G, nodes)
+            splits = _split_community(
+                G,
+                nodes,
+                resolution=resolution,
+                algorithm=algorithm,
+            )
             second_pass.extend(splits if len(splits) > 1 else [nodes])
         else:
             second_pass.append(nodes)
@@ -238,22 +271,29 @@ def cluster(
     return {i: sorted(nodes) for i, nodes in enumerate(final_communities)}
 
 
-def _split_community(G: nx.Graph, nodes: list[str]) -> list[list[str]]:
-    """Run a second Leiden pass on a community subgraph to split it further."""
+def _split_community(
+    G: nx.Graph,
+    nodes: list[str],
+    *,
+    resolution: float = 1.0,
+    algorithm: str = "louvain",
+) -> list[list[str]]:
+    """Run a second explicit partitioning pass on a community subgraph."""
     subgraph = G.subgraph(nodes)
     if subgraph.number_of_edges() == 0:
         # No edges - split into individual nodes
         return [[n] for n in sorted(nodes)]
-    try:
-        sub_partition = _partition(subgraph)
-        sub_communities: dict[int, list[str]] = {}
-        for node, cid in sub_partition.items():
-            sub_communities.setdefault(cid, []).append(node)
-        if len(sub_communities) <= 1:
-            return [sorted(nodes)]
-        return [sorted(v) for v in sub_communities.values()]
-    except Exception:
+    sub_partition = _partition(
+        subgraph,
+        resolution=resolution,
+        algorithm=algorithm,
+    )
+    sub_communities: dict[int, list[str]] = {}
+    for node, cid in sub_partition.items():
+        sub_communities.setdefault(cid, []).append(node)
+    if len(sub_communities) <= 1:
         return [sorted(nodes)]
+    return [sorted(v) for v in sub_communities.values()]
 
 
 def cohesion_score(G: nx.Graph, community_nodes: list[str]) -> float:

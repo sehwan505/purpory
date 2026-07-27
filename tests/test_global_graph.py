@@ -90,6 +90,18 @@ def test_prune_repo_returns_zero_if_not_present():
 
 # ── global_graph.py ───────────────────────────────────────────────────────────
 
+def test_corrupt_global_manifest_fails_without_replacing_it(tmp_path):
+    from purpory.global_graph import _load_manifest
+
+    manifest = tmp_path / "global-manifest.json"
+    original = "{broken"
+    manifest.write_text(original, encoding="utf-8")
+    with patch("purpory.global_graph._GLOBAL_MANIFEST", manifest):
+        with pytest.raises(RuntimeError, match="repair or remove it explicitly"):
+            _load_manifest()
+    assert manifest.read_text(encoding="utf-8") == original
+
+
 def test_global_add_creates_global_graph(tmp_path):
     src_graph = tmp_path / "graph.json"
     G = _make_graph([{"id": "userservice", "label": "UserService", "source_file": "src/user.py"}])

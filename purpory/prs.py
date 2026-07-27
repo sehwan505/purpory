@@ -152,7 +152,7 @@ def _gh(*args: str) -> list | dict | None:
 
 
 def _detect_default_branch(repo: str | None = None) -> str:
-    """Auto-detect the repo's default branch via gh, then git, then fall back to 'main'."""
+    """Detect the repository default branch without guessing a conventional name."""
     # Try gh first — works for any repo, not just the current directory
     args = ["repo", "view", "--json", "defaultBranchRef"]
     if repo:
@@ -160,7 +160,12 @@ def _detect_default_branch(repo: str | None = None) -> str:
     data = _gh(*args)
     if data and data.get("defaultBranchRef", {}).get("name"):
         return data["defaultBranchRef"]["name"]
-    # Fall back to git symbolic-ref for the current repo
+    if repo:
+        raise RuntimeError(
+            f"could not detect the default branch for {repo!r} via GitHub; "
+            "pass --base explicitly"
+        )
+    # For the current repository only, ask the local remote-tracking ref.
     try:
         result = subprocess.run(
             ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
@@ -169,10 +174,19 @@ def _detect_default_branch(repo: str | None = None) -> str:
         if result.returncode == 0:
             # refs/remotes/origin/main → main
             ref = result.stdout.strip()
-            return ref.split("/")[-1] if ref else "main"
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return "main"
+            if ref:
+                return ref.split("/")[-1]
+            raise RuntimeError("git returned an empty origin/HEAD symbolic ref")
+        detail = result.stderr.strip() or f"git exited with code {result.returncode}"
+        raise RuntimeError(
+            "could not detect the default branch from GitHub or origin/HEAD "
+            f"({detail}); pass --base explicitly"
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise RuntimeError(
+            "could not detect the default branch from GitHub or git; "
+            "pass --base explicitly"
+        ) from exc
 
 
 _CI_FAILURE_CONCLUSIONS = frozenset({"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"})

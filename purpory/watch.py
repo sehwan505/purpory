@@ -49,8 +49,8 @@ def _drain_pending(out_dir: Path) -> list[Path]:
         return []
     try:
         raw = pending.read_text(encoding="utf-8")
-    except OSError:
-        return []
+    except OSError as exc:
+        raise RuntimeError(f"could not read queued Purpory changes from {pending}: {exc}") from exc
     # Unlink BEFORE returning so a crash between read and process retains the
     # data in the next caller's view via the lines we are about to return —
     # i.e. losing the file after reading is fine, losing it before would be a
@@ -79,31 +79,34 @@ _BUILD_CONFIG_FILENAME = ".purpory_build.json"
 def _write_build_config(out_dir: Path, *, excludes: "list[str] | None") -> None:
     """Persist build options (currently ``--exclude`` patterns) under ``out_dir``.
 
-    Best-effort and non-clobbering: with no excludes it leaves any existing file
-    untouched, so a plain rebuild never erases patterns a prior extract recorded.
+    With no excludes it leaves any existing file untouched, so a plain rebuild
+    never erases patterns a prior extract recorded. Write failures propagate
+    because losing this state would silently re-include excluded paths.
     """
     if not excludes:
         return
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / _BUILD_CONFIG_FILENAME).write_text(
-            json.dumps({"excludes": list(excludes)}), encoding="utf-8"
-        )
-    except OSError:
-        pass
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / _BUILD_CONFIG_FILENAME).write_text(
+        json.dumps({"excludes": list(excludes)}), encoding="utf-8"
+    )
 
 
 def _read_build_excludes(out_dir: Path) -> list[str]:
     """Return the persisted ``--exclude`` patterns for this graph, or []."""
-    try:
-        path = out_dir / _BUILD_CONFIG_FILENAME
-        if path.is_file():
+    path = out_dir / _BUILD_CONFIG_FILENAME
+    if path.is_file():
+        try:
             cfg = json.loads(path.read_text(encoding="utf-8"))
-            ex = cfg.get("excludes") if isinstance(cfg, dict) else None
-            if isinstance(ex, list):
-                return [str(x) for x in ex if isinstance(x, str) and x]
-    except (OSError, json.JSONDecodeError):
-        pass
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"could not read Purpory build config from {path}: {exc}") from exc
+        if not isinstance(cfg, dict):
+            raise ValueError(f"Purpory build config must contain a JSON object: {path}")
+        ex = cfg.get("excludes")
+        if ex is None:
+            return []
+        if not isinstance(ex, list) or not all(isinstance(x, str) for x in ex):
+            raise ValueError(f"Purpory build config excludes must be a string array: {path}")
+        return [x for x in ex if x]
     return []
 
 
@@ -1217,15 +1220,12 @@ def _rebuild_code(
 
         (out / ".purpory_root").write_text(str(watch_path), encoding="utf-8")
 
-        try:
-            from purpory.detect import save_manifest
-            # Full-scan save: prune excluded-but-alive rows (#1908).
-            save_manifest(
-                detected["files"], kind="ast", root=project_root,
-                scan_corpus={f for _fl in detected["files"].values() for f in _fl},
-            )
-        except Exception:
-            pass
+        from purpory.detect import save_manifest
+        # Full-scan save: prune excluded-but-alive rows (#1908).
+        save_manifest(
+            detected["files"], kind="ast", root=project_root,
+            scan_corpus={f for _fl in detected["files"].values() for f in _fl},
+        )
 
         # to_html raises ValueError for graphs > MAX_NODES_FOR_VIZ (5000).
         # Wrap so core outputs (graph.json + GRAPH_REPORT.md) always land.
@@ -1385,8 +1385,8 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
                 print(f"\n[purpory watch] {len(batch)} file(s) changed")
                 has_non_code = _has_non_code(batch)
                 has_code = any(p.suffix.lower() in _CODE_EXTENSIONS for p in batch)
-                if has_code:
-                    _rebuild_code(watch_path)
+                if has_code and not _rebuild_code(watch_path):
+                    raise RuntimeError("Purpory watch rebuild failed")
                 if has_non_code:
                     _notify_only(watch_path)
     except KeyboardInterrupt:

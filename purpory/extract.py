@@ -265,18 +265,8 @@ def _raise_recursion_limit() -> None:
 
 
 def _safe_extract(extractor: Callable, path: Path) -> dict:
-    try:
-        return extractor(path)
-    except RecursionError:
-        print(f"  warning: skipped {path} (recursion limit exceeded)", file=sys.stderr, flush=True)
-        return {"nodes": [], "edges": [], "error": "recursion_limit_exceeded"}
-    except Exception as e:
-        if os.environ.get("PURPORY_DEBUG"):
-            import traceback
-
-            traceback.print_exc(file=sys.stderr)
-        print(f"  warning: skipped {path} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
-        return {"nodes": [], "edges": [], "error": f"{type(e).__name__}: {e}"}
+    """Run one extractor without converting defects into an apparently valid empty result."""
+    return extractor(path)
 
 
 def _file_node_id(rel_path: Path) -> str:
@@ -1643,8 +1633,8 @@ def extract_svelte(path: Path) -> dict:
                     }
                 )
                 existing_ids.add(node_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"Svelte import extraction failed for {path}: {exc}") from exc
     return result
 
 
@@ -1788,8 +1778,8 @@ def extract_astro(path: Path) -> dict:
                     }
                 )
                 existing_ids.add(node_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"Astro import extraction failed for {path}: {exc}") from exc
     return result
 
 
@@ -4817,11 +4807,9 @@ def _extract_parallel(
                     per_file[idx] = result
                 except Exception as exc:
                     pos = futures[future]
-                    print(
-                        f"  warning: worker failed for {work_items[pos][1]}: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    raise RuntimeError(
+                        f"AST extraction worker failed for {work_items[pos][1]}: {exc}"
+                    ) from exc
                 done_count += 1
                 if total_files >= _PROGRESS_INTERVAL and done_count % _PROGRESS_INTERVAL == 0:
                     print(

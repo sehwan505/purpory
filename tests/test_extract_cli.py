@@ -79,6 +79,36 @@ def test_extract_exits_nonzero_when_all_semantic_chunks_fail(
     )
 
 
+def test_extract_exits_nonzero_when_ast_extractor_fails(monkeypatch, tmp_path, capsys):
+    corpus = _make_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(
+        "purpory.extract.extract",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("AST defect")),
+    )
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "purpory",
+            "extract",
+            str(corpus),
+            "--backend",
+            "claude",
+            "--out",
+            str(out_dir),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        mainmod.main()
+
+    assert exc_info.value.code == 1
+    assert "AST extraction failed: AST defect" in capsys.readouterr().err
+    assert not (out_dir / "purpory-out" / "graph.json").exists()
+
+
 def test_extract_succeeds_when_at_least_one_chunk_completes(
     monkeypatch, tmp_path
 ):

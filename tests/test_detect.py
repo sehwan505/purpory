@@ -1819,6 +1819,8 @@ def test_convert_office_file_hash_stable_across_nfc_nfd(tmp_path, monkeypatch):
 
     nfc_path = base / nfc_name
     nfd_path = base / nfd_name
+    base.mkdir()
+    nfc_path.write_bytes(b"placeholder")
 
     out_nfc = detect_mod.convert_office_file(nfc_path, out_dir)
     out_nfd = detect_mod.convert_office_file(nfd_path, out_dir)
@@ -1836,6 +1838,7 @@ def test_convert_office_file_does_not_rewrite_existing_sidecar(tmp_path, monkeyp
 
     out_dir = tmp_path / "converted"
     src = tmp_path / "doc.docx"
+    src.write_bytes(b"placeholder")
 
     first = detect_mod.convert_office_file(src, out_dir)
     assert first is not None
