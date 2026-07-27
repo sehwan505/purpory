@@ -8,12 +8,15 @@ import {
   Clock3,
   Database,
   GitFork,
+  Globe2,
+  History,
   LayoutDashboard,
   LockKeyhole,
   Network,
   Plus,
   RefreshCw,
   Route,
+  Save,
   Search,
   Send,
   ShieldCheck,
@@ -38,16 +41,23 @@ import { Input, Textarea } from "@/components/ui/input"
 import {
   confirmTopic,
   createTopic,
+  decideGlobalMemoryRequest,
   deleteTopic,
+  editGlobalMemoryRequest,
   getContextDecisions,
+  getGlobalMemoryRequests,
   getGraph,
+  getMemoryReport,
+  getMemoryVersions,
   getModelStatus,
+  getNeedsReviews,
   getRecall,
   getRequests,
   getView,
   getVizUrl,
   prepareContext,
   resolveRequest,
+  resolveNeedsReview,
   submitContextFeedback,
   subscribeToEvents,
 } from "@/lib/api"
@@ -56,8 +66,12 @@ import type {
   ContextDecision,
   ContextPreparation,
   ContextRequest,
+  GlobalMemoryRequest,
   GraphPayload,
+  MemoryReportDay,
+  MemoryVersion,
   ModelStatus,
+  NeedsReview,
   Recall,
   Session,
   Topic,
@@ -65,7 +79,7 @@ import type {
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-type Page = "overview" | "delivery" | "context" | "sessions" | "requests" | "graph"
+type Page = "overview" | "delivery" | "context" | "memory" | "sessions" | "requests" | "graph"
 
 const pageMeta: Record<Page, { eyebrow: string; title: string; description: string }> = {
   overview: {
@@ -82,6 +96,11 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
     eyebrow: "Durable memory",
     title: "Context library",
     description: "Human intent and live references stored at stable logical addresses.",
+  },
+  memory: {
+    eyebrow: "Memory governance",
+    title: "Memory review",
+    description: "Approve global writes, resolve evidence conflicts, and audit project memory changes.",
   },
   sessions: {
     eyebrow: "Exact provenance",
@@ -101,6 +120,7 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
 }
 
 const emptyView: ViewResponse = {
+  project: "",
   topics: [],
   sessions: [],
   diagnostics: { database: "", integrity: "unknown", schemaVersion: 0, counts: {} },
@@ -255,7 +275,7 @@ function TopicTable({ topics, onRefresh }: { topics: Topic[]; onRefresh: () => P
           <thead className="border-y border-line bg-panel-raised text-dim">
             <tr className="fine-label">
               <th className="w-[48%] px-6 py-3.5 font-semibold">Memory</th>
-              <th className="px-4 py-3.5 font-semibold">Type</th>
+              <th className="px-4 py-3.5 font-semibold">Category</th>
               <th className="px-4 py-3.5 font-semibold">Authority</th>
               <th className="px-4 py-3.5 font-semibold">Updated</th>
               <th className="px-6 py-3.5 text-right font-semibold">Actions</th>
@@ -272,6 +292,14 @@ function TopicTable({ topics, onRefresh }: { topics: Topic[]; onRefresh: () => P
                   {topic.value && topic.source && (
                     <p className="mt-1.5 font-mono text-[10px] text-dim">{topic.source}</p>
                   )}
+                  <div className="mt-2 flex gap-2 text-[10px] text-dim">
+                    <span>{topic.versionCount} versions</span>
+                    <span>{topic.usage.selectedCount} selections</span>
+                    <span>{topic.usage.expandedCount} expansions</span>
+                    {topic.needsReviewCount > 0 && (
+                      <span className="text-amber-800">{topic.needsReviewCount} needs review</span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-4 py-5 align-top">
                   <Badge
@@ -285,7 +313,7 @@ function TopicTable({ topics, onRefresh }: { topics: Topic[]; onRefresh: () => P
                             : "blue"
                     }
                   >
-                    {topic.kind}
+                    {topic.category ?? "internal"}
                   </Badge>
                 </td>
                 <td className="px-4 py-5 align-top">
@@ -299,6 +327,7 @@ function TopicTable({ topics, onRefresh }: { topics: Topic[]; onRefresh: () => P
                 </td>
                 <td className="px-6 py-5 align-top">
                   <div className="flex justify-end gap-1">
+                    <TopicHistoryDialog topic={topic} />
                     {topic.stale && (
                       <Button
                         variant="ghost"
@@ -335,6 +364,70 @@ function TopicTable({ topics, onRefresh }: { topics: Topic[]; onRefresh: () => P
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function TopicHistoryDialog({ topic }: { topic: Topic }) {
+  const [open, setOpen] = useState(false)
+  const [versions, setVersions] = useState<MemoryVersion[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState("")
+
+  async function onOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen)
+    if (!nextOpen) return
+    setLoading(true)
+    setError("")
+    try {
+      setVersions(await getMemoryVersions(topic.key))
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not load memory versions")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => void onOpenChange(nextOpen)}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="icon" aria-label={`View versions for ${topic.key}`}>
+          <History />
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Memory versions</DialogTitle>
+          <DialogDescription>
+            Current content and up to two superseded versions for <span className="font-mono">{topic.key}</span>.
+          </DialogDescription>
+        </DialogHeader>
+        {loading && <p className="py-8 text-center text-sm text-muted">Loading versions…</p>}
+        {error && <p className="text-sm text-red-700">{error}</p>}
+        {!loading && !error && (
+          <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+            {versions.map((version) => (
+              <article key={version.id} className="surface-row rounded-[14px] p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Badge variant={version.current ? "success" : "neutral"}>
+                      v{version.version} · {version.current ? "current" : "superseded"}
+                    </Badge>
+                    <span className="text-[10px] text-dim">{relativeTime(version.createdAt)}</span>
+                  </div>
+                  <span className="font-mono text-[10px] text-dim">{version.contentHash.slice(0, 12)}</span>
+                </div>
+                <pre className="mt-3 whitespace-pre-wrap break-words text-xs leading-6 text-muted">
+                  {version.value ?? version.source ?? "Empty context"}
+                </pre>
+              </article>
+            ))}
+            {!versions.length && (
+              <EmptyState icon={<History />} title="No versions" detail="The first applied write will create version one." />
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -389,10 +482,9 @@ function CreateTopicDialog({ onCreated }: { onCreated: () => Promise<void> }) {
               name="kind"
               className="h-10 w-full rounded-[10px] border border-line-strong bg-panel-raised px-3 text-sm text-ink outline-none"
             >
-              <option value="decision">Decision</option>
-              <option value="note">Note</option>
-              <option value="code-area">Code area</option>
-              <option value="doc-ref">Document reference</option>
+              <option value="decision">Intent</option>
+              <option value="note">Knowledge</option>
+              <option value="doc-ref">Reference</option>
             </select>
           </label>
           <div className="grid grid-cols-2 gap-1 rounded-[11px] border border-line bg-canvas p-1">
@@ -623,10 +715,12 @@ function RequestItem({
 }
 
 function PreparationPanel({
+  project,
   decisions,
   modelStatus,
   onRefresh,
 }: {
+  project: string
   decisions: ContextDecision[]
   modelStatus: ModelStatus
   onRefresh: () => Promise<void>
@@ -636,9 +730,19 @@ function PreparationPanel({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState("")
   const [result, setResult] = useState<ContextPreparation | null>(null)
+  const [showAllDecisions, setShowAllDecisions] = useState(false)
+  const [previewSessionId] = useState(() => `dashboard:${crypto.randomUUID()}`)
 
   const fallbackCount = decisions.filter((decision) => decision.fallback).length
   const correctedCount = decisions.filter((decision) => decision.feedback?.verdict === "incorrect").length
+  const attentionDecisions = decisions.filter((decision) =>
+    !decision.feedback
+    && (
+      decision.action === "ask"
+      || Boolean(decision.fallback)
+    ),
+  )
+  const visibleDecisions = showAllDecisions ? decisions : attentionDecisions
   const latencies = decisions.flatMap((decision) => decision.latencyMs === null ? [] : [decision.latencyMs])
   const averageLatency = latencies.length
     ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length)
@@ -651,7 +755,8 @@ function PreparationPanel({
     try {
       const next = await prepareContext({
         message,
-        sessionId: "dashboard-preview",
+        sessionId: previewSessionId,
+        project,
         tokenBudget: 2_000,
         retainInput,
       })
@@ -718,13 +823,7 @@ function PreparationPanel({
       </Card>
 
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-        <StatCard
-          icon={<Route />}
-          label="Decisions"
-          value={decisions.length}
-          detail="latest audited preparations"
-          tone="blue"
-        />
+        <StatCard icon={<Route />} label="Review queue" value={attentionDecisions.length} detail="exceptions needing attention" tone="blue" />
         <StatCard icon={<RefreshCw />} label="Fallbacks" value={fallbackCount} detail="model unavailable or invalid" tone="amber" />
         <StatCard icon={<AlertCircle />} label="Corrections" value={correctedCount} detail="human-labelled mistakes" tone="violet" />
         <StatCard icon={<Clock3 />} label="Latency" value={averageLatency} detail="average milliseconds" tone="teal" />
@@ -791,13 +890,21 @@ function PreparationPanel({
           <CardHeader>
             <div>
               <CardTitle>Decision audit</CardTitle>
-              <CardDescription>Readable evidence for every final routing action.</CardDescription>
+              <CardDescription>
+                Review exceptions by default. Routine decisions stay available without requiring a label.
+              </CardDescription>
             </div>
-            <Badge variant="neutral">{decisions.length} recent</Badge>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowAllDecisions((current) => !current)}
+            >
+              {showAllDecisions ? "Show review queue" : `Show all ${decisions.length}`}
+            </Button>
           </CardHeader>
           <CardContent>
             <div className="space-y-2.5">
-              {decisions.slice(0, 20).map((decision) => (
+              {visibleDecisions.slice(0, 20).map((decision) => (
                 <article key={decision.id} className="surface-row rounded-[14px] p-5">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2">
@@ -840,11 +947,21 @@ function PreparationPanel({
                   </div>
 
                   <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-line/70 pt-3">
-                    <span className="fine-label mr-2">Expected action</span>
-                    {(["skip", "retrieve", "ask"] as ContextAction[]).map((action) => {
+                    <span className="fine-label mr-2">Optional review</span>
+                    {!decision.feedback && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void feedback(decision, decision.action)}
+                      >
+                        Looks right
+                      </Button>
+                    )}
+                    {(["skip", "retrieve", "ask"] as ContextAction[])
+                      .filter((action) => action !== decision.action)
+                      .map((action) => {
                       const selected =
                         decision.feedback?.expectedAction === action
-                        || (decision.feedback?.verdict === "correct" && decision.action === action)
                       return (
                         <Button
                           key={action}
@@ -854,7 +971,7 @@ function PreparationPanel({
                           onClick={() => void feedback(decision, action)}
                           className={cn(selected && "border-signal/25 text-signal")}
                         >
-                          {action}
+                          Should {action}
                         </Button>
                       )
                     })}
@@ -870,11 +987,15 @@ function PreparationPanel({
                 </article>
               ))}
             </div>
-            {!decisions.length && (
+            {!visibleDecisions.length && (
               <EmptyState
-                icon={<Route />}
-                title="No context decisions"
-                detail="Prepare a request or connect an agent to build the audit trail."
+                icon={<ShieldCheck />}
+                title={decisions.length ? "Review queue is clear" : "No context decisions"}
+                detail={
+                  decisions.length
+                    ? "Routine decisions remain in the full audit and do not require evaluation."
+                    : "Prepare a request or connect an agent to build the audit trail."
+                }
               />
             )}
           </CardContent>
@@ -1112,6 +1233,331 @@ function GraphPanel() {
   )
 }
 
+function GlobalMemoryRequestCard({
+  request,
+  onRefresh,
+}: {
+  request: GlobalMemoryRequest
+  onRefresh: () => Promise<void>
+}) {
+  const [key, setKey] = useState(request.proposal.key)
+  const [kind, setKind] = useState(request.proposal.kind)
+  const [rationale, setRationale] = useState(request.proposal.rationale)
+  const [mode, setMode] = useState<"inline" | "pointer">(request.proposal.source ? "pointer" : "inline")
+  const [content, setContent] = useState(request.proposal.value ?? request.proposal.source ?? "")
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState("")
+
+  async function persist(decision?: "approve" | "reject") {
+    setPending(true)
+    setError("")
+    try {
+      await editGlobalMemoryRequest(request.id, {
+        key,
+        kind,
+        rationale,
+        ...(mode === "inline" ? { value: content } : { source: content }),
+      })
+      if (decision) await decideGlobalMemoryRequest(request.id, decision)
+      await onRefresh()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update global memory request")
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <article className="surface-row rounded-[14px] p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <Badge variant="warning">Pending #{request.id}</Badge>
+            <span className="text-[10px] text-dim">{relativeTime(request.createdAt)}</span>
+          </div>
+          <p className="mt-3 text-[11px] text-muted">
+            Initial: <span className="font-mono text-ink">{request.initialProposal.key}</span>
+            {" · "}{request.initialProposal.value ?? request.initialProposal.source}
+          </p>
+        </div>
+        <Globe2 className="size-4 text-signal" />
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_10rem]">
+        <Input value={key} onChange={(event) => setKey(event.target.value)} aria-label="Global memory key" />
+        <select
+          value={kind}
+          onChange={(event) => setKind(event.target.value as GlobalMemoryRequest["proposal"]["kind"])}
+          className="h-10 rounded-[10px] border border-line-strong bg-panel-raised px-3 text-sm text-ink outline-none"
+        >
+          <option value="decision">Intent</option>
+          <option value="note">Knowledge</option>
+          <option value="doc-ref">Reference</option>
+        </select>
+      </div>
+      <div className="mt-3 flex gap-1">
+        {(["inline", "pointer"] as const).map((item) => (
+          <Button
+            key={item}
+            type="button"
+            variant={mode === item ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setMode(item)}
+          >
+            {item}
+          </Button>
+        ))}
+      </div>
+      <Textarea
+        className="mt-3"
+        value={content}
+        onChange={(event) => setContent(event.target.value)}
+        aria-label="Proposed global memory content"
+      />
+      <Textarea
+        className="mt-3"
+        value={rationale}
+        onChange={(event) => setRationale(event.target.value)}
+        aria-label="Global memory rationale"
+      />
+      {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        <Button variant="secondary" disabled={pending} onClick={() => void persist()}>
+          <Save /> Save edits
+        </Button>
+        <Button variant="ghost" disabled={pending} onClick={() => void persist("reject")}>
+          Reject
+        </Button>
+        <Button disabled={pending} onClick={() => void persist("approve")}>
+          <Check /> Approve final
+        </Button>
+      </div>
+    </article>
+  )
+}
+
+function NeedsReviewCard({
+  review,
+  topic,
+  onRefresh,
+}: {
+  review: NeedsReview
+  topic: Topic | undefined
+  onRefresh: () => Promise<void>
+}) {
+  const [content, setContent] = useState(topic?.value ?? topic?.source ?? "")
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState("")
+
+  async function resolve(outcome: "keep" | "change") {
+    setPending(true)
+    setError("")
+    try {
+      await resolveNeedsReview(review.id, {
+        outcome,
+        ...(outcome === "change" && topic
+          ? {
+              change: {
+                key: review.key,
+                kind: topic.kind,
+                ...(topic.source ? { source: content } : { value: content }),
+              },
+            }
+          : {}),
+      })
+      await onRefresh()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not resolve review")
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <article className="surface-row rounded-[14px] p-5">
+      <div className="flex items-center gap-2">
+        <Badge variant="warning">Needs review</Badge>
+        <span className="font-mono text-xs text-ink">{review.key}</span>
+      </div>
+      <p className="mt-3 text-sm leading-6 text-muted">{review.reason}</p>
+      <p className="mt-2 font-mono text-[10px] text-dim">
+        {review.sourceType}:{review.sourceId} · {review.contentHash.slice(0, 12)}
+      </p>
+      {topic && (
+        <Textarea
+          className="mt-4"
+          value={content}
+          onChange={(event) => setContent(event.target.value)}
+          aria-label={`Reviewed memory ${review.key}`}
+        />
+      )}
+      {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="secondary" disabled={pending} onClick={() => void resolve("keep")}>
+          Keep current
+        </Button>
+        <Button disabled={pending || !topic} onClick={() => void resolve("change")}>
+          Apply change
+        </Button>
+      </div>
+    </article>
+  )
+}
+
+function MemoryGovernancePanel({
+  globalRequests,
+  reviews,
+  report,
+  topics,
+  onRefresh,
+}: {
+  globalRequests: GlobalMemoryRequest[]
+  reviews: NeedsReview[]
+  report: MemoryReportDay[]
+  topics: Topic[]
+  onRefresh: () => Promise<void>
+}) {
+  const pendingGlobal = globalRequests.filter((request) => request.status === "pending")
+  const decidedGlobal = globalRequests.filter((request) => request.status !== "pending")
+  const openReviews = reviews.filter((review) => review.status === "open")
+  const resolvedReviews = reviews.filter((review) => review.status === "resolved")
+  return (
+    <div className="grid items-start gap-5 xl:grid-cols-2">
+      <div className="space-y-5">
+        <Card>
+          <CardHeader>
+            <div>
+              <CardTitle>Global memory approvals</CardTitle>
+              <CardDescription>Inspect every field, edit the proposal, then approve or reject it.</CardDescription>
+            </div>
+            <Badge variant="warning">{pendingGlobal.length} pending</Badge>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {pendingGlobal.map((request) => (
+              <GlobalMemoryRequestCard key={request.id} request={request} onRefresh={onRefresh} />
+            ))}
+            {!pendingGlobal.length && (
+              <EmptyState icon={<Globe2 />} title="No pending global writes" detail="Global memory remains unchanged until an explicit approval request arrives." />
+            )}
+            {decidedGlobal.length > 0 && (
+              <section className="border-t border-line pt-4">
+                <p className="fine-label mb-3">Decision history</p>
+                <div className="space-y-2">
+                  {decidedGlobal.map((request) => (
+                    <article key={request.id} className="surface-row rounded-[12px] p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={request.status === "approved" ? "success" : "neutral"}>
+                            {request.status} #{request.id}
+                          </Badge>
+                          <span className="font-mono text-[11px] text-ink">
+                            {(request.finalProposal ?? request.proposal).key}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-dim">
+                          {request.decidedAt ? relativeTime(request.decidedAt) : ""}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-muted">
+                        {(request.finalProposal ?? request.proposal).value
+                          ?? (request.finalProposal ?? request.proposal).source}
+                      </p>
+                      <details className="mt-2 text-[10px] text-dim">
+                        <summary className="cursor-pointer">Initial and final proposal</summary>
+                        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap">
+                          {JSON.stringify({
+                            initial: request.initialProposal,
+                            final: request.finalProposal,
+                          }, null, 2)}
+                        </pre>
+                      </details>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <div>
+              <CardTitle>Evidence conflicts</CardTitle>
+              <CardDescription>Keep the current intent or commit a revised version.</CardDescription>
+            </div>
+            <Badge variant="warning">{openReviews.length} open</Badge>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {openReviews.map((review) => (
+              <NeedsReviewCard
+                key={review.id}
+                review={review}
+                topic={topics.find((topic) => topic.key === review.key)}
+                onRefresh={onRefresh}
+              />
+            ))}
+            {!openReviews.length && (
+              <EmptyState icon={<ShieldCheck />} title="No conflicts" detail="Changed evidence will create a new review without overwriting memory." />
+            )}
+            {resolvedReviews.length > 0 && (
+              <section className="border-t border-line pt-4">
+                <p className="fine-label mb-3">Review history</p>
+                <div className="space-y-2">
+                  {resolvedReviews.map((review) => (
+                    <article key={review.id} className="surface-row rounded-[12px] p-4">
+                      <div className="flex items-center gap-2">
+                        <Badge variant={review.outcome === "change" ? "blue" : "neutral"}>
+                          {review.outcome === "change" ? "Changed" : "Kept"}
+                        </Badge>
+                        <span className="font-mono text-[11px] text-ink">{review.key}</span>
+                      </div>
+                      <p className="mt-2 text-xs text-muted">{review.reason}</p>
+                      <p className="mt-2 font-mono text-[10px] text-dim">
+                        {review.sourceType}:{review.sourceId} · {review.contentHash.slice(0, 12)}
+                        {review.resultVersionId ? ` · version ${review.resultVersionId}` : ""}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>Project memory report</CardTitle>
+            <CardDescription>All project-memory changes grouped by local date.</CardDescription>
+          </div>
+          <History className="size-4 text-signal" />
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {report.map((day) => (
+            <section key={day.date}>
+              <p className="fine-label mb-2">{day.date}</p>
+              <div className="space-y-2">
+                {day.events.map((event) => (
+                  <article key={event.id} className="surface-row rounded-[12px] p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-mono text-[11px] text-ink">{event.type}</span>
+                      <span className="text-[10px] text-dim">{relativeTime(event.occurredAt)}</span>
+                    </div>
+                    <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-[10px] leading-5 text-muted">
+                      {JSON.stringify(event.payload, null, 2)}
+                    </pre>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ))}
+          {!report.length && (
+            <EmptyState icon={<History />} title="No memory changes" detail="Applied project reconciliations will appear here by date." />
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 function EmptyState({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) {
   return (
     <div className="flex flex-col items-center px-5 py-12 text-center text-dim">
@@ -1127,6 +1573,9 @@ export function Dashboard() {
   const [view, setView] = useState(emptyView)
   const [recall, setRecall] = useState(emptyRecall)
   const [requests, setRequests] = useState<ContextRequest[]>([])
+  const [needsReviews, setNeedsReviews] = useState<NeedsReview[]>([])
+  const [globalMemoryRequests, setGlobalMemoryRequests] = useState<GlobalMemoryRequest[]>([])
+  const [memoryReport, setMemoryReport] = useState<MemoryReportDay[]>([])
   const [contextDecisions, setContextDecisions] = useState<ContextDecision[]>([])
   const [modelStatus, setModelStatus] = useState<ModelStatus>(emptyModelStatus)
   const [loading, setLoading] = useState(true)
@@ -1134,16 +1583,31 @@ export function Dashboard() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextView, nextRecall, nextRequests, nextContextDecisions, nextModelStatus] = await Promise.all([
+      const [
+        nextView,
+        nextRecall,
+        nextRequests,
+        nextNeedsReviews,
+        nextGlobalMemoryRequests,
+        nextMemoryReport,
+        nextContextDecisions,
+        nextModelStatus,
+      ] = await Promise.all([
         getView(),
         getRecall(),
         getRequests(),
+        getNeedsReviews(),
+        getGlobalMemoryRequests(),
+        getMemoryReport(),
         getContextDecisions(),
         getModelStatus(),
       ])
       setView(nextView)
       setRecall(nextRecall)
       setRequests(nextRequests)
+      setNeedsReviews(nextNeedsReviews)
+      setGlobalMemoryRequests(nextGlobalMemoryRequests)
+      setMemoryReport(nextMemoryReport)
       setContextDecisions(nextContextDecisions)
       setModelStatus(nextModelStatus)
       setError("")
@@ -1168,6 +1632,14 @@ export function Dashboard() {
     { id: "overview", label: "Overview", icon: <LayoutDashboard /> },
     { id: "delivery", label: "Delivery", icon: <Route />, count: contextDecisions.length },
     { id: "context", label: "Context", icon: <Database />, count: view.topics.length },
+    {
+      id: "memory",
+      label: "Memory review",
+      icon: <ShieldCheck />,
+      count:
+        needsReviews.filter((item) => item.status === "open").length
+        + globalMemoryRequests.filter((item) => item.status === "pending").length,
+    },
     { id: "sessions", label: "Sessions", icon: <Users />, count: view.sessions.length },
     {
       id: "requests",
@@ -1340,9 +1812,23 @@ export function Dashboard() {
               </div>
             )}
             {page === "delivery" && (
-              <PreparationPanel decisions={contextDecisions} modelStatus={modelStatus} onRefresh={refresh} />
+              <PreparationPanel
+                project={view.project}
+                decisions={contextDecisions}
+                modelStatus={modelStatus}
+                onRefresh={refresh}
+              />
             )}
             {page === "context" && <TopicTable topics={view.topics} onRefresh={refresh} />}
+            {page === "memory" && (
+              <MemoryGovernancePanel
+                globalRequests={globalMemoryRequests}
+                reviews={needsReviews}
+                report={memoryReport}
+                topics={view.topics}
+                onRefresh={refresh}
+              />
+            )}
             {page === "sessions" && <SessionList sessions={view.sessions} />}
             {page === "requests" && (
               <RequestQueue requests={requests} topics={view.topics} onRefresh={refresh} />

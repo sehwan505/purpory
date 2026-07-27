@@ -3,9 +3,80 @@ export type Topic = {
   value: string | null
   source: string | null
   kind: "note" | "code-area" | "doc-ref" | "decision" | "seeded"
+  category: "intent" | "knowledge" | "reference" | null
   origin: "human" | "graph-seed"
   set_at: number
   stale: boolean
+  versionCount: number
+  needsReviewCount: number
+  usage: {
+    selectedCount: number
+    expandedCount: number
+    lastSelectedAt: number | null
+    lastExpandedAt: number | null
+  }
+}
+
+export type MemoryVersion = {
+  id: number
+  project: string
+  key: string
+  version: number
+  kind: string
+  value: string | null
+  source: string | null
+  origin: string
+  contentHash: string
+  createdAt: number
+  current: boolean
+  superseded: boolean
+}
+
+export type NeedsReview = {
+  id: number
+  project: string
+  key: string
+  status: "open" | "resolved"
+  sourceType: string
+  sourceId: string
+  contentHash: string
+  reason: string
+  outcome: "keep" | "change" | null
+  resultVersionId: number | null
+  createdAt: number
+  resolvedAt: number | null
+}
+
+export type GlobalMemoryProposal = {
+  key: string
+  kind: "decision" | "note" | "doc-ref"
+  value: string | null
+  source: string | null
+  rationale: string
+}
+
+export type GlobalMemoryRequest = {
+  id: number
+  status: "pending" | "approved" | "rejected"
+  key: string
+  initialProposal: GlobalMemoryProposal
+  proposal: GlobalMemoryProposal
+  finalProposal: GlobalMemoryProposal | null
+  rationale: string
+  requestedFromProject: string
+  createdAt: number
+  editedAt: number | null
+  decidedAt: number | null
+}
+
+export type MemoryReportDay = {
+  date: string
+  events: Array<{
+    id: number
+    type: string
+    payload: Record<string, unknown>
+    occurredAt: number
+  }>
 }
 
 export type Injection = {
@@ -45,6 +116,7 @@ export type Recall = {
 }
 
 export type ViewResponse = {
+  project: string
   topics: Topic[]
   sessions: Session[]
   diagnostics: {

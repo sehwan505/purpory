@@ -3,8 +3,12 @@ import type {
   ContextAction,
   ContextDecision,
   ContextPreparation,
+  GlobalMemoryRequest,
   GraphPayload,
+  MemoryReportDay,
+  MemoryVersion,
   ModelStatus,
+  NeedsReview,
   Recall,
   ViewResponse,
 } from "@/lib/types"
@@ -66,6 +70,26 @@ export async function getRequests(status?: "open" | "resolved") {
   return parse<ContextRequest[]>(await fetch(readUrl(path), { cache: "no-store" }))
 }
 
+export async function getMemoryVersions(key: string) {
+  return parse<MemoryVersion[]>(
+    await fetch(readUrl(`/api/topics/${encodeURIComponent(key)}/versions`), { cache: "no-store" }),
+  )
+}
+
+export async function getNeedsReviews(status?: "open" | "resolved") {
+  const path = status ? `/api/memory/reviews?status=${status}` : "/api/memory/reviews"
+  return parse<NeedsReview[]>(await fetch(readUrl(path), { cache: "no-store" }))
+}
+
+export async function getMemoryReport() {
+  return parse<MemoryReportDay[]>(await fetch(readUrl("/api/memory/report"), { cache: "no-store" }))
+}
+
+export async function getGlobalMemoryRequests(status?: "pending" | "approved" | "rejected") {
+  const path = status ? `/api/global-memory/requests?status=${status}` : "/api/global-memory/requests"
+  return parse<GlobalMemoryRequest[]>(await fetch(readUrl(path), { cache: "no-store" }))
+}
+
 export async function getGraph(scope?: string, limit = 200) {
   const params = new URLSearchParams({ limit: String(limit) })
   if (scope) params.set("scope", scope)
@@ -114,6 +138,30 @@ export function resolveRequest(id: number, key: string) {
   return mutate<{ ok: boolean }>(`/api/requests/${id}/resolve`, "POST", { key })
 }
 
+export function resolveNeedsReview(
+  id: number,
+  input: {
+    outcome: "keep" | "change"
+    change?: { key: string; kind: string; value?: string; source?: string }
+  },
+) {
+  return mutate<NeedsReview>(`/api/memory/reviews/${id}/resolve`, "POST", input)
+}
+
+export function editGlobalMemoryRequest(
+  id: number,
+  input: { key: string; kind: string; value?: string; source?: string; rationale: string },
+) {
+  return mutate<GlobalMemoryRequest>(`/api/global-memory/requests/${id}/edit`, "POST", input)
+}
+
+export function decideGlobalMemoryRequest(id: number, decision: "approve" | "reject") {
+  return mutate<GlobalMemoryRequest>(
+    `/api/global-memory/requests/${id}/${decision}`,
+    "POST",
+  )
+}
+
 export async function prepareContext(input: {
   message: string
   sessionId?: string
@@ -150,7 +198,7 @@ export function submitContextFeedback(
 
 export function subscribeToEvents(onEvent: () => void) {
   const source = new EventSource(readUrl("/api/stream"))
-  for (const event of ["topic", "seed", "request", "context"]) {
+  for (const event of ["topic", "seed", "request", "context", "memory", "global-memory"]) {
     source.addEventListener(event, onEvent)
   }
   return () => source.close()
