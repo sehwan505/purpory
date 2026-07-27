@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 GATE_SCHEMA_VERSION = 1
-PROMPT_VERSION = "purpory-gate-v1"
+PROMPT_VERSION = "purpory-gate-v3"
 
 MODEL_ACTIONS = frozenset({"skip", "search", "ask"})
 FINAL_ACTIONS = frozenset({"skip", "retrieve", "ask"})
@@ -14,6 +14,7 @@ GATE_SCOPES = frozenset({"human", "code", "session"})
 REASON_CODES = frozenset(
     {
         "SELF_CONTAINED",
+        "CONTEXT_SEARCH_REQUIRED",
         "PRIOR_DECISION_REFERENCED",
         "PROJECT_CONTEXT_REQUIRED",
         "SESSION_HISTORY_REQUIRED",

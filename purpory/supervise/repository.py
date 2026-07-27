@@ -21,14 +21,22 @@ from typing import Any, Iterator, Sequence
 from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 
 DEFAULT_DB_PATH = Path.home() / ".purpory" / "context.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MEMORY_NAMESPACE = "memory"
 TOPIC_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)*$")
 TOPIC_KINDS = frozenset({"note", "code-area", "doc-ref", "decision", "seeded"})
 TOPIC_ORIGINS = frozenset({"human", "graph-seed"})
 REQUEST_STATUSES = frozenset({"open", "resolved"})
+NEEDS_REVIEW_STATUSES = frozenset({"open", "resolved"})
+NEEDS_REVIEW_OUTCOMES = frozenset({"keep", "change"})
+GLOBAL_MEMORY_REQUEST_STATUSES = frozenset({"pending", "approved", "rejected"})
 GATE_FINAL_ACTIONS = frozenset({"skip", "retrieve", "ask"})
 GATE_FEEDBACK_VERDICTS = frozenset({"correct", "incorrect"})
+MEMORY_CATEGORY_BY_KIND = {
+    "decision": "intent",
+    "note": "knowledge",
+    "doc-ref": "reference",
+}
 
 
 def default_db_path() -> Path:
@@ -61,6 +69,10 @@ def validate_topic_key(key: str) -> str:
             "numbers, dashes, or underscores"
         )
     return normalized
+
+
+def memory_category(kind: str) -> str | None:
+    return MEMORY_CATEGORY_BY_KIND.get(kind)
 
 
 def _now(timestamp: int | None = None) -> int:
@@ -227,6 +239,63 @@ class ContextGraphRepository:
                     FOREIGN KEY(decision_id) REFERENCES gate_decisions(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS memory_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    version_number INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    value TEXT,
+                    source TEXT,
+                    origin TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(project, key, version_number)
+                );
+
+                CREATE TABLE IF NOT EXISTS needs_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    outcome TEXT,
+                    result_version_id INTEGER,
+                    created_at INTEGER NOT NULL,
+                    resolved_at INTEGER,
+                    CHECK (status IN ('open', 'resolved')),
+                    CHECK (outcome IS NULL OR outcome IN ('keep', 'change')),
+                    UNIQUE(project, key, source_type, source_id, content_hash),
+                    FOREIGN KEY(result_version_id) REFERENCES memory_versions(id) ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS memory_usage (
+                    node_id TEXT PRIMARY KEY,
+                    selected_count INTEGER NOT NULL DEFAULT 0,
+                    expanded_count INTEGER NOT NULL DEFAULT 0,
+                    last_selected_at INTEGER,
+                    last_expanded_at INTEGER,
+                    FOREIGN KEY(node_id) REFERENCES context_nodes(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS global_memory_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    key TEXT NOT NULL,
+                    initial_json TEXT NOT NULL,
+                    proposed_json TEXT NOT NULL,
+                    final_json TEXT,
+                    rationale TEXT NOT NULL,
+                    requested_from_project TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    edited_at INTEGER,
+                    decided_at INTEGER,
+                    CHECK (status IN ('pending', 'approved', 'rejected'))
+                );
+
                 """
             )
             self._initialize_views(connection)
@@ -257,8 +326,51 @@ class ContextGraphRepository:
                     ON gate_decisions(session_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_gate_decisions_action_time
                     ON gate_decisions(final_action, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_memory_versions_lookup
+                    ON memory_versions(project, key, version_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_needs_reviews_status
+                    ON needs_reviews(project, status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_global_memory_requests_status
+                    ON global_memory_requests(status, created_at DESC);
                 """
             )
+            versioned = {
+                (str(row["project"]), str(row["key"]))
+                for row in connection.execute(
+                    "SELECT project, key FROM memory_versions"
+                ).fetchall()
+            }
+            memory_rows = connection.execute(
+                """
+                SELECT project, stable_key AS key, node_type AS kind, value,
+                       source, origin, updated_at
+                FROM context_nodes
+                WHERE namespace = 'memory' AND origin = 'human'
+                """
+            ).fetchall()
+            for row in memory_rows:
+                identity = (str(row["project"]), str(row["key"]))
+                if identity in versioned:
+                    continue
+                snapshot = dict(row)
+                connection.execute(
+                    """
+                    INSERT INTO memory_versions(
+                        project, key, version_number, kind, value, source,
+                        origin, content_hash, created_at
+                    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot["project"],
+                        snapshot["key"],
+                        snapshot["kind"],
+                        snapshot["value"],
+                        snapshot["source"],
+                        snapshot["origin"],
+                        topic_hash(snapshot),
+                        snapshot["updated_at"],
+                    ),
+                )
             connection.execute(
                 "INSERT INTO context_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -639,6 +751,17 @@ class ContextGraphRepository:
                             timestamp,
                         ),
                     )
+                    version_id = self._record_memory_version(
+                        connection,
+                        project=normalized_project,
+                        key=change["key"],
+                        kind=change["kind"],
+                        value=change["value"],
+                        source=change["source"],
+                        origin="human",
+                        created_at=timestamp,
+                    )
+                    result["versionId"] = version_id
                     event_changes.append(
                         {
                             "key": change["key"],
@@ -649,6 +772,7 @@ class ContextGraphRepository:
                                 "source": change["source"],
                                 "value": change["value"],
                             },
+                            "versionId": version_id,
                         }
                     )
                 if event_changes:
@@ -663,31 +787,763 @@ class ContextGraphRepository:
                 connection.commit()
             return {"applied": apply, "project": normalized_project, "changes": results}
 
-    def delete_topic(self, key: str) -> bool:
+    @staticmethod
+    def _record_memory_version(
+        connection: sqlite3.Connection,
+        *,
+        project: str,
+        key: str,
+        kind: str,
+        value: str | None,
+        source: str | None,
+        origin: str,
+        created_at: int,
+    ) -> int:
+        snapshot = {"kind": kind, "value": value, "source": source}
+        digest = topic_hash(snapshot)
+        latest = connection.execute(
+            """
+            SELECT id, version_number, content_hash
+            FROM memory_versions
+            WHERE project = ? AND key = ?
+            ORDER BY version_number DESC
+            LIMIT 1
+            """,
+            (project, key),
+        ).fetchone()
+        if latest is not None and latest["content_hash"] == digest:
+            return int(latest["id"])
+        version_number = int(latest["version_number"]) + 1 if latest is not None else 1
+        cursor = connection.execute(
+            """
+            INSERT INTO memory_versions(
+                project, key, version_number, kind, value, source,
+                origin, content_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project,
+                key,
+                version_number,
+                kind,
+                value,
+                source,
+                origin,
+                digest,
+                created_at,
+            ),
+        )
+        connection.execute(
+            """
+            DELETE FROM memory_versions
+            WHERE project = ? AND key = ? AND id NOT IN (
+                SELECT id FROM memory_versions
+                WHERE project = ? AND key = ?
+                ORDER BY version_number DESC
+                LIMIT 3
+            )
+            """,
+            (project, key, project, key),
+        )
+        if cursor.lastrowid is None:
+            raise RuntimeError("memory version insert did not return an id")
+        return int(cursor.lastrowid)
+
+    def list_memory_versions(self, key: str, *, project: str) -> list[dict[str, Any]]:
+        normalized_key = validate_topic_key(key)
+        normalized_project = project.strip()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, project, key, version_number, kind, value, source,
+                       origin, content_hash, created_at
+                FROM memory_versions
+                WHERE project = ? AND key = ?
+                ORDER BY version_number DESC
+                LIMIT 3
+                """,
+                (normalized_project, normalized_key),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "project": row["project"],
+                "key": row["key"],
+                "version": int(row["version_number"]),
+                "kind": row["kind"],
+                "value": row["value"],
+                "source": row["source"],
+                "origin": row["origin"],
+                "contentHash": row["content_hash"],
+                "createdAt": int(row["created_at"]),
+                "current": index == 0,
+                "superseded": index > 0,
+            }
+            for index, row in enumerate(rows)
+        ]
+
+    def create_needs_review(
+        self,
+        key: str,
+        *,
+        project: str,
+        source_type: str,
+        source_id: str,
+        content_hash: str,
+        reason: str,
+        created_at: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_key = validate_topic_key(key)
+        normalized_project = project.strip()
+        normalized_source_type = source_type.strip()
+        normalized_source_id = source_id.strip()
+        normalized_hash = content_hash.strip().lower()
+        normalized_reason = reason.strip()
+        if not normalized_project:
+            raise ValueError("project cannot be empty")
+        if not normalized_source_type or len(normalized_source_type) > 64:
+            raise ValueError("source_type must be between 1 and 64 characters")
+        if not normalized_source_id or len(normalized_source_id) > 1024:
+            raise ValueError("source_id must be between 1 and 1024 characters")
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized_hash):
+            raise ValueError("content_hash must be a SHA-256 hex digest")
+        if not normalized_reason or len(normalized_reason) > 4096:
+            raise ValueError("reason must be between 1 and 4096 characters")
+        timestamp = _now(created_at)
+        with self.connect() as connection:
+            topic = connection.execute(
+                """
+                SELECT id FROM context_nodes
+                WHERE namespace = ? AND stable_key = ? AND project IN ('', ?)
+                ORDER BY CASE WHEN project = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (MEMORY_NAMESPACE, normalized_key, normalized_project, normalized_project),
+            ).fetchone()
+            if topic is None:
+                raise KeyError(f"topic not found: {normalized_key}")
+            existing = connection.execute(
+                """
+                SELECT * FROM needs_reviews
+                WHERE project = ? AND key = ? AND source_type = ?
+                  AND source_id = ? AND content_hash = ?
+                """,
+                (
+                    normalized_project,
+                    normalized_key,
+                    normalized_source_type,
+                    normalized_source_id,
+                    normalized_hash,
+                ),
+            ).fetchone()
+            if existing is not None:
+                return self._needs_review_row(existing, created=False)
+            cursor = connection.execute(
+                """
+                INSERT INTO needs_reviews(
+                    project, key, source_type, source_id, content_hash,
+                    reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_project,
+                    normalized_key,
+                    normalized_source_type,
+                    normalized_source_id,
+                    normalized_hash,
+                    normalized_reason,
+                    timestamp,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("needs-review insert did not return an id")
+            review_id = int(cursor.lastrowid)
+            self._record_event(
+                connection,
+                "memory.needs-review-created",
+                object_id=topic["id"],
+                project=normalized_project,
+                payload={
+                    "reviewId": review_id,
+                    "key": normalized_key,
+                    "sourceType": normalized_source_type,
+                    "sourceId": normalized_source_id,
+                    "contentHash": normalized_hash,
+                    "reason": normalized_reason,
+                },
+                occurred_at=timestamp,
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM needs_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("created needs-review could not be loaded")
+        return self._needs_review_row(row, created=True)
+
+    def list_needs_reviews(
+        self,
+        *,
+        project: str,
+        status: str | None = None,
+        key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_project = project.strip()
+        if status is not None and status not in NEEDS_REVIEW_STATUSES:
+            raise ValueError(f"unsupported needs-review status: {status}")
+        clauses = ["project = ?"]
+        parameters: list[Any] = [normalized_project]
+        if status is not None:
+            clauses.append("status = ?")
+            parameters.append(status)
+        if key is not None:
+            clauses.append("key = ?")
+            parameters.append(validate_topic_key(key))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM needs_reviews
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, id DESC
+                """,  # nosec B608
+                tuple(parameters),
+            ).fetchall()
+        return [self._needs_review_row(row) for row in rows]
+
+    def resolve_needs_review(
+        self,
+        review_id: int,
+        *,
+        outcome: str,
+        result_version_id: int | None = None,
+        resolved_at: int | None = None,
+    ) -> dict[str, Any] | None:
+        if outcome not in NEEDS_REVIEW_OUTCOMES:
+            raise ValueError(f"unsupported needs-review outcome: {outcome}")
+        timestamp = _now(resolved_at)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM needs_reviews WHERE id = ? AND status = 'open'",
+                (int(review_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            if outcome == "change" and result_version_id is None:
+                raise ValueError("change outcome requires result_version_id")
+            if result_version_id is not None:
+                version = connection.execute(
+                    "SELECT id FROM memory_versions WHERE id = ?",
+                    (int(result_version_id),),
+                ).fetchone()
+                if version is None:
+                    raise KeyError(f"memory version not found: {result_version_id}")
+            connection.execute(
+                """
+                UPDATE needs_reviews
+                SET status = 'resolved', outcome = ?, result_version_id = ?, resolved_at = ?
+                WHERE id = ? AND status = 'open'
+                """,
+                (outcome, result_version_id, timestamp, int(review_id)),
+            )
+            self._record_event(
+                connection,
+                "memory.needs-review-resolved",
+                project=row["project"],
+                payload={
+                    "reviewId": int(review_id),
+                    "key": row["key"],
+                    "outcome": outcome,
+                    "resultVersionId": result_version_id,
+                },
+                occurred_at=timestamp,
+            )
+            connection.commit()
+            resolved = connection.execute(
+                "SELECT * FROM needs_reviews WHERE id = ?", (int(review_id),)
+            ).fetchone()
+        return self._needs_review_row(resolved) if resolved is not None else None
+
+    @staticmethod
+    def _needs_review_row(
+        row: sqlite3.Row, *, created: bool | None = None
+    ) -> dict[str, Any]:
+        result = {
+            "id": int(row["id"]),
+            "project": row["project"],
+            "key": row["key"],
+            "status": row["status"],
+            "sourceType": row["source_type"],
+            "sourceId": row["source_id"],
+            "contentHash": row["content_hash"],
+            "reason": row["reason"],
+            "outcome": row["outcome"],
+            "resultVersionId": row["result_version_id"],
+            "createdAt": int(row["created_at"]),
+            "resolvedAt": row["resolved_at"],
+        }
+        if created is not None:
+            result["created"] = created
+        return result
+
+    def create_global_memory_request(
+        self,
+        key: str,
+        *,
+        value: str | None,
+        source: str | None,
+        kind: str,
+        rationale: str,
+        requested_from_project: str,
+        created_at: int | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._validate_global_proposal(
+            {
+                "key": key,
+                "value": value,
+                "source": source,
+                "kind": kind,
+                "rationale": rationale,
+            }
+        )
+        project = requested_from_project.strip()
+        if not project:
+            raise ValueError("requested_from_project cannot be empty")
+        timestamp = _now(created_at)
+        serialized = stable_json(proposal)
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT *
+                FROM global_memory_requests
+                WHERE status = 'pending'
+                  AND key = ?
+                  AND proposed_json = ?
+                  AND requested_from_project = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (proposal["key"], serialized, project),
+            ).fetchone()
+            if existing is not None:
+                result = self._global_memory_request_row(existing)
+                result["created"] = False
+                return result
+            cursor = connection.execute(
+                """
+                INSERT INTO global_memory_requests(
+                    key, initial_json, proposed_json, rationale,
+                    requested_from_project, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal["key"],
+                    serialized,
+                    serialized,
+                    proposal["rationale"],
+                    project,
+                    timestamp,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("global-memory request insert did not return an id")
+            request_id = int(cursor.lastrowid)
+            self._record_event(
+                connection,
+                "global-memory.requested",
+                project=project,
+                payload={"requestId": request_id, "proposal": proposal},
+                occurred_at=timestamp,
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM global_memory_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("created global-memory request could not be loaded")
+        result = self._global_memory_request_row(row)
+        result["created"] = True
+        return result
+
+    def update_global_memory_request(
+        self,
+        request_id: int,
+        *,
+        key: str,
+        value: str | None,
+        source: str | None,
+        kind: str,
+        rationale: str,
+        edited_at: int | None = None,
+    ) -> dict[str, Any] | None:
+        proposal = self._validate_global_proposal(
+            {
+                "key": key,
+                "value": value,
+                "source": source,
+                "kind": kind,
+                "rationale": rationale,
+            }
+        )
+        timestamp = _now(edited_at)
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM global_memory_requests WHERE id = ? AND status = 'pending'",
+                (int(request_id),),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                """
+                UPDATE global_memory_requests
+                SET key = ?, proposed_json = ?, rationale = ?, edited_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (
+                    proposal["key"],
+                    stable_json(proposal),
+                    proposal["rationale"],
+                    timestamp,
+                    int(request_id),
+                ),
+            )
+            self._record_event(
+                connection,
+                "global-memory.edited",
+                project=existing["requested_from_project"],
+                payload={"requestId": int(request_id), "proposal": proposal},
+                occurred_at=timestamp,
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM global_memory_requests WHERE id = ?", (int(request_id),)
+            ).fetchone()
+        return self._global_memory_request_row(row) if row is not None else None
+
+    def decide_global_memory_request(
+        self,
+        request_id: int,
+        *,
+        decision: str,
+        decided_at: int | None = None,
+    ) -> dict[str, Any] | None:
+        if decision not in {"approve", "reject"}:
+            raise ValueError("decision must be approve or reject")
+        timestamp = _now(decided_at)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM global_memory_requests WHERE id = ? AND status = 'pending'",
+                (int(request_id),),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            proposal = self._validate_global_proposal(json.loads(row["proposed_json"]))
+            status = "approved" if decision == "approve" else "rejected"
+            memory_action: str | None = None
+            version_id: int | None = None
+            if decision == "approve":
+                latest_relevant: str | None = None
+                events = connection.execute(
+                    """
+                    SELECT event_type, payload_json
+                    FROM context_events
+                    WHERE event_type IN (
+                        'global-memory.requested',
+                        'global-memory.edited',
+                        'global-memory.approved'
+                    )
+                    ORDER BY id
+                    """
+                ).fetchall()
+                for event in events:
+                    payload = json.loads(event["payload_json"])
+                    event_request_id = int(payload.get("requestId", -1))
+                    if (
+                        event_request_id == int(request_id)
+                        and event["event_type"]
+                        in {"global-memory.requested", "global-memory.edited"}
+                    ):
+                        latest_relevant = "current"
+                    elif (
+                        event_request_id != int(request_id)
+                        and event["event_type"] == "global-memory.approved"
+                        and isinstance(payload.get("finalProposal"), dict)
+                        and payload["finalProposal"].get("key") == proposal["key"]
+                    ):
+                        latest_relevant = "conflict"
+                if latest_relevant == "conflict":
+                    connection.rollback()
+                    raise ValueError(
+                        "global memory changed after this request was proposed; "
+                        "review and save the pending request again before approval"
+                    )
+                before = connection.execute(
+                    """
+                    SELECT node_type AS kind, value, source
+                    FROM context_nodes
+                    WHERE namespace = ? AND project = '' AND stable_key = ?
+                    """,
+                    (MEMORY_NAMESPACE, proposal["key"]),
+                ).fetchone()
+                before_hash = topic_hash(dict(before)) if before is not None else None
+                after_hash = topic_hash(proposal)
+                if before_hash == after_hash:
+                    memory_action = "unchanged"
+                else:
+                    memory_action = "created" if before is None else "updated"
+                    connection.execute(
+                        """
+                        INSERT INTO context_nodes(
+                            id, namespace, project, stable_key, node_type, label,
+                            value, source, origin, properties_json, set_at,
+                            created_at, updated_at
+                        ) VALUES (?, ?, '', ?, ?, ?, ?, ?, 'human', '{}', ?, ?, ?)
+                        ON CONFLICT(namespace, project, stable_key) DO UPDATE SET
+                            node_type = excluded.node_type,
+                            label = excluded.label,
+                            value = excluded.value,
+                            source = excluded.source,
+                            origin = excluded.origin,
+                            set_at = excluded.set_at,
+                            external_id = NULL,
+                            source_graph = NULL,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            _stable_id(MEMORY_NAMESPACE, "", proposal["key"]),
+                            MEMORY_NAMESPACE,
+                            proposal["key"],
+                            proposal["kind"],
+                            proposal["key"],
+                            proposal["value"],
+                            proposal["source"],
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    version_id = self._record_memory_version(
+                        connection,
+                        project="",
+                        key=proposal["key"],
+                        kind=proposal["kind"],
+                        value=proposal["value"],
+                        source=proposal["source"],
+                        origin="human",
+                        created_at=timestamp,
+                    )
+            connection.execute(
+                """
+                UPDATE global_memory_requests
+                SET status = ?, final_json = ?, decided_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (status, stable_json(proposal), timestamp, int(request_id)),
+            )
+            self._record_event(
+                connection,
+                f"global-memory.{status}",
+                project=row["requested_from_project"],
+                payload={
+                    "requestId": int(request_id),
+                    "initialProposal": json.loads(row["initial_json"]),
+                    "finalProposal": proposal,
+                    "memoryAction": memory_action,
+                    "versionId": version_id,
+                },
+                occurred_at=timestamp,
+            )
+            connection.commit()
+            decided = connection.execute(
+                "SELECT * FROM global_memory_requests WHERE id = ?", (int(request_id),)
+            ).fetchone()
+        result = self._global_memory_request_row(decided) if decided is not None else None
+        if result is not None:
+            result["memoryAction"] = memory_action
+            result["versionId"] = version_id
+        return result
+
+    def list_global_memory_requests(
+        self, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        if status is not None and status not in GLOBAL_MEMORY_REQUEST_STATUSES:
+            raise ValueError(f"unsupported global-memory request status: {status}")
+        query = "SELECT * FROM global_memory_requests"
+        parameters: tuple[Any, ...] = ()
+        if status is not None:
+            query += " WHERE status = ?"
+            parameters = (status,)
+        query += " ORDER BY created_at DESC, id DESC"
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [self._global_memory_request_row(row) for row in rows]
+
+    @staticmethod
+    def _validate_global_proposal(raw: dict[str, Any]) -> dict[str, Any]:
+        key = validate_topic_key(str(raw.get("key", "")))
+        kind = str(raw.get("kind", "note"))
+        if kind not in {"decision", "note", "doc-ref"}:
+            raise ValueError("global memory kind must be decision, note, or doc-ref")
+        value = raw.get("value")
+        source = raw.get("source")
+        if value is not None and not isinstance(value, str):
+            raise ValueError("global memory value must be a string")
+        if source is not None and not isinstance(source, str):
+            raise ValueError("global memory source must be a string")
+        if (value is None) == (source is None):
+            raise ValueError("exactly one of value or source is required")
+        if value is not None and (not value.strip() or len(value) > 65_536):
+            raise ValueError("global memory value must be between 1 and 65536 characters")
+        if source is not None and (not source.strip() or len(source) > 4096):
+            raise ValueError("global memory source must be between 1 and 4096 characters")
+        rationale = str(raw.get("rationale", "")).strip()
+        if not rationale or len(rationale) > 4096:
+            raise ValueError("rationale must be between 1 and 4096 characters")
+        return {
+            "key": key,
+            "kind": kind,
+            "value": value.strip() if value is not None else None,
+            "source": source.strip() if source is not None else None,
+            "rationale": rationale,
+        }
+
+    @staticmethod
+    def _global_memory_request_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "status": row["status"],
+            "key": row["key"],
+            "initialProposal": json.loads(row["initial_json"]),
+            "proposal": json.loads(row["proposed_json"]),
+            "finalProposal": json.loads(row["final_json"]) if row["final_json"] else None,
+            "rationale": row["rationale"],
+            "requestedFromProject": row["requested_from_project"],
+            "createdAt": int(row["created_at"]),
+            "editedAt": row["edited_at"],
+            "decidedAt": row["decided_at"],
+        }
+
+    def project_memory_report(
+        self,
+        *,
+        project: str,
+        since: int | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_project = project.strip()
+        clauses = ["project = ?", "event_type LIKE 'memory.%'"]
+        parameters: list[Any] = [normalized_project]
+        if since is not None:
+            clauses.append("occurred_at >= ?")
+            parameters.append(int(since))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, event_type, payload_json, occurred_at
+                FROM context_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY occurred_at DESC, id DESC
+                """,  # nosec B608
+                tuple(parameters),
+            ).fetchall()
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            date = time.strftime("%Y-%m-%d", time.localtime(int(row["occurred_at"])))
+            groups.setdefault(date, []).append(
+                {
+                    "id": int(row["id"]),
+                    "type": row["event_type"],
+                    "payload": json.loads(row["payload_json"]),
+                    "occurredAt": int(row["occurred_at"]),
+                }
+            )
+        return [{"date": date, "events": groups[date]} for date in sorted(groups, reverse=True)]
+
+    def record_memory_usage(
+        self,
+        node_id: str,
+        *,
+        event: str,
+        occurred_at: int | None = None,
+    ) -> None:
+        if event not in {"selected", "expanded"}:
+            raise ValueError(f"unsupported memory usage event: {event}")
+        timestamp = _now(occurred_at)
+        count_column = "selected_count" if event == "selected" else "expanded_count"
+        time_column = "last_selected_at" if event == "selected" else "last_expanded_at"
+        with self.connect() as connection:
+            node = connection.execute(
+                "SELECT id FROM context_nodes WHERE id = ? AND namespace = ?",
+                (node_id, MEMORY_NAMESPACE),
+            ).fetchone()
+            if node is None:
+                raise KeyError(f"memory node not found: {node_id}")
+            connection.execute(
+                f"""
+                INSERT INTO memory_usage(node_id, {count_column}, {time_column})
+                VALUES (?, 1, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    {count_column} = {count_column} + 1,
+                    {time_column} = excluded.{time_column}
+                """,  # nosec B608
+                (node_id, timestamp),
+            )
+            connection.commit()
+
+    def memory_usage(self, node_ids: Sequence[str] = ()) -> dict[str, dict[str, Any]]:
+        normalized = list(dict.fromkeys(node_id.strip() for node_id in node_ids if node_id.strip()))
+        parameters: tuple[Any, ...] = ()
+        query = "SELECT * FROM memory_usage"
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            query += f" WHERE node_id IN ({placeholders})"  # nosec B608
+            parameters = tuple(normalized)
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return {
+            str(row["node_id"]): {
+                "selectedCount": int(row["selected_count"]),
+                "expandedCount": int(row["expanded_count"]),
+                "lastSelectedAt": row["last_selected_at"],
+                "lastExpandedAt": row["last_expanded_at"],
+            }
+            for row in rows
+        }
+
+    def delete_topic(self, key: str, *, project: str = "") -> bool:
         key = validate_topic_key(key)
+        normalized_project = project.strip()
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 DELETE FROM context_nodes
-                WHERE namespace = ? AND project = '' AND stable_key = ?
+                WHERE namespace = ? AND project = ? AND stable_key = ?
                 """,
-                (MEMORY_NAMESPACE, key),
+                (MEMORY_NAMESPACE, normalized_project, key),
             )
             connection.commit()
             return cursor.rowcount > 0
 
-    def confirm_topic(self, key: str, *, confirmed_at: int | None = None) -> bool:
+    def confirm_topic(
+        self,
+        key: str,
+        *,
+        project: str = "",
+        confirmed_at: int | None = None,
+    ) -> bool:
         key = validate_topic_key(key)
+        normalized_project = project.strip()
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE context_nodes SET set_at = ?, updated_at = ?
-                WHERE namespace = ? AND project = '' AND stable_key = ?
+                WHERE namespace = ? AND project = ? AND stable_key = ?
                 """,
                 (
                     _now(confirmed_at),
                     _now(confirmed_at),
                     MEMORY_NAMESPACE,
+                    normalized_project,
                     key,
                 ),
             )
@@ -701,12 +1557,55 @@ class ContextGraphRepository:
         stale_after_days: int = DEFAULT_STALE_DAYS,
         now: int | None = None,
     ) -> list[dict[str, Any]]:
+        topics = self.list_topics(project=project)
+        node_ids = [
+            _stable_id(MEMORY_NAMESPACE, str(topic["project"]), str(topic["key"]))
+            for topic in topics
+        ]
+        usage = self.memory_usage(node_ids)
+        open_reviews = self.list_needs_reviews(project=project, status="open") if project else []
+        review_counts: dict[str, int] = {}
+        for review in open_reviews:
+            review_counts[review["key"]] = review_counts.get(review["key"], 0) + 1
+        with self.connect() as connection:
+            version_rows = connection.execute(
+                """
+                SELECT project, key, COUNT(*) AS count
+                FROM memory_versions
+                WHERE project IN ('', ?)
+                GROUP BY project, key
+                """,
+                (project.strip(),),
+            ).fetchall()
+        version_counts = {
+            (str(row["project"]), str(row["key"])): int(row["count"]) for row in version_rows
+        }
         return [
             {
                 **topic,
-                "stale": is_stale(topic["set_at"], now=now, stale_after_days=stale_after_days),
+                "category": memory_category(str(topic["kind"])),
+                "stale": is_stale(
+                    topic["set_at"], now=now, stale_after_days=stale_after_days
+                ),
+                "usage": usage.get(
+                    _stable_id(
+                        MEMORY_NAMESPACE,
+                        str(topic["project"]),
+                        str(topic["key"]),
+                    ),
+                    {
+                        "selectedCount": 0,
+                        "expandedCount": 0,
+                        "lastSelectedAt": None,
+                        "lastExpandedAt": None,
+                    },
+                ),
+                "needsReviewCount": review_counts.get(str(topic["key"]), 0),
+                "versionCount": version_counts.get(
+                    (str(topic["project"]), str(topic["key"])), 0
+                ),
             }
-            for topic in self.list_topics(project=project)
+            for topic in topics
         ]
 
     def import_graph(self, graph_path: str | Path, *, project: str) -> dict[str, Any]:
@@ -1823,21 +2722,24 @@ class ContextGraphRepository:
         key = validate_topic_key(key)
         timestamp = _now(resolved_at)
         with self.connect() as connection:
-            topic = connection.execute(
-                """
-                SELECT id FROM context_nodes
-                WHERE namespace = ? AND project = '' AND stable_key = ?
-                """,
-                (MEMORY_NAMESPACE, key),
-            ).fetchone()
-            if topic is None:
-                raise KeyError(f"topic not found: {key}")
             request = connection.execute(
                 "SELECT * FROM requests WHERE id = ? AND status = 'open'",
                 (int(request_id),),
             ).fetchone()
             if request is None:
                 return False
+            project = str(request["project"] or "")
+            topic = connection.execute(
+                """
+                SELECT id FROM context_nodes
+                WHERE namespace = ? AND stable_key = ? AND project IN ('', ?)
+                ORDER BY CASE WHEN project = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (MEMORY_NAMESPACE, key, project, project),
+            ).fetchone()
+            if topic is None:
+                raise KeyError(f"topic not found: {key}")
             cursor = connection.execute(
                 """
                 UPDATE requests
@@ -2174,6 +3076,20 @@ class ContextGraphRepository:
                 ),
                 "contextFeedback": int(
                     connection.execute("SELECT COUNT(*) FROM gate_feedback").fetchone()[0]
+                ),
+                "memoryVersions": int(
+                    connection.execute("SELECT COUNT(*) FROM memory_versions").fetchone()[0]
+                ),
+                "needsReviews": int(
+                    connection.execute("SELECT COUNT(*) FROM needs_reviews").fetchone()[0]
+                ),
+                "memoryUsage": int(
+                    connection.execute("SELECT COUNT(*) FROM memory_usage").fetchone()[0]
+                ),
+                "globalMemoryRequests": int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM global_memory_requests"
+                    ).fetchone()[0]
                 ),
             }
         return {

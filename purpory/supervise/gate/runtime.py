@@ -280,14 +280,15 @@ class GateModelManager:
         executable = _transformers_executable()
         selected_port = port or _available_port()
         endpoint = f"http://127.0.0.1:{selected_port}/v1"
+        device = _gate_device()
         command = (
             executable,
             "serve",
-            "--force-model",
             installation.canonical_model,
             "--port",
             str(selected_port),
-            "--continuous-batching",
+            "--device",
+            device,
             "--reasoning",
             "off",
             "--model-timeout",
@@ -434,17 +435,34 @@ def _download_snapshot(model_id: str, revision: str | None, *, force: bool) -> s
 
 
 def _transformers_executable() -> str:
-    executable = shutil.which("transformers")
-    if executable:
-        return executable
     sibling = Path(sys.executable).with_name(
         "transformers.exe" if os.name == "nt" else "transformers"
     )
     if sibling.is_file():
         return str(sibling)
+    executable = shutil.which("transformers")
+    if executable:
+        return str(executable)
     raise RuntimeError(
         "`transformers serve` is unavailable; install `purpory[gate]` in this environment"
     )
+
+
+def _gate_device() -> str:
+    configured = os.environ.get("PURPORY_GATE_DEVICE", "").strip()
+    if configured:
+        if (
+            len(configured) > 64
+            or configured.startswith("-")
+            or any(character.isspace() for character in configured)
+        ):
+            raise ValueError("PURPORY_GATE_DEVICE must be one device identifier")
+        return configured
+    # Qwen 3.5's bfloat16 weights currently take tens of seconds per tensor to
+    # cast onto MPS through Transformers' auto device selection. The gate handles
+    # short, serialized classification requests, so CPU is the reliable default
+    # on macOS while callers can still opt into MPS explicitly.
+    return "cpu" if sys.platform == "darwin" else "auto"
 
 
 def _available_port() -> int:
@@ -476,6 +494,30 @@ def _pid_is_running(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+    if os.name != "nt":
+        try:
+            ps_path = next(
+                (
+                    candidate
+                    for candidate in (Path("/bin/ps"), Path("/usr/bin/ps"))
+                    if candidate.is_file()
+                ),
+                None,
+            )
+            if ps_path is not None:
+                res = subprocess.run(
+                    [str(ps_path), "-p", str(pid), "-o", "state="],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                state = res.stdout.strip()
+                if state and "Z" in state:
+                    return False
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     return True
 
 

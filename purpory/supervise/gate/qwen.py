@@ -1,4 +1,4 @@
-"""Qwen 3.5 gate adapter for schema-capable OpenAI-compatible runtimes."""
+"""Qwen 3.5 gate adapter for OpenAI-compatible runtimes."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from purpory.supervise.gate.contract import (
-    GATE_RESPONSE_SCHEMA,
+    MODEL_ACTIONS,
     PROMPT_VERSION,
     GateProposal,
     GateRequest,
@@ -22,16 +22,26 @@ DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B"
 DEFAULT_TIMEOUT_SECONDS = 2.0
 MAX_RESPONSE_BYTES = 65_536
 
-SYSTEM_PROMPT = """You are Purpory's memory gate. Decide only whether the current request:
-- skip: can be handled from the current conversation without durable user/project memory;
+SYSTEM_PROMPT = """You are Purpory's memory gate classifier. Decide only whether the current request:
+- skip: general conversation, direct questions, or requests answered without durable project memory;
 - search: should search durable human decisions, code context, or prior session history;
-- ask: lacks required user input that memory search cannot supply.
+- ask: ONLY when a specific modification/action lacks essential target specifications. Purpory will still search memory before asking the user.
 
-Never answer the request. Never invent topic keys. Preserve useful Korean terms and add concise
-English code-vocabulary translations to keywords when a multilingual request needs code search.
-Keywords are non-authoritative search hints, never node identifiers.
-Use search whenever the request refers to prior choices, user preferences, project-specific facts,
-code outside the supplied conversation, or earlier sessions. Return exactly the required schema.
+Never classify general questions, conversation, or inquiries about purpory as ASK.
+Questions about this project's goal, intent, decisions, history, implementation, or current state are SEARCH.
+
+OUTPUT CONTRACT (mandatory):
+- Reply with exactly one word and nothing else: SKIP, SEARCH, or ASK.
+- Do not return JSON, punctuation, prose, or a Markdown code fence.
+
+Examples:
+- "안녕하세요" -> SKIP
+- "gate model이 비활성화되었을 때 fallback이 있어?" -> SKIP
+- "전에 정한 인증 정책을 찾아줘" -> SEARCH
+- "Purpory의 궁극적인 목표가 뭐야?" -> SEARCH
+- "현재 코드의 gate parser를 확인해줘" -> SEARCH
+- "이걸 배포해줘" when no target is supplied -> ASK
+
 Prompt contract: %s.""" % PROMPT_VERSION
 
 
@@ -101,20 +111,17 @@ class QwenGateProvider:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        request.model_payload(),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
+                    # The classifier needs the request itself, not the full
+                    # context catalog. Keeping this turn small materially
+                    # improves routing accuracy on the local 0.8B model.
+                    "content": request.message,
                 },
             ],
-            "temperature": 0,
-            "max_tokens": 96,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": GATE_RESPONSE_SCHEMA,
-            },
+            # transformers serve 5.14 ignores OpenAI's response_format field,
+            # so the local 0.8B model performs one bounded classification. The
+            # adapter deterministically expands that classification into the
+            # richer internal proposal contract.
+            "max_tokens": 8,
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -141,12 +148,10 @@ class QwenGateProvider:
         try:
             payload = json.loads(raw)
             content = _message_content(payload)
-            proposal_payload = json.loads(content) if isinstance(content, str) else content
-            if not isinstance(proposal_payload, dict):
-                raise ValueError("gate content must be a JSON object")
-            proposal = GateProposal.from_mapping(proposal_payload)
+            action = _classified_action(content)
+            proposal = _proposal_for_action(action, request)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise GateProviderError(f"invalid constrained gate response: {exc}") from exc
+            raise GateProviderError(f"invalid gate classifier response: {exc}") from exc
         return ProviderResult(
             proposal=proposal,
             model_id=self.model,
@@ -191,3 +196,47 @@ def _message_content(payload: Any) -> Any:
     if not isinstance(content, (str, dict)):
         raise ValueError("gate response content is missing")
     return content
+
+
+def _classified_action(content: Any) -> str:
+    if not isinstance(content, str):
+        raise ValueError("gate classifier content must be text")
+    action = content.strip().lower()
+    if action not in MODEL_ACTIONS:
+        raise ValueError("expected exactly one of SKIP, SEARCH, or ASK")
+    return action
+
+
+def _proposal_for_action(action: str, request: GateRequest) -> GateProposal:
+    if action == "skip":
+        payload = {
+            "action": "skip",
+            "query": None,
+            "scopes": [],
+            "keywords": [],
+            "reasonCode": "SELF_CONTAINED",
+            "clarification": None,
+        }
+    elif action == "search":
+        payload = {
+            "action": "search",
+            "query": request.message,
+            "scopes": ["human", "code", "session"],
+            "keywords": [],
+            "reasonCode": "CONTEXT_SEARCH_REQUIRED",
+            "clarification": None,
+        }
+    elif action == "ask":
+        payload = {
+            "action": "ask",
+            "query": None,
+            "scopes": [],
+            "keywords": [],
+            "reasonCode": "USER_INPUT_REQUIRED",
+            "clarification": (
+                "이 요청을 진행하는 데 필요한 대상과 기대 결과를 구체적으로 알려주세요."
+            ),
+        }
+    else:
+        raise ValueError(f"unsupported classified gate action: {action}")
+    return GateProposal.from_mapping(payload)

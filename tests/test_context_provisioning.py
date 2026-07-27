@@ -111,11 +111,37 @@ def test_search_uses_only_terms_present_in_the_context_vocabulary(
     )
 
     assert result["terms"] == ["auth", "database"]
-    assert result["ignoredTerms"] == ["인증과", "데이터베이스", "연결"]
+    assert result["ignoredTerms"] == ["연결"]
+    assert {item["input"] for item in result["expandedTerms"]} >= {
+        "인증과",
+        "데이터베이스",
+    }
     assert {candidate["label"] for candidate in result["candidates"]} >= {
         "AuthService",
         "DatabasePool",
     }
+
+
+def test_search_expands_korean_developer_terms_without_an_llm(
+    tmp_path: Path,
+) -> None:
+    service = _service_with_graph(tmp_path)
+
+    result = service.search(
+        "인증과 데이터베이스를 찾아줘",
+        session_id="agent-a",
+        scopes=["code"],
+        connect=False,
+    )
+
+    assert {"auth", "authentication", "database"} & set(result["terms"])
+    assert {candidate["label"] for candidate in result["candidates"]} >= {
+        "AuthService",
+        "DatabasePool",
+    }
+    expansions = {item["input"]: item["terms"] for item in result["expandedTerms"]}
+    assert "auth" in expansions["인증과"]
+    assert "database" in expansions["데이터베이스를"]
 
 
 def test_session_scope_can_recall_previously_delivered_memory(tmp_path: Path) -> None:
@@ -139,6 +165,54 @@ def test_session_scope_can_recall_previously_delivered_memory(tmp_path: Path) ->
 
     assert result["candidates"][0]["nodeId"] == memory_id
     assert "session-recall" in result["candidates"][0]["signals"]
+
+
+def test_deliver_records_project_local_reconciled_memory(tmp_path: Path) -> None:
+    service = _service_with_graph(tmp_path)
+    key = "intent.product.long-term-autonomy"
+    value = "Eventually replace the user's work after learning durable intent."
+    applied = service.reconcile_topics(
+        [
+            {
+                "key": key,
+                "value": value,
+                "kind": "decision",
+                "expectedHash": None,
+            }
+        ],
+        apply=True,
+        session_id="reconcile-session",
+    )
+    assert applied["changes"][0]["action"] == "created"
+
+    search = service.search(
+        "long term autonomy durable intent",
+        session_id="agent-a",
+        scopes=["human"],
+        connect=False,
+    )
+    memory = next(candidate for candidate in search["candidates"] if candidate["key"] == key)
+
+    delivered = service.deliver(
+        [memory["nodeId"]],
+        session_id="agent-a",
+        token_budget=512,
+    )
+
+    assert delivered["delivery"][0]["nodeId"] == memory["nodeId"]
+    assert value in delivered["rendered"]
+    with service.repository.connect() as connection:
+        received = connection.execute(
+            """
+            SELECT target.project
+            FROM context_edges edge
+            JOIN context_nodes target ON target.id = edge.target_id
+            WHERE edge.relation = 'received' AND target.id = ?
+            """,
+            (memory["nodeId"],),
+        ).fetchone()
+    assert received is not None
+    assert received["project"] == service.project_id
 
 
 def test_candidate_pool_reserves_space_for_memory_and_active_paths(

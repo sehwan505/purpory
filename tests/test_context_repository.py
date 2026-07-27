@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from purpory.supervise.bridge import candidate_topics, seed_from_graph
-from purpory.supervise.repository import ContextGraphRepository
+from purpory.supervise.repository import ContextGraphRepository, value_hash
 from purpory.supervise.recall import cue, lessons
 from purpory.supervise.resolve import graph_slice, resolve_topic
 
@@ -222,6 +222,254 @@ def test_reconcile_conflict_rolls_back_the_whole_batch(tmp_path: Path) -> None:
     assert intent_b is not None and intent_b["value"] == "Original B"
 
 
+def test_reconcile_keeps_current_and_two_previous_versions(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    key = "intent.product.direction"
+    expected_hash = None
+    for number in range(1, 5):
+        result = repository.reconcile_topics(
+            [
+                {
+                    "key": key,
+                    "kind": "decision",
+                    "value": f"Direction {number}",
+                    "expectedHash": expected_hash,
+                }
+            ],
+            project="demo",
+            apply=True,
+        )
+        assert result["changes"][0]["action"] in {"created", "updated"}
+        topic = repository.get_topic(key, project="demo")
+        assert topic is not None
+        expected_hash = topic["hash"]
+
+    versions = repository.list_memory_versions(key, project="demo")
+
+    assert [item["version"] for item in versions] == [4, 3, 2]
+    assert [item["value"] for item in versions] == [
+        "Direction 4",
+        "Direction 3",
+        "Direction 2",
+    ]
+    assert [item["superseded"] for item in versions] == [False, True, True]
+
+
+def test_reconcile_preview_and_unchanged_apply_do_not_create_versions(
+    tmp_path: Path,
+) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    key = "intent.product.direction"
+    created = repository.reconcile_topics(
+        [
+            {
+                "key": key,
+                "kind": "decision",
+                "value": "Stable direction",
+                "expectedHash": None,
+            }
+        ],
+        project="demo",
+        apply=True,
+    )
+    expected_hash = created["changes"][0]["proposedHash"]
+    unchanged = {
+        "key": key,
+        "kind": "decision",
+        "value": "Stable direction",
+        "expectedHash": expected_hash,
+    }
+
+    repository.reconcile_topics([unchanged], project="demo")
+    applied = repository.reconcile_topics([unchanged], project="demo", apply=True)
+
+    assert applied["changes"][0]["action"] == "unchanged"
+    assert len(repository.list_memory_versions(key, project="demo")) == 1
+
+
+def test_needs_review_is_content_addressed_and_does_not_reopen(
+    tmp_path: Path,
+) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    repository.reconcile_topics(
+        [
+            {
+                "key": "intent.database",
+                "kind": "decision",
+                "value": "Use PostgreSQL",
+                "expectedHash": None,
+            }
+        ],
+        project="demo",
+        apply=True,
+    )
+    first_hash = value_hash("database evidence v1")
+    first = repository.create_needs_review(
+        "intent.database",
+        project="demo",
+        source_type="code",
+        source_id="src/database.py",
+        content_hash=first_hash,
+        reason="Code now configures SQLite.",
+    )
+    resolved = repository.resolve_needs_review(first["id"], outcome="keep")
+    repeated = repository.create_needs_review(
+        "intent.database",
+        project="demo",
+        source_type="code",
+        source_id="src/database.py",
+        content_hash=first_hash,
+        reason="Code now configures SQLite.",
+    )
+    changed = repository.create_needs_review(
+        "intent.database",
+        project="demo",
+        source_type="code",
+        source_id="src/database.py",
+        content_hash=value_hash("database evidence v2"),
+        reason="Code changed again.",
+    )
+
+    assert resolved is not None and resolved["status"] == "resolved"
+    assert repeated["id"] == first["id"]
+    assert repeated["created"] is False
+    assert repeated["status"] == "resolved"
+    assert changed["created"] is True
+    assert changed["status"] == "open"
+
+
+def test_memory_usage_preserves_raw_selection_and_expansion_counts(
+    tmp_path: Path,
+) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    repository.set_topic("intent.database", value="Use PostgreSQL", kind="decision")
+    node = repository.list_retrieval_nodes(project="demo")[0]
+
+    repository.record_memory_usage(node["id"], event="selected", occurred_at=10)
+    repository.record_memory_usage(node["id"], event="selected", occurred_at=20)
+    repository.record_memory_usage(node["id"], event="expanded", occurred_at=30)
+
+    usage = repository.memory_usage([node["id"]])[node["id"]]
+    assert usage == {
+        "selectedCount": 2,
+        "expandedCount": 1,
+        "lastSelectedAt": 20,
+        "lastExpandedAt": 30,
+    }
+
+
+def test_global_memory_requires_request_decision_and_retains_edits(
+    tmp_path: Path,
+) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    request = repository.create_global_memory_request(
+        "intent.editor",
+        value="Use Vim",
+        source=None,
+        kind="decision",
+        rationale="Reusable preference",
+        requested_from_project="demo",
+    )
+    assert repository.get_topic("intent.editor") is None
+    edited = repository.update_global_memory_request(
+        request["id"],
+        key="intent.editor",
+        value="Use Neovim",
+        source=None,
+        kind="decision",
+        rationale="The user corrected the reusable preference",
+    )
+    assert edited is not None
+
+    approved = repository.decide_global_memory_request(request["id"], decision="approve")
+
+    assert approved is not None and approved["status"] == "approved"
+    assert approved["initialProposal"]["value"] == "Use Vim"
+    assert approved["proposal"]["value"] == "Use Neovim"
+    assert approved["finalProposal"]["value"] == "Use Neovim"
+    topic = repository.get_topic("intent.editor")
+    assert topic is not None and topic["value"] == "Use Neovim"
+    assert len(repository.list_memory_versions("intent.editor", project="")) == 1
+
+
+def test_identical_pending_global_memory_request_is_deduplicated(
+    tmp_path: Path,
+) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    arguments = {
+        "value": "Use Neovim",
+        "source": None,
+        "kind": "decision",
+        "rationale": "Reusable preference",
+        "requested_from_project": "demo",
+    }
+
+    first = repository.create_global_memory_request("intent.editor", **arguments)
+    repeated = repository.create_global_memory_request("intent.editor", **arguments)
+
+    assert first["created"] is True
+    assert repeated["created"] is False
+    assert repeated["id"] == first["id"]
+    assert len(repository.list_global_memory_requests("pending")) == 1
+
+
+def test_stale_global_memory_approval_requires_a_fresh_human_edit(
+    tmp_path: Path,
+) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    first = repository.create_global_memory_request(
+        "intent.editor",
+        value="Use Vim",
+        source=None,
+        kind="decision",
+        rationale="First reusable preference",
+        requested_from_project="demo",
+    )
+    stale = repository.create_global_memory_request(
+        "intent.editor",
+        value="Use Emacs",
+        source=None,
+        kind="decision",
+        rationale="Concurrent reusable preference",
+        requested_from_project="demo",
+    )
+    repository.decide_global_memory_request(first["id"], decision="approve")
+
+    with pytest.raises(ValueError, match="changed after this request"):
+        repository.decide_global_memory_request(stale["id"], decision="approve")
+
+    edited = repository.update_global_memory_request(
+        stale["id"],
+        key="intent.editor",
+        value="Use Neovim",
+        source=None,
+        kind="decision",
+        rationale="Reviewed after the competing approval",
+    )
+    assert edited is not None
+    approved = repository.decide_global_memory_request(stale["id"], decision="approve")
+    assert approved is not None and approved["status"] == "approved"
+    topic = repository.get_topic("intent.editor")
+    assert topic is not None and topic["value"] == "Use Neovim"
+
+
+def test_rejected_global_memory_request_does_not_write_memory(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    request = repository.create_global_memory_request(
+        "intent.shell",
+        value="Use fish",
+        source=None,
+        kind="decision",
+        rationale="Potentially reusable preference",
+        requested_from_project="demo",
+    )
+
+    rejected = repository.decide_global_memory_request(request["id"], decision="reject")
+
+    assert rejected is not None and rejected["status"] == "rejected"
+    assert repository.get_topic("intent.shell") is None
+
+
 def test_project_memory_overrides_global_memory_only_in_that_project(tmp_path: Path) -> None:
     repository = ContextGraphRepository(tmp_path / "context.db")
     repository.set_topic("intent.direction", value="Global", kind="decision")
@@ -327,6 +575,45 @@ def test_request_resolution_requires_an_existing_topic(tmp_path: Path) -> None:
     repository.set_topic("decision.deploy", value="Blue-green")
     assert repository.resolve_request(request_id, "decision.deploy") is True
     assert repository.list_requests("resolved")[0]["resolvedKey"] == "decision.deploy"
+
+
+def test_request_resolution_accepts_project_local_reconciled_memory(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    project = "demo"
+    key = "intent.product.goal"
+    applied = repository.reconcile_topics(
+        [
+            {
+                "key": key,
+                "value": "Preserve the user's durable intent.",
+                "kind": "decision",
+                "expectedHash": None,
+            }
+        ],
+        project=project,
+        apply=True,
+        session_id="reconcile-session",
+    )
+    assert applied["changes"][0]["action"] == "created"
+    request_id = repository.create_request(
+        "session",
+        "Need the product goal",
+        project=project,
+    )
+
+    assert repository.resolve_request(request_id, key) is True
+
+    with repository.connect() as connection:
+        target = connection.execute(
+            """
+            SELECT node.project
+            FROM context_edges edge
+            JOIN context_nodes node ON node.id = edge.target_id
+            WHERE edge.relation = 'resolved-as'
+            """
+        ).fetchone()
+    assert target is not None
+    assert target["project"] == project
 
 
 def test_code_memory_and_seed_links_share_one_context_graph(tmp_path: Path) -> None:

@@ -26,6 +26,8 @@ STATIC_ROOT = Path(__file__).with_name("static")
 AGENT_MUTATION_PATHS = frozenset(
     {
         "/api/context/prepare",
+        "/api/global-memory/requests",
+        "/api/memory/reviews",
     }
 )
 
@@ -198,6 +200,12 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
                     since=int(since_raw) if since_raw else None,
                 )
             )
+        elif path.startswith("/api/topics/") and path.endswith("/versions"):
+            key = unquote(path.removeprefix("/api/topics/").removesuffix("/versions"))
+            try:
+                self._json(service.memory_versions(key))
+            except KeyError as exc:
+                self._error(HTTPStatus.NOT_FOUND, str(exc))
         elif path.startswith("/api/topics/"):
             key = unquote(path.removeprefix("/api/topics/"))
             try:
@@ -218,6 +226,22 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/requests":
             self._json(service.requests(status=_first(query, "status")))
+        elif path == "/api/memory/reviews":
+            self._json(
+                service.needs_reviews(
+                    status=_first(query, "status"),
+                    key=_first(query, "key"),
+                )
+            )
+        elif path == "/api/memory/report":
+            since_raw = _first(query, "since")
+            self._json(
+                service.project_memory_report(
+                    since=int(since_raw) if since_raw else None
+                )
+            )
+        elif path == "/api/global-memory/requests":
+            self._json(service.global_memory_requests(status=_first(query, "status")))
         elif path == "/api/context/decisions":
             self._json(
                 service.context_decisions(
@@ -286,6 +310,101 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
                 return
             result = {"ok": True, "id": request_id, "resolvedKey": key}
             self.server.events.publish("request", result)
+            self._json(result)
+        elif method == "POST" and path == "/api/memory/reviews":
+            result = service.create_needs_review(
+                str(payload.get("key", "")),
+                source_type=str(payload.get("sourceType", "")),
+                source_id=str(payload.get("sourceId", "")),
+                evidence=str(payload.get("evidence", "")),
+                reason=str(payload.get("reason", "")),
+            )
+            self.server.events.publish("memory", {"review": result["id"]})
+            self._json(
+                result,
+                status=HTTPStatus.CREATED if result.get("created") else HTTPStatus.OK,
+            )
+        elif (
+            method == "POST"
+            and path.startswith("/api/memory/reviews/")
+            and path.endswith("/resolve")
+        ):
+            review_id = int(
+                path.removeprefix("/api/memory/reviews/")
+                .removesuffix("/resolve")
+                .strip("/")
+            )
+            result = service.resolve_needs_review(
+                review_id,
+                outcome=str(payload.get("outcome", "")),
+                change=payload.get("change") if isinstance(payload.get("change"), dict) else None,
+            )
+            if result is None:
+                self._error(HTTPStatus.NOT_FOUND, "open needs-review not found")
+                return
+            self.server.events.publish("memory", {"review": review_id, "resolved": True})
+            self._json(result)
+        elif method == "POST" and path == "/api/global-memory/requests":
+            result = service.propose_global_memory(
+                str(payload.get("key", "")),
+                value=_optional_string(payload, "value"),
+                source=_optional_string(payload, "source"),
+                kind=str(payload.get("kind", "note")),
+                rationale=str(payload.get("rationale", "")),
+            )
+            self.server.events.publish("global-memory", {"request": result["id"]})
+            self._json(
+                result,
+                status=HTTPStatus.CREATED if result.get("created", True) else HTTPStatus.OK,
+            )
+        elif (
+            method == "POST"
+            and path.startswith("/api/global-memory/requests/")
+            and path.endswith("/edit")
+        ):
+            request_id = int(
+                path.removeprefix("/api/global-memory/requests/")
+                .removesuffix("/edit")
+                .strip("/")
+            )
+            result = service.edit_global_memory_request(
+                request_id,
+                key=str(payload.get("key", "")),
+                value=_optional_string(payload, "value"),
+                source=_optional_string(payload, "source"),
+                kind=str(payload.get("kind", "note")),
+                rationale=str(payload.get("rationale", "")),
+            )
+            if result is None:
+                self._error(HTTPStatus.NOT_FOUND, "pending global-memory request not found")
+                return
+            self.server.events.publish("global-memory", {"request": request_id, "edited": True})
+            self._json(result)
+        elif (
+            method == "POST"
+            and path.startswith("/api/global-memory/requests/")
+            and (
+                path.endswith("/approve")
+                or path.endswith("/reject")
+            )
+        ):
+            decision = "approve" if path.endswith("/approve") else "reject"
+            request_id = int(
+                path.removeprefix("/api/global-memory/requests/")
+                .removesuffix(f"/{decision}")
+                .strip("/")
+            )
+            result = service.decide_global_memory_request(
+                request_id,
+                decision=decision,
+            )
+            if result is None:
+                self._error(HTTPStatus.NOT_FOUND, "pending global-memory request not found")
+                return
+            self.server.events.publish(
+                "global-memory",
+                {"request": request_id, "status": result["status"]},
+            )
             self._json(result)
         elif method == "POST" and path == "/api/context/prepare":
             message = str(payload.get("message", ""))

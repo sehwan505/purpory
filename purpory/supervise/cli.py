@@ -11,6 +11,12 @@ from typing import Any, Sequence
 
 from purpory.supervise.library import ContextService
 
+USER_MEMORY_CATEGORIES = {
+    "intent": "decision",
+    "knowledge": "note",
+    "reference": "doc-ref",
+}
+
 
 def _remember_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -28,9 +34,21 @@ def _remember_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prefix", help="limit --list to one logical key prefix")
     parser.add_argument("--session", help="session id recorded with an applied batch")
     parser.add_argument(
+        "--global-request",
+        action="store_true",
+        help="propose a global memory write for explicit human approval",
+    )
+    parser.add_argument("--rationale", help="why a proposed global memory should be available")
+    classification = parser.add_mutually_exclusive_group()
+    classification.add_argument(
+        "--category",
+        choices=tuple(USER_MEMORY_CATEGORIES),
+        help="user-facing memory category (default: knowledge)",
+    )
+    classification.add_argument(
         "--kind",
         choices=("note", "code-area", "doc-ref", "decision", "seeded"),
-        default="note",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--root", default=".")
     parser.add_argument("--db")
@@ -163,7 +181,13 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
         if command == "remember":
             service = ContextService(db_path=options.db, root=root)
             if options.list:
-                if options.key or options.value is not None or options.source is not None:
+                if (
+                    options.key
+                    or options.value is not None
+                    or options.source is not None
+                    or options.global_request
+                    or options.rationale
+                ):
                     raise ValueError("--list cannot be combined with a key, --value, or --source")
                 if options.apply:
                     raise ValueError("--apply requires --batch")
@@ -171,7 +195,13 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
                 _emit(result, json_output=options.json)
                 return
             if options.batch:
-                if options.key or options.value is not None or options.source is not None:
+                if (
+                    options.key
+                    or options.value is not None
+                    or options.source is not None
+                    or options.global_request
+                    or options.rationale
+                ):
                     raise ValueError("--batch cannot be combined with a key, --value, or --source")
                 if options.prefix:
                     raise ValueError("--prefix requires --list")
@@ -190,12 +220,26 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
                 raise ValueError("remember requires a key, --list, or --batch")
             if (options.value is None) == (options.source is None):
                 raise ValueError("exactly one of --value or --source is required")
-            result = service.set_topic(
-                options.key,
-                value=options.value,
-                source=options.source,
-                kind=options.kind,
-            )
+            kind = options.kind or USER_MEMORY_CATEGORIES[options.category or "knowledge"]
+            if options.global_request:
+                if not options.rationale:
+                    raise ValueError("--global-request requires --rationale")
+                result = service.propose_global_memory(
+                    options.key,
+                    value=options.value,
+                    source=options.source,
+                    kind=kind,
+                    rationale=options.rationale,
+                )
+            else:
+                if options.rationale:
+                    raise ValueError("--rationale requires --global-request")
+                result = service.set_topic(
+                    options.key,
+                    value=options.value,
+                    source=options.source,
+                    kind=kind,
+                )
             _emit(result, json_output=options.json)
             return
 

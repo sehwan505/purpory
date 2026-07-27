@@ -182,6 +182,74 @@ def test_agent_token_can_prepare_context_but_cannot_curate_topics(
     assert status == 401
 
 
+def test_agent_token_can_raise_but_not_decide_global_memory_request(
+    context_server: ContextHTTPServer,
+) -> None:
+    agent_headers = {
+        "Content-Type": "application/json",
+        "X-Purpory-Agent-Token": "agent-secret",
+    }
+    status, proposed = _request(
+        context_server,
+        "POST",
+        "/api/global-memory/requests",
+        body=json.dumps(
+            {
+                "key": "intent.editor",
+                "kind": "decision",
+                "value": "Use Neovim",
+                "rationale": "Reusable editor preference",
+            }
+        ),
+        headers=agent_headers,
+    )
+    assert status == 201
+    assert proposed["status"] == "pending"
+
+    status, _ = _request(
+        context_server,
+        "POST",
+        f"/api/global-memory/requests/{proposed['id']}/approve",
+        body="{}",
+        headers=agent_headers,
+    )
+    assert status == 401
+
+
+def test_agent_token_can_raise_but_not_resolve_evidence_review(
+    context_server: ContextHTTPServer,
+) -> None:
+    agent_headers = {
+        "Content-Type": "application/json",
+        "X-Purpory-Agent-Token": "agent-secret",
+    }
+    status, review = _request(
+        context_server,
+        "POST",
+        "/api/memory/reviews",
+        body=json.dumps(
+            {
+                "key": "decision.database",
+                "sourceType": "code",
+                "sourceId": "src/database.py",
+                "evidence": "sqlite configuration",
+                "reason": "Code conflicts with the PostgreSQL decision.",
+            }
+        ),
+        headers=agent_headers,
+    )
+    assert status == 201
+
+    status, _ = _request(
+        context_server,
+        "POST",
+        f"/api/memory/reviews/{review['id']}/resolve",
+        body=json.dumps({"outcome": "keep"}),
+        headers=agent_headers,
+    )
+    assert status == 401
+
+
 def test_agent_token_cannot_enable_preparation_input_retention(
     context_server: ContextHTTPServer,
 ) -> None:
@@ -259,6 +327,104 @@ def test_context_decisions_and_feedback_api(context_server: ContextHTTPServer) -
     )
     assert status == 200
     assert feedback["verdict"] == "correct"
+
+
+def test_global_memory_approval_api_preserves_edits(
+    context_server: ContextHTTPServer,
+) -> None:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Purpory-Token": "write-secret",
+    }
+    status, proposed = _request(
+        context_server,
+        "POST",
+        "/api/global-memory/requests",
+        body=json.dumps(
+            {
+                "key": "intent.editor",
+                "kind": "decision",
+                "value": "Use Vim",
+                "rationale": "Reusable editor preference",
+            }
+        ),
+        headers=headers,
+    )
+    assert status == 201
+    status, edited = _request(
+        context_server,
+        "POST",
+        f"/api/global-memory/requests/{proposed['id']}/edit",
+        body=json.dumps(
+            {
+                "key": "intent.editor",
+                "kind": "decision",
+                "value": "Use Neovim",
+                "rationale": "Corrected reusable editor preference",
+            }
+        ),
+        headers=headers,
+    )
+    assert status == 200
+    assert edited["initialProposal"]["value"] == "Use Vim"
+    status, approved = _request(
+        context_server,
+        "POST",
+        f"/api/global-memory/requests/{proposed['id']}/approve",
+        body="{}",
+        headers=headers,
+    )
+    assert status == 200
+    assert approved["status"] == "approved"
+    assert approved["finalProposal"]["value"] == "Use Neovim"
+
+
+def test_needs_review_and_memory_report_api(
+    context_server: ContextHTTPServer,
+) -> None:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Purpory-Token": "write-secret",
+    }
+    status, review = _request(
+        context_server,
+        "POST",
+        "/api/memory/reviews",
+        body=json.dumps(
+            {
+                "key": "decision.database",
+                "sourceType": "code",
+                "sourceId": "src/database.py",
+                "evidence": "sqlite configuration",
+                "reason": "Code conflicts with the PostgreSQL decision.",
+            }
+        ),
+        headers=headers,
+    )
+    assert status == 201
+    status, reviews = _request(
+        context_server,
+        "GET",
+        "/api/memory/reviews?t=read-secret&status=open",
+    )
+    assert status == 200
+    assert reviews[0]["id"] == review["id"]
+    status, resolved = _request(
+        context_server,
+        "POST",
+        f"/api/memory/reviews/{review['id']}/resolve",
+        body=json.dumps({"outcome": "keep"}),
+        headers=headers,
+    )
+    assert status == 200
+    assert resolved["outcome"] == "keep"
+    status, report = _request(
+        context_server,
+        "GET",
+        "/api/memory/report?t=read-secret",
+    )
+    assert status == 200
+    assert report
 
 
 def test_static_dashboard_is_packaged(context_server: ContextHTTPServer) -> None:
