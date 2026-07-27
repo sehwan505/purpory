@@ -16,9 +16,16 @@ def _load_pyproject_toml(root_path: Path) -> dict:
 
         with open(toml_path, "rb") as f:
             data = tomllib.load(f)
-        return data.get("tool", {}).get("purpory", {})
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise RuntimeError(f"could not load Purpory settings from {toml_path}: {exc}") from exc
+
+    tool = data.get("tool", {})
+    if not isinstance(tool, dict):
+        raise ValueError(f"{toml_path}: [tool] must be a TOML table")
+    config = tool.get("purpory", {})
+    if not isinstance(config, dict):
+        raise ValueError(f"{toml_path}: [tool.purpory] must be a TOML table")
+    return config
 
 class Settings:
     def __init__(self, root_path: Path | None = None):

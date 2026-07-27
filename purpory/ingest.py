@@ -105,14 +105,13 @@ def _fetch_tweet(url: str, author: str | None, contributor: str | None) -> tuple
     # Normalize to twitter.com for oEmbed
     oembed_url = url.replace("x.com", "twitter.com")
     oembed_api = f"https://publish.twitter.com/oembed?url={urllib.parse.quote(oembed_url)}&omit_script=true"
-    try:
-        data = json.loads(safe_fetch_text(oembed_api))
-        tweet_text = re.sub(r"<[^>]+>", "", data.get("html", "")).strip()
-        tweet_author = data.get("author_name", "unknown")
-    except Exception:
-        # oEmbed failed - save URL stub
-        tweet_text = f"Tweet at {url} (could not fetch content)"
-        tweet_author = "unknown"
+    data = json.loads(safe_fetch_text(oembed_api))
+    if not isinstance(data, dict):
+        raise ValueError("Twitter oEmbed response must be a JSON object")
+    tweet_text = re.sub(r"<[^>]+>", "", str(data.get("html", ""))).strip()
+    tweet_author = str(data.get("author_name", "")).strip()
+    if not tweet_text or not tweet_author:
+        raise ValueError("Twitter oEmbed response is missing content or author")
 
     now = datetime.now(timezone.utc).isoformat()
     content = f"""---
@@ -168,16 +167,27 @@ def _fetch_arxiv(url: str, author: str | None, contributor: str | None) -> tuple
     arxiv_id = re.search(r"(\d{4}\.\d{4,5})", url)
     if arxiv_id:
         api_url = f"https://export.arxiv.org/abs/{arxiv_id.group(1)}"
-        try:
-            html = _fetch_html(api_url)
-            abstract_match = re.search(r'class="abstract[^"]*"[^>]*>(.*?)</blockquote>', html, re.DOTALL | re.IGNORECASE)
-            abstract = re.sub(r"<[^>]+>", "", abstract_match.group(1)).strip() if abstract_match else ""
-            title_match = re.search(r'class="title[^"]*"[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
-            title = re.sub(r"<[^>]+>", " ", title_match.group(1)).strip() if title_match else arxiv_id.group(1)
-            authors_match = re.search(r'class="authors"[^>]*>(.*?)</div>', html, re.DOTALL | re.IGNORECASE)
-            paper_authors = re.sub(r"<[^>]+>", "", authors_match.group(1)).strip() if authors_match else ""
-        except Exception:
-            title, abstract, paper_authors = arxiv_id.group(1), "", ""
+        html = _fetch_html(api_url)
+        abstract_match = re.search(
+            r'class="abstract[^"]*"[^>]*>(.*?)</blockquote>',
+            html,
+            re.DOTALL | re.IGNORECASE,
+        )
+        title_match = re.search(
+            r'class="title[^"]*"[^>]*>(.*?)</h1>',
+            html,
+            re.DOTALL | re.IGNORECASE,
+        )
+        authors_match = re.search(
+            r'class="authors"[^>]*>(.*?)</div>',
+            html,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if abstract_match is None or title_match is None or authors_match is None:
+            raise ValueError(f"arXiv response for {arxiv_id.group(1)} is missing metadata")
+        abstract = re.sub(r"<[^>]+>", "", abstract_match.group(1)).strip()
+        title = re.sub(r"<[^>]+>", " ", title_match.group(1)).strip()
+        paper_authors = re.sub(r"<[^>]+>", "", authors_match.group(1)).strip()
     else:
         return _fetch_webpage(url, author, contributor)
 

@@ -1,6 +1,8 @@
 import json
 import sys
+import builtins
 import networkx as nx
+import pytest
 from pathlib import Path
 from purpory.build import build_from_json
 from purpory.cluster import cluster, cohesion_score, remap_communities_to_previous, score_all
@@ -74,6 +76,50 @@ def test_cluster_does_not_write_to_stderr(capsys):
     # Allow logging output (starts with [purpory]) but no raw ANSI codes
     for line in captured.err.splitlines():
         assert "\x1b" not in line, f"cluster() wrote ANSI to stderr: {line!r}"
+
+
+def test_default_algorithm_does_not_probe_for_leiden(monkeypatch):
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.startswith("graspologic"):
+            raise AssertionError("default clustering must not probe optional Leiden")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    communities = cluster(make_graph())
+    assert communities
+
+
+def test_explicit_leiden_fails_when_dependency_is_missing(monkeypatch):
+    real_import = builtins.__import__
+
+    def missing_leiden(name, *args, **kwargs):
+        if name.startswith("graspologic"):
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_leiden)
+    with pytest.raises(RuntimeError, match="purpory\\[leiden\\]"):
+        cluster(make_graph(), algorithm="leiden")
+
+
+def test_partition_failure_is_not_replaced_with_unsplit_community(monkeypatch):
+    import purpory.cluster as cluster_module
+
+    graph = nx.complete_graph(["a", "b", "c"])
+    monkeypatch.setattr(
+        cluster_module,
+        "_partition",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("partition failed")),
+    )
+    with pytest.raises(RuntimeError, match="partition failed"):
+        cluster_module._split_community(graph, list(graph.nodes()))
+
+
+def test_unknown_algorithm_is_rejected_even_for_empty_graph():
+    with pytest.raises(ValueError, match="unsupported clustering algorithm"):
+        cluster(nx.Graph(), algorithm="automatic")
 
 
 def test_remap_communities_to_previous_reuses_old_ids():

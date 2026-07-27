@@ -315,6 +315,12 @@ def test_rebuild_bodies_with_purpory_root_are_valid_python():
         ast.parse(body)
 
 
+def test_rebuild_bodies_fail_when_rebuild_reports_false():
+    for body in (_REBUILD_BODY_COMMIT, _REBUILD_BODY_CHECKOUT):
+        assert "if not _rebuild_code(" in body
+        assert "Purpory rebuild reported failure" in body
+
+
 def test_detached_launch_targets_purpory_python():
     """The launcher must run via the resolved $PURPORY_PYTHON, not a bare
     `python`, so it uses the same interpreter the detection block selected."""

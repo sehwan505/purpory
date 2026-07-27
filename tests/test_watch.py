@@ -1427,6 +1427,52 @@ def test_drain_pending_dedupes_and_skips_blank_lines(tmp_path):
     assert drained == [Path("a.py"), Path("b.py"), Path("c.py")]
 
 
+def test_drain_pending_read_failure_is_not_an_empty_queue(tmp_path, monkeypatch):
+    from purpory.watch import _drain_pending, _PENDING_FILENAME
+
+    out = tmp_path / "purpory-out"
+    out.mkdir()
+    pending = out / _PENDING_FILENAME
+    pending.write_text("a.py\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def fail_pending(path, *args, **kwargs):
+        if path == pending:
+            raise OSError("permission denied")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_pending)
+    with pytest.raises(RuntimeError, match="could not read queued Purpory changes"):
+        _drain_pending(out)
+    assert pending.exists()
+
+
+def test_invalid_build_excludes_do_not_become_an_empty_list(tmp_path):
+    from purpory.watch import _read_build_excludes, _BUILD_CONFIG_FILENAME
+
+    out = tmp_path / "purpory-out"
+    out.mkdir()
+    (out / _BUILD_CONFIG_FILENAME).write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="could not read Purpory build config"):
+        _read_build_excludes(out)
+
+
+def test_build_config_write_failure_propagates(tmp_path, monkeypatch):
+    from purpory.watch import _write_build_config
+
+    real_write_text = Path.write_text
+
+    def fail_config(path, *args, **kwargs):
+        if path.name == ".purpory_build.json":
+            raise OSError("read-only filesystem")
+        return real_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_config)
+    with pytest.raises(OSError, match="read-only filesystem"):
+        _write_build_config(tmp_path / "purpory-out", excludes=["vendor"])
+
+
 def test_queue_pending_noop_on_empty_list(tmp_path):
     """Empty change set must not create an empty .pending_changes file."""
     from purpory.watch import _queue_pending, _PENDING_FILENAME

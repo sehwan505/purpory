@@ -5,7 +5,10 @@ gigabytes and OOM-kill the process during a corpus scan. These tests verify the
 pre-parse screen rejects bombs before openpyxl/python-docx ever decompress them.
 """
 import zipfile
+import sys
+import types
 
+import pytest
 from purpory import detect
 
 
@@ -88,3 +91,52 @@ def test_pdf_over_cap_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(detect, "_file_within_size_cap",
                         lambda p, cap=100: p.stat().st_size <= cap if p.exists() else False)
     assert detect.extract_pdf_text(big) == ""
+
+
+@pytest.mark.parametrize(
+    ("function_name", "module_name", "message"),
+    [
+        ("extract_pdf_text", "pypdf", "PDF extraction requires pypdf"),
+        ("docx_to_markdown", "docx", "DOCX extraction requires python-docx"),
+        ("xlsx_to_markdown", "openpyxl", "XLSX extraction requires openpyxl"),
+    ],
+)
+def test_missing_document_dependency_fails_explicitly(
+    tmp_path,
+    monkeypatch,
+    function_name,
+    module_name,
+    message,
+):
+    source = tmp_path / {
+        "extract_pdf_text": "doc.pdf",
+        "docx_to_markdown": "doc.docx",
+        "xlsx_to_markdown": "doc.xlsx",
+    }[function_name]
+    source.write_bytes(b"placeholder")
+    monkeypatch.setattr(detect, "_file_within_size_cap", lambda _path: True)
+    monkeypatch.setattr(detect, "_zip_within_caps", lambda _path: True)
+    monkeypatch.setitem(sys.modules, module_name, None)
+
+    with pytest.raises(RuntimeError, match=message):
+        getattr(detect, function_name)(source)
+
+
+def test_pdf_parser_failure_is_not_an_empty_document(tmp_path, monkeypatch):
+    source = tmp_path / "doc.pdf"
+    source.write_bytes(b"%PDF")
+    fake = types.ModuleType("pypdf")
+
+    def broken_reader(_path):
+        raise ValueError("corrupt xref")
+
+    fake.PdfReader = broken_reader
+    monkeypatch.setitem(sys.modules, "pypdf", fake)
+
+    with pytest.raises(RuntimeError, match="could not extract PDF text"):
+        detect.extract_pdf_text(source)
+
+
+def test_count_words_read_failure_propagates(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        detect.count_words(tmp_path / "missing.md")

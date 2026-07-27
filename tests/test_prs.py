@@ -347,14 +347,16 @@ class TestDetectDefaultBranch:
         ):
             assert _detect_default_branch() == "develop"
 
-    def test_both_fail_returns_main(self):
+    def test_both_fail_requires_explicit_base(self):
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stdout = ""
+        mock_result.stderr = "origin/HEAD is missing"
         with patch("purpory.prs._gh", return_value=None), patch(
             "purpory.prs.subprocess.run", return_value=mock_result
         ):
-            assert _detect_default_branch() == "main"
+            with pytest.raises(RuntimeError, match="pass --base explicitly"):
+                _detect_default_branch()
 
     def test_gh_returns_empty_dict_falls_back(self):
         """gh returns data but with no defaultBranchRef — should still fall back."""
@@ -366,12 +368,21 @@ class TestDetectDefaultBranch:
         ):
             assert _detect_default_branch() == "trunk"
 
-    def test_git_timeout_returns_main(self):
+    def test_git_timeout_requires_explicit_base(self):
         with patch("purpory.prs._gh", return_value=None), patch(
             "purpory.prs.subprocess.run",
             side_effect=subprocess.TimeoutExpired("git", 5),
         ):
-            assert _detect_default_branch() == "main"
+            with pytest.raises(RuntimeError, match="pass --base explicitly"):
+                _detect_default_branch()
+
+    def test_remote_repo_failure_never_uses_local_git(self):
+        with patch("purpory.prs._gh", return_value=None), patch(
+            "purpory.prs.subprocess.run"
+        ) as run:
+            with pytest.raises(RuntimeError, match="pass --base explicitly"):
+                _detect_default_branch("owner/repository")
+        run.assert_not_called()
 
 
 # ── build_community_labels ─────────────────────────────────────────────────────

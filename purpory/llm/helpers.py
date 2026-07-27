@@ -240,6 +240,21 @@ def _custom_providers_path(global_: bool = True) -> Path:
         return Path.home() / ".purpory" / "providers.json"
     return Path(".purpory") / "providers.json"
 
+def _read_custom_providers_file(path: Path) -> dict[str, dict]:
+    """Read one provider registry without treating corruption as an empty registry."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not load custom providers from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"custom providers file must contain a JSON object: {path}")
+    for name, cfg in data.items():
+        if not isinstance(name, str) or not isinstance(cfg, dict):
+            raise ValueError(
+                f"custom provider entries must map string names to objects: {path}"
+            )
+    return data
+
 def provider_base_url_ok(base_url: str, name: str, *, warn: bool = True) -> bool:
     """Structural safety check for a custom-provider base_url.
 
@@ -295,21 +310,19 @@ def _load_custom_providers() -> dict[str, dict]:
     paths = [local_path, global_path] if allow_local else [global_path]
     for path in paths:
         if path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    for name, cfg in data.items():
-                        if not (isinstance(name, str) and isinstance(cfg, dict)):
-                            continue
-                        if name in BACKENDS or name in providers:
-                            continue
-                        if not provider_base_url_ok(str(cfg.get("base_url", "")), name):
-                            continue
-                        if "pricing" not in cfg:
-                            cfg = dict(cfg, pricing={"input": 0.0, "output": 0.0})
-                        providers[name] = cfg
-            except Exception:
-                pass
+            data = _read_custom_providers_file(path)
+            for name, cfg in data.items():
+                if name in BACKENDS or name in providers:
+                    continue
+                if not provider_base_url_ok(
+                    str(cfg.get("base_url", "")), name, warn=False
+                ):
+                    raise ValueError(
+                        f"custom provider {name!r} has an invalid base_url in {path}"
+                    )
+                if "pricing" not in cfg:
+                    cfg = dict(cfg, pricing={"input": 0.0, "output": 0.0})
+                providers[name] = cfg
     return providers
 
 BACKENDS.update(_load_custom_providers())

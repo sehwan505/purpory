@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 from purpory.supervise.bridge import seed_from_graph
 from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
-from purpory.supervise.repository import ContextGraphRepository
+from purpory.supervise.identity import resolve_project_id, resolve_project_root
+from purpory.supervise.repository import ContextGraphRepository, memory_category, value_hash
 from purpory.supervise.recall import cue, recall_summary
 from purpory.supervise.resolve import resolve_topic
 
@@ -40,9 +41,8 @@ class ContextService:
         gate_provider: "GateProvider | None" = None,
     ) -> None:
         self.repository = ContextGraphRepository(db_path)
-        self.root = Path(root or Path.cwd()).expanduser().resolve()
-        configured_project = os.environ.get("PURPORY_PROJECT_ID", "").strip()
-        self.project_id = configured_project or str(self.root)
+        self.root = resolve_project_root(root or Path.cwd())
+        self.project_id = resolve_project_id(self.root)
         output_directory = os.environ.get("PURPORY_OUT", "purpory-out")
         default_graph = self.root / output_directory / "graph.json"
         self.graph_path = (
@@ -51,10 +51,16 @@ class ContextService:
         self.stale_after_days = stale_after_days
         self.gate_provider = gate_provider
 
-    def _ensure_graph_imported(self) -> bool:
+    def _selected_project(self, project: str | None = None) -> str:
+        return resolve_project_id(self.root, project) if project else self.project_id
+
+    def _ensure_graph_imported(self, project: str | None = None) -> bool:
         if not self.graph_path.is_file():
             return False
-        self.repository.import_graph(self.graph_path, project=self.project_id)
+        self.repository.import_graph(
+            self.graph_path,
+            project=self._selected_project(project),
+        )
         return True
 
     def sync_graph(self) -> dict[str, Any]:
@@ -75,17 +81,19 @@ class ContextService:
     def _provisioner(self, project: str | None = None) -> "ContextProvisioningService":
         from purpory.supervise.provisioning import ContextProvisioningService
 
+        selected_project = self._selected_project(project)
         return ContextProvisioningService(
             repository=self.repository,
             root=self.root,
-            graph_project=self.project_id,
-            project=project or self.root.name,
+            graph_project=selected_project,
+            project=selected_project,
             stale_after_days=self.stale_after_days,
         )
 
     def view(self, *, session_id: str | None = None, since: int | None = None) -> dict[str, Any]:
         self._ensure_graph_imported()
         return {
+            "project": self.project_id,
             "topics": self.repository.topic_view(
                 project=self.project_id, stale_after_days=self.stale_after_days
             ),
@@ -107,7 +115,16 @@ class ContextService:
         )
         return {
             **topic,
+            "category": memory_category(str(topic["kind"])),
             "stale": is_stale(topic["set_at"], stale_after_days=self.stale_after_days),
+            "versions": self.repository.list_memory_versions(
+                key,
+                project=str(topic["project"]),
+            ),
+            "needsReviews": self.repository.list_needs_reviews(
+                project=self.project_id,
+                key=key,
+            ),
             **resolved,
         }
 
@@ -118,12 +135,32 @@ class ContextService:
         value: str | None = None,
         source: str | None = None,
         kind: str = "note",
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
+        current = self.repository.get_topic(key, project=self.project_id)
+        expected_hash = (
+            current["hash"]
+            if current is not None and current.get("project") == self.project_id
+            else None
+        )
+        result = self.repository.reconcile_topics(
+            [
+                {
+                    "key": key,
+                    "value": value,
+                    "source": source,
+                    "kind": kind,
+                    "expectedHash": expected_hash,
+                }
+            ],
+            project=self.project_id,
+            apply=True,
+            session_id=current_session_id(),
+        )
+        change = result["changes"][0]
         return {
             "key": key,
-            "action": self.repository.set_topic(
-                key, value=value, source=source, kind=kind, origin="human"
-            ),
+            "action": change["action"],
+            "versionId": change.get("versionId"),
         }
 
     def list_topics(self, *, prefix: str | None = None) -> list[dict[str, Any]]:
@@ -145,10 +182,151 @@ class ContextService:
         )
 
     def delete_topic(self, key: str) -> bool:
-        return self.repository.delete_topic(key)
+        return self.repository.delete_topic(key, project=self.project_id)
 
     def confirm_topic(self, key: str) -> bool:
-        return self.repository.confirm_topic(key)
+        return self.repository.confirm_topic(key, project=self.project_id)
+
+    def memory_versions(self, key: str) -> list[dict[str, Any]]:
+        topic = self.repository.get_topic(key, project=self.project_id)
+        if topic is None:
+            raise KeyError(f"topic not found: {key}")
+        return self.repository.list_memory_versions(key, project=str(topic["project"]))
+
+    def create_needs_review(
+        self,
+        key: str,
+        *,
+        source_type: str,
+        source_id: str,
+        evidence: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if not evidence:
+            raise ValueError("evidence cannot be empty")
+        return self.repository.create_needs_review(
+            key,
+            project=self.project_id,
+            source_type=source_type,
+            source_id=source_id,
+            content_hash=value_hash(evidence),
+            reason=reason,
+        )
+
+    def needs_reviews(
+        self,
+        *,
+        status: str | None = None,
+        key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.repository.list_needs_reviews(
+            project=self.project_id,
+            status=status,
+            key=key,
+        )
+
+    def resolve_needs_review(
+        self,
+        review_id: int,
+        *,
+        outcome: str,
+        change: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        version_id: int | None = None
+        if outcome == "change":
+            if not isinstance(change, dict):
+                raise ValueError("change outcome requires a memory change")
+            reviews = [
+                item
+                for item in self.repository.list_needs_reviews(project=self.project_id)
+                if item["id"] == int(review_id) and item["status"] == "open"
+            ]
+            if not reviews:
+                return None
+            review = reviews[0]
+            key = str(change.get("key", review["key"]))
+            if key != review["key"]:
+                raise ValueError("needs-review change must keep the reviewed key")
+            current = self.repository.get_topic(key, project=self.project_id)
+            if current is None:
+                raise KeyError(f"topic not found: {key}")
+            reconciled = self.repository.reconcile_topics(
+                [
+                    {
+                        "key": key,
+                        "kind": str(change.get("kind", current["kind"])),
+                        "value": change.get("value"),
+                        "source": change.get("source"),
+                        "expectedHash": current["hash"],
+                    }
+                ],
+                project=self.project_id,
+                apply=True,
+                session_id=current_session_id(),
+            )
+            applied = reconciled["changes"][0]
+            if applied["action"] not in {"created", "updated"}:
+                raise ValueError("needs-review change did not create a new memory version")
+            version_id = int(applied["versionId"])
+        return self.repository.resolve_needs_review(
+            review_id,
+            outcome=outcome,
+            result_version_id=version_id,
+        )
+
+    def propose_global_memory(
+        self,
+        key: str,
+        *,
+        value: str | None,
+        source: str | None,
+        kind: str,
+        rationale: str,
+    ) -> dict[str, Any]:
+        return self.repository.create_global_memory_request(
+            key,
+            value=value,
+            source=source,
+            kind=kind,
+            rationale=rationale,
+            requested_from_project=self.project_id,
+        )
+
+    def global_memory_requests(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        return self.repository.list_global_memory_requests(status)
+
+    def edit_global_memory_request(
+        self,
+        request_id: int,
+        *,
+        key: str,
+        value: str | None,
+        source: str | None,
+        kind: str,
+        rationale: str,
+    ) -> dict[str, Any] | None:
+        return self.repository.update_global_memory_request(
+            request_id,
+            key=key,
+            value=value,
+            source=source,
+            kind=kind,
+            rationale=rationale,
+        )
+
+    def decide_global_memory_request(
+        self,
+        request_id: int,
+        *,
+        decision: str,
+    ) -> dict[str, Any] | None:
+        return self.repository.decide_global_memory_request(
+            request_id,
+            decision=decision,
+        )
+
+    def project_memory_report(self, *, since: int | None = None) -> list[dict[str, Any]]:
+        return self.repository.project_memory_report(project=self.project_id, since=since)
 
     def seed(
         self,
@@ -182,7 +360,7 @@ class ContextService:
             self.repository,
             paths,
             session_id=current_session_id(session_id),
-            project=project or self.root.name,
+            project=self._selected_project(project),
         )
 
     def create_request(
@@ -193,7 +371,9 @@ class ContextService:
         project: str | None = None,
     ) -> int:
         return self.repository.create_request(
-            current_session_id(session_id), need, project=project or self.root.name
+            current_session_id(session_id),
+            need,
+            project=self._selected_project(project),
         )
 
     def requests(self, *, status: str | None = None) -> list[dict[str, Any]]:
@@ -230,7 +410,7 @@ class ContextService:
         session_id: str | None = None,
         project: str | None = None,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported()
+        self._ensure_graph_imported(project)
         return self._provisioner(project).catalog(session_id=current_session_id(session_id))
 
     def search(
@@ -245,7 +425,7 @@ class ContextService:
         limit: int = 12,
         connect: bool = True,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported()
+        self._ensure_graph_imported(project)
         return self._provisioner(project).search(
             query,
             session_id=current_session_id(session_id),
@@ -266,7 +446,7 @@ class ContextService:
         node_limit: int = 100,
         include_experiential: bool = False,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported()
+        self._ensure_graph_imported(project)
         return self._provisioner(project).expand(
             node_ids,
             depth=depth,
@@ -285,7 +465,7 @@ class ContextService:
         relations: Sequence[str] = (),
         include_experiential: bool = False,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported()
+        self._ensure_graph_imported(project)
         return self._provisioner(project).path(
             source_id,
             target_id,
@@ -302,7 +482,7 @@ class ContextService:
         project: str | None = None,
         token_budget: int = 2_000,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported()
+        self._ensure_graph_imported(project)
         return self._provisioner(project).deliver(
             node_ids,
             session_id=current_session_id(session_id),
@@ -327,12 +507,12 @@ class ContextService:
         if provider is None and os.environ.get("PURPORY_GATE_URL", "").strip():
             provider = QwenGateProvider.from_environment()
         session = current_session_id(session_id)
-        selected_project = project or self.root.name
-        self._ensure_graph_imported()
+        selected_project = self._selected_project(project)
+        self._ensure_graph_imported(selected_project)
         gateway = GatewayService(
             repository=self.repository,
             root=self.root,
-            graph_project=self.project_id,
+            graph_project=selected_project,
             provider=provider,
         )
         return gateway.prepare(

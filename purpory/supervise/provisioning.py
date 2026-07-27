@@ -16,6 +16,105 @@ from purpory.supervise.resolve import rendered_injection, resolve_topic
 
 CONTEXT_SCHEMA_VERSION = 1
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[가-힣]{2,}")
+SEARCH_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "our",
+        "should",
+        "that",
+        "the",
+        "this",
+        "to",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "with",
+        "you",
+        "your",
+    }
+)
+KOREAN_SUFFIXES = (
+    "에서",
+    "에게",
+    "부터",
+    "까지",
+    "으로",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "과",
+    "와",
+    "의",
+    "에",
+    "로",
+    "도",
+    "만",
+)
+SEARCH_TERM_ALIASES: dict[str, tuple[str, ...]] = {
+    "개발자": ("developer", "developers"),
+    "검색": ("search", "retrieval"),
+    "결정": ("decision",),
+    "근거": ("evidence",),
+    "기억": ("memory",),
+    "날짜": ("date",),
+    "대체": ("replace", "autonomy"),
+    "데이터베이스": ("database",),
+    "반려": ("reject", "rejected"),
+    "버전": ("version", "superseded"),
+    "보고서": ("report",),
+    "사용자": ("user", "human"),
+    "선택": ("select", "selected"),
+    "세션": ("session",),
+    "승인": ("approve", "approved", "approval"),
+    "요청": ("request",),
+    "유용": ("utility", "usage", "useful"),
+    "의도": ("intent",),
+    "입력": ("input",),
+    "전역": ("global",),
+    "제공": ("deliver", "delivery"),
+    "지식": ("knowledge",),
+    "감독": ("supervise", "supervision"),
+    "검토": ("review",),
+    "리뷰": ("review",),
+    "변경": ("change", "changed"),
+    "위험": ("risk",),
+    "인증": ("auth", "authentication"),
+    "충돌": ("conflict",),
+    "코드": ("code",),
+    "프로젝트": ("project",),
+    "확장": ("expand", "expanded"),
+}
+# A deliberately permissive relative floor preserves one strong result for a
+# distinct concept in short queries while eliminating the long tail created by
+# incidental matches in large code graphs.
+RELATIVE_SCORE_FLOOR = 0.05
 ALLOWED_SCOPES = frozenset({"human", "code", "session"})
 MAX_QUERY_CHARS = 4_096
 MAX_KEYWORDS = 12
@@ -42,12 +141,29 @@ def _truncate_to_budget(value: str, token_budget: int) -> str:
     return raw[:maximum_bytes].decode("utf-8", errors="ignore").rstrip() + TRUNCATION_MARKER
 
 
-def _tokens(values: Iterable[str]) -> list[str]:
+def _raw_tokens(values: Iterable[str]) -> list[str]:
     return list(
         dict.fromkeys(
             token.lower() for value in values for token in TOKEN_RE.findall(value) if len(token) > 1
         )
     )
+
+
+def _tokens(values: Iterable[str]) -> list[str]:
+    expanded: list[str] = []
+    for token in _raw_tokens(values):
+        if token in SEARCH_STOPWORDS:
+            continue
+        variants = [token]
+        if re.search(r"[가-힣]", token):
+            for suffix in KOREAN_SUFFIXES:
+                if token.endswith(suffix) and len(token) > len(suffix) + 1:
+                    variants.append(token[: -len(suffix)])
+                    break
+        for variant in variants:
+            expanded.append(variant)
+            expanded.extend(SEARCH_TERM_ALIASES.get(variant, ()))
+    return list(dict.fromkeys(expanded))
 
 
 def _normalize_path(value: object) -> str:
@@ -221,13 +337,19 @@ class ContextProvisioningService:
         if parsed_limit < 1 or parsed_limit > MAX_SEARCH_RESULTS:
             raise ValueError(f"limit must be between 1 and {MAX_SEARCH_RESULTS}")
 
-        input_terms = _tokens((normalized_query, *selected_keywords))
+        raw_input_terms = _raw_tokens((normalized_query, *selected_keywords))
+        expanded_input_terms = _tokens((normalized_query, *selected_keywords))
+        expansion_by_input = {
+            term: _tokens((term,))
+            for term in raw_input_terms
+            if term not in SEARCH_STOPWORDS
+        }
         active = {self._active_path(path) for path in selected_paths}
         nodes = [
             node
             for node in self.repository.search_retrieval_nodes(
                 project=self.graph_project,
-                terms=input_terms,
+                terms=expanded_input_terms,
                 active_paths=sorted(active),
                 include_memory=("human" in selected_scopes or "session" in selected_scopes),
                 include_code="code" in selected_scopes,
@@ -241,14 +363,17 @@ class ContextProvisioningService:
         searchable_by_id = {node["id"]: self._searchable_text(node) for node in nodes}
         document_frequency = {
             term: sum(term in searchable for searchable in searchable_by_id.values())
-            for term in input_terms
+            for term in expanded_input_terms
         }
-        terms = [term for term in input_terms if document_frequency[term] > 0]
+        terms = [term for term in expanded_input_terms if document_frequency[term] > 0]
         total_documents = max(1, len(nodes))
         idf = {
             term: math.log(1 + total_documents / (1 + document_frequency[term])) for term in terms
         }
         recall_scores = self._recall_scores(session_id) if "session" in selected_scopes else {}
+        usage_by_id = self.repository.memory_usage(
+            [node["id"] for node in nodes if node["namespace"] == "memory"]
+        )
         previous = set(previous_deliveries) or set(
             self.repository.session_topic_keys(session_id)[:1_000]
         )
@@ -262,11 +387,19 @@ class ContextProvisioningService:
                 idf=idf,
                 active_paths=active,
                 recall_scores=recall_scores,
+                usage=usage_by_id.get(node["id"]),
                 previous_deliveries=previous,
             )
             if candidate is not None:
                 ranked.append(candidate)
         ranked.sort(key=lambda item: (-item["score"], item["key"], item["nodeId"]))
+        score_floor = (
+            ranked[0]["score"] * RELATIVE_SCORE_FLOOR
+            if ranked
+            else None
+        )
+        if score_floor is not None:
+            ranked = [candidate for candidate in ranked if candidate["score"] >= score_floor]
         candidates = self._select_candidates(ranked, terms, parsed_limit)
         self._add_relation_counts(candidates)
         connections = (
@@ -275,9 +408,19 @@ class ContextProvisioningService:
         return {
             "schemaVersion": CONTEXT_SCHEMA_VERSION,
             "query": normalized_query,
-            "inputTerms": input_terms,
+            "inputTerms": raw_input_terms,
             "terms": terms,
-            "ignoredTerms": [term for term in input_terms if term not in terms],
+            "expandedTerms": [
+                {"input": term, "terms": [item for item in expanded if item != term]}
+                for term, expanded in expansion_by_input.items()
+                if any(item != term for item in expanded)
+            ],
+            "ignoredTerms": [
+                term
+                for term in raw_input_terms
+                if not any(item in terms for item in expansion_by_input.get(term, [term]))
+            ],
+            "scoreFloor": round(score_floor, 6) if score_floor is not None else None,
             "scopes": list(selected_scopes),
             "candidates": candidates,
             "connections": connections,
@@ -310,6 +453,24 @@ class ContextProvisioningService:
         if len(visible_seeds) != len(seeds):
             missing = sorted(set(seeds) - {node["id"] for node in visible_seeds})
             raise KeyError(f"context nodes not found: {', '.join(missing)}")
+        memory_history: dict[str, list[dict[str, Any]]] = {}
+        needs_reviews: list[dict[str, Any]] = []
+        for node in visible_seeds:
+            if node["namespace"] != "memory":
+                continue
+            self.repository.record_memory_usage(node["id"], event="expanded")
+            key = str(node["stableKey"])
+            memory_history[node["id"]] = self.repository.list_memory_versions(
+                key,
+                project=str(node["project"]),
+            )
+            needs_reviews.extend(
+                self.repository.list_needs_reviews(
+                    project=self.graph_project,
+                    status="open",
+                    key=key,
+                )
+            )
 
         nodes = {node["id"]: node for node in visible_seeds}
         frontier = [node["id"] for node in visible_seeds]
@@ -356,6 +517,8 @@ class ContextProvisioningService:
             "depth": parsed_depth,
             "nodes": [_public_node(nodes[node_id]) for node_id in sorted(nodes)],
             "edges": [_public_edge(edges[edge_id]) for edge_id in sorted(edges)],
+            "memoryHistory": memory_history,
+            "needsReviews": needs_reviews,
             "truncated": frontier_truncated or len(nodes) >= parsed_limit,
         }
 
@@ -503,6 +666,14 @@ class ContextProvisioningService:
             if prepared is None:
                 omitted.append({"nodeId": node_id, "reason": "unsupported"})
                 continue
+            needs_reviews: list[dict[str, Any]] = []
+            if node["namespace"] == "memory":
+                self.repository.record_memory_usage(node_id, event="selected")
+                needs_reviews = self.repository.list_needs_reviews(
+                    project=self.graph_project,
+                    status="open",
+                    key=str(node["stableKey"]),
+                )
             rendered = prepared["rendered"]
             delivery_key = prepared["key"]
             rendered_hash = value_hash(rendered)
@@ -525,21 +696,13 @@ class ContextProvisioningService:
                 rendered = _truncate_to_budget(rendered, remaining)
                 tokens = estimate_tokens(rendered)
                 truncated = True
-            if node["namespace"] == "memory":
-                digest = self.repository.record_delivery(
-                    session,
-                    delivery_key,
-                    rendered,
-                    project=self.project,
-                )
-            else:
-                digest = self.repository.record_node_delivery(
-                    session,
-                    node_id,
-                    delivery_key,
-                    rendered,
-                    project=self.project,
-                )
+            digest = self.repository.record_node_delivery(
+                session,
+                node_id,
+                delivery_key,
+                rendered,
+                project=self.project,
+            )
             candidate = candidate_by_id.get(node_id, {})
             delivery.append(
                 {
@@ -555,6 +718,7 @@ class ContextProvisioningService:
                     "estimatedTokens": tokens,
                     "valueHash": digest,
                     "rendered": rendered,
+                    "needsReview": needs_reviews,
                 }
             )
             remaining -= tokens
@@ -600,6 +764,7 @@ class ContextProvisioningService:
         idf: dict[str, float],
         active_paths: set[str],
         recall_scores: dict[str, float],
+        usage: dict[str, Any] | None,
         previous_deliveries: set[str],
     ) -> dict[str, Any] | None:
         label = str(node.get("label") or "").lower()
@@ -631,9 +796,17 @@ class ContextProvisioningService:
                 signals.append(f"source:{term}")
         if matched_terms and terms:
             score *= (len(set(matched_terms)) / len(terms)) ** 2
-        if source and any(_paths_related(source, active) for active in active_paths):
+        active_path_match = source and any(
+            _paths_related(source, active) for active in active_paths
+        )
+        if active_path_match:
             score += 32
             signals.append("active-path")
+        # Recall and raw-use counters affect ordering only after the current
+        # request has supplied direct lexical or active-path evidence. They
+        # must never manufacture relevance for an unrelated memory.
+        if not matched_terms and not active_path_match:
+            return None
         lookup_key = (
             str(node["stableKey"])
             if node["namespace"] == "memory"
@@ -653,6 +826,15 @@ class ContextProvisioningService:
         if node["type"] == "decision":
             score += 12
             signals.append("decision")
+        if usage is not None:
+            selected_count = int(usage["selectedCount"])
+            expanded_count = int(usage["expandedCount"])
+            score += min(12.0, selected_count * 2.0)
+            score += min(8.0, expanded_count * 3.0)
+            if selected_count:
+                signals.append(f"usage:selected={selected_count}")
+            if expanded_count:
+                signals.append(f"usage:expanded={expanded_count}")
         if lookup_key in previous_deliveries:
             score -= 8
             signals.append("previously-delivered")
@@ -677,6 +859,13 @@ class ContextProvisioningService:
             "signals": sorted(set(signals)),
             "matchedTerms": sorted(set(matched_terms)),
             "stale": stale,
+            "usage": usage
+            or {
+                "selectedCount": 0,
+                "expandedCount": 0,
+                "lastSelectedAt": None,
+                "lastExpandedAt": None,
+            },
         }
 
     def _recall_scores(self, session_id: str) -> dict[str, float]:
@@ -716,7 +905,6 @@ class ContextProvisioningService:
         limit: int,
     ) -> list[dict[str, Any]]:
         selected: list[dict[str, Any]] = []
-        selected_ids: set[str] = set()
         covered_terms: set[str] = set()
         requested_terms = set(terms)
         for candidate in ranked:
@@ -724,17 +912,12 @@ class ContextProvisioningService:
             if not matched_terms - covered_terms:
                 continue
             selected.append(candidate)
-            selected_ids.add(candidate["nodeId"])
             covered_terms.update(matched_terms)
             if len(selected) >= limit or covered_terms >= requested_terms:
                 break
-        for candidate in ranked:
-            if len(selected) >= limit:
-                break
-            if candidate["nodeId"] in selected_ids:
-                continue
-            selected.append(candidate)
-            selected_ids.add(candidate["nodeId"])
+        # Do not pad the result with candidates that repeat concepts already
+        # covered. Long-running agents can issue a narrower follow-up prepare
+        # call; redundant context consumes input budget and obscures intent.
         return selected
 
     def _connect_candidates(

@@ -6,6 +6,7 @@ import json
 import pytest
 
 from purpory.__main__ import main
+from purpory.supervise.library import ContextService
 from purpory.supervise.repository import ContextGraphRepository
 
 
@@ -39,6 +40,7 @@ def test_removed_context_command_is_rejected(monkeypatch, capsys) -> None:
 
 def test_prepare_emits_machine_readable_context_result(monkeypatch, capsys, tmp_path) -> None:
     database = tmp_path / "context.db"
+    monkeypatch.setenv("PURPORY_HOME", str(tmp_path / "purpory-home"))
     ContextGraphRepository(database).set_topic(
         "decision.database", value="database PostgreSQL", kind="decision"
     )
@@ -82,6 +84,8 @@ def test_remember_stores_human_context(monkeypatch, capsys, tmp_path) -> None:
             "decision",
             "--db",
             str(database),
+            "--root",
+            str(tmp_path),
             "--json",
         ],
     )
@@ -89,9 +93,47 @@ def test_remember_stores_human_context(monkeypatch, capsys, tmp_path) -> None:
     main()
 
     assert json.loads(capsys.readouterr().out)["action"] == "created"
-    topic = ContextGraphRepository(database).get_topic("decision.database")
+    topic = ContextService(db_path=database, root=tmp_path).topic("decision.database")
     assert topic is not None
     assert topic["value"] == "PostgreSQL"
+
+
+def test_remember_global_request_waits_for_human_approval(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    database = tmp_path / "context.db"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "purpory",
+            "remember",
+            "intent.editor",
+            "--value",
+            "Use Neovim",
+            "--category",
+            "intent",
+            "--global-request",
+            "--rationale",
+            "Reusable editor preference",
+            "--db",
+            str(database),
+            "--root",
+            str(tmp_path),
+            "--json",
+        ],
+    )
+
+    main()
+
+    result = json.loads(capsys.readouterr().out)
+    service = ContextService(db_path=database, root=tmp_path)
+    assert result["status"] == "pending"
+    assert result["created"] is True
+    assert service.repository.get_topic(
+        "intent.editor", project=service.project_id
+    ) is None
+    assert service.global_memory_requests(status="pending")[0]["id"] == result["id"]
 
 
 def test_remember_lists_and_atomically_applies_project_batch(

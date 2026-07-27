@@ -10,6 +10,7 @@ from typing import Any, BinaryIO, Mapping, TextIO
 
 from purpory.supervise.gate.provider import GateProvider, UnavailableGateProvider
 from purpory.supervise.gate.runtime import DEFAULT_START_TIMEOUT_SECONDS, GateModelManager
+from purpory.supervise.identity import resolve_project_root
 from purpory.supervise.library import ContextService
 
 SUPPORTED_AGENTS = frozenset({"claude", "codex"})
@@ -111,10 +112,11 @@ def _clarification_context(result: Mapping[str, Any]) -> str:
     request_id = result.get("requestId")
     request_label = f" Request ID: {request_id}." if request_id is not None else ""
     return (
-        "[PURPORY PREFLIGHT — USER INPUT REQUIRED]\n"
-        "Do not start the requested work and do not call tools. "
-        "Ask the user the exact clarification below, then wait for their reply."
-        f"{request_label}\n\n{clarification.strip()}"
+        "[PURPORY PREFLIGHT — INTENT ALIGNMENT SUGGESTION]\n"
+        "Purpory detected possible ambiguity between project context and the user prompt.\n"
+        "If you can address the request directly using existing codebase context, proceed with tools/answer.\n"
+        "Only clarify if missing specs make execution impossible."
+        f"{request_label}\n\nSuggested alignment: {clarification.strip()}"
     )
 
 
@@ -146,13 +148,12 @@ def prepare_prompt(agent: str, payload: Mapping[str, Any]) -> dict[str, Any] | N
         raise ValueError("agent hook cwd must be an existing directory")
 
     service = ContextService(
-        root=cwd,
+        root=resolve_project_root(cwd),
         gate_provider=_gate_provider(),
     )
     result = service.prepare(
         prompt,
         session_id=f"{normalized_agent}:{session_id}",
-        project=os.environ.get("PURPORY_PROJECT_ID", "").strip() or cwd.name,
         working_directory=cwd,
         token_budget=_env_int(
             "PURPORY_CONTEXT_TOKEN_BUDGET",

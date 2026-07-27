@@ -27,7 +27,13 @@ def activation(
         rows = connection.execute(
             """
             SELECT delivery.key, delivery.delivered_at
-            FROM deliveries delivery JOIN topics topic ON topic.key = delivery.key
+            FROM deliveries delivery
+            WHERE EXISTS (
+                SELECT 1 FROM context_nodes topic
+                WHERE topic.namespace = 'memory'
+                  AND topic.stable_key = delivery.key
+                  AND topic.project IN ('', COALESCE(delivery.project, ''))
+            )
             ORDER BY delivery.key ASC, delivery.delivered_at DESC
             """
         ).fetchall()
@@ -63,11 +69,16 @@ def associations(
             SELECT candidate.key, COUNT(DISTINCT candidate.session_id) AS sessions
             FROM deliveries seed
             JOIN deliveries candidate ON candidate.session_id = seed.session_id
-            JOIN topics topic ON topic.key = candidate.key
             WHERE seed.key IN (SELECT key FROM recall_owned_keys)
               AND candidate.key NOT IN (SELECT key FROM recall_owned_keys)
               AND candidate.key != seed.key
               AND (? IS NULL OR candidate.session_id != ?)
+              AND EXISTS (
+                  SELECT 1 FROM context_nodes topic
+                  WHERE topic.namespace = 'memory'
+                    AND topic.stable_key = candidate.key
+                    AND topic.project IN ('', COALESCE(candidate.project, ''))
+              )
             GROUP BY candidate.key
             ORDER BY sessions DESC, candidate.key ASC
             """,
@@ -89,13 +100,19 @@ def lessons(
         raise ValueError("half_life_days must be positive")
     current = int(time.time()) if now is None else int(now)
     owned = set(owned_keys)
-    query = (
-        "SELECT delivery.key, delivery.session_id, delivery.delivered_at "
-        "FROM deliveries delivery JOIN topics topic ON topic.key = delivery.key"
-    )
+    query = """
+        SELECT delivery.key, delivery.session_id, delivery.delivered_at
+        FROM deliveries delivery
+        WHERE EXISTS (
+            SELECT 1 FROM context_nodes topic
+            WHERE topic.namespace = 'memory'
+              AND topic.stable_key = delivery.key
+              AND topic.project IN ('', COALESCE(delivery.project, ''))
+        )
+    """
     params: tuple[Any, ...] = ()
     if session_id:
-        query += " WHERE delivery.session_id != ?"
+        query += " AND delivery.session_id != ?"
         params = (session_id,)
     query += " ORDER BY delivery.key ASC, delivery.session_id ASC"
     with repository.connect() as connection:

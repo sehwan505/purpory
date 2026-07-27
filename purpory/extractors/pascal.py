@@ -229,8 +229,10 @@ def _resolve_pascal_callee_factory(
 
 
 def _extract_pascal_regex(path: Path) -> dict:
-    """Regex fallback for Pascal/Delphi extraction when tree-sitter-pascal
-    is unavailable. Produces the same node/edge schema as the tree-sitter pass.
+    """Explicit regex-based Pascal/Delphi extractor.
+
+    This remains available to callers that deliberately choose approximate
+    extraction, but :func:`extract_pascal` never selects it automatically.
     """
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
@@ -444,24 +446,23 @@ def extract_pascal(path: Path) -> dict:
     - class/module --contains--> procedure/function implementation
     - procedure --calls--> other procedure (within the same file)
 
-    Uses tree-sitter-pascal when available; falls back to a regex-based extractor
-    (_extract_pascal_regex) when it isn't installed or fails to parse, so Pascal
-    extraction works out of the box without an extra pip install.
+    Requires tree-sitter-pascal. Approximate regex extraction is available only
+    through an explicit :func:`_extract_pascal_regex` call.
     """
     try:
         import tree_sitter_pascal as tspascal
         from tree_sitter import Language, Parser
-    except ImportError:
-        return _extract_pascal_regex(path)
+    except ImportError as exc:
+        raise RuntimeError(
+            "Pascal extraction requires tree-sitter-pascal; reinstall Purpory "
+            "or run `pip install tree-sitter-pascal`"
+        ) from exc
 
-    try:
-        language = Language(tspascal.language())
-        parser = Parser(language)
-        source = path.read_bytes()
-        tree = parser.parse(source)
-        root = tree.root_node
-    except Exception:
-        return _extract_pascal_regex(path)
+    language = Language(tspascal.language())
+    parser = Parser(language)
+    source = path.read_bytes()
+    tree = parser.parse(source)
+    root = tree.root_node
 
     stem = _file_stem(path)
     str_path = str(path)

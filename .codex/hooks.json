@@ -5,8 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/parksehwan/orca/projects/purpory/.venv/bin/purpory preflight codex",
-            "commandWindows": "/Users/parksehwan/orca/projects/purpory/.venv/bin/purpory preflight codex",
+            "command": "/Users/parksehwan/.local/bin/purpory preflight codex",
+            "commandWindows": "/Users/parksehwan/.local/bin/purpory preflight codex",
             "timeout": 330,
             "statusMessage": "Purpory is preparing context"
           }

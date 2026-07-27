@@ -1,6 +1,8 @@
 """Tests for the Pascal/Delphi extractor."""
 from __future__ import annotations
+import builtins
 from pathlib import Path
+import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -21,6 +23,40 @@ def test_pascal_no_error():
     from purpory.extract import extract_pascal
     r = extract_pascal(FIXTURES / "sample.pas")
     assert "error" not in r
+
+
+def test_pascal_missing_parser_fails_instead_of_using_regex(monkeypatch):
+    from purpory.extract import extract_pascal
+
+    real_import = builtins.__import__
+
+    def missing_parser(name, *args, **kwargs):
+        if name == "tree_sitter_pascal":
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_parser)
+    with pytest.raises(RuntimeError, match="requires tree-sitter-pascal"):
+        extract_pascal(FIXTURES / "sample.pas")
+
+
+def test_pascal_parser_error_propagates_without_regex(monkeypatch):
+    import tree_sitter
+    import purpory.extractors.pascal as pascal_module
+
+    class BrokenParser:
+        def __init__(self, _language):
+            raise RuntimeError("parser initialization failed")
+
+    monkeypatch.setattr(tree_sitter, "Parser", BrokenParser)
+    monkeypatch.setattr(
+        pascal_module,
+        "_extract_pascal_regex",
+        lambda _path: (_ for _ in ()).throw(AssertionError("unexpected regex extraction")),
+    )
+
+    with pytest.raises(RuntimeError, match="parser initialization failed"):
+        pascal_module.extract_pascal(FIXTURES / "sample.pas")
 
 
 def test_pascal_finds_unit():

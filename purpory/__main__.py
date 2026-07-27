@@ -188,6 +188,8 @@ def _run_cli() -> None:
         print("  remember <key>         store durable human context")
         print("    --value TEXT           store inline knowledge")
         print("    --source POINTER       store a live @root or external reference")
+        print("    --category CATEGORY    intent, knowledge, or reference")
+        print("    --global-request       request an explicitly approved global write")
         print("    --list [--prefix KEY]  list visible project memories")
         print("    --batch FILE [--apply] preview or atomically apply memory changes")
         print('  prepare "<request>"    prepare situation-aware context for an agent')

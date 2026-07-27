@@ -173,6 +173,34 @@ def test_direct_ask_records_a_deduplicated_gap(tmp_path: Path) -> None:
     assert len(service.requests(status="open")) == 1
 
 
+def test_direct_ask_searches_memory_before_interrupting_user(tmp_path: Path) -> None:
+    provider = StubGateProvider(
+        _proposal(
+            "ask",
+            reason="AMBIGUOUS_REQUEST",
+            clarification="What goal do you mean?",
+        )
+    )
+    service = ContextService(
+        db_path=tmp_path / "context.db",
+        root=tmp_path,
+        gate_provider=provider,
+    )
+    service.set_topic(
+        "intent.product.ultimate",
+        value="Purpory should eventually understand and replace the user's work",
+        kind="decision",
+    )
+
+    result = service.prepare("What is Purpory's ultimate product goal?", session_id="session-a")
+
+    assert result["proposal"]["action"] == "ask"
+    assert result["action"] == "retrieve"
+    assert [item["key"] for item in result["delivery"]] == ["intent.product.ultimate"]
+    assert result["requestId"] is None
+    assert result["clarification"] is None
+
+
 def test_scope_alone_never_selects_an_unrelated_human_topic(tmp_path: Path) -> None:
     provider = StubGateProvider(_proposal("search", query="deployment policy", scopes=["human"]))
     service = ContextService(db_path=tmp_path / "context.db", root=tmp_path, gate_provider=provider)
@@ -276,7 +304,7 @@ def test_qwen_provider_rejects_remote_endpoint_by_default() -> None:
         QwenGateProvider(base_url="https://models.example/v1")
 
 
-def test_qwen_provider_parses_schema_constrained_response(monkeypatch) -> None:
+def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
     captured: dict = {}
 
     class Response:
@@ -288,16 +316,7 @@ def test_qwen_provider_parses_schema_constrained_response(monkeypatch) -> None:
                     "choices": [
                         {
                             "message": {
-                                "content": json.dumps(
-                                    {
-                                        "action": "search",
-                                        "query": "auth policy",
-                                        "scopes": ["human", "code"],
-                                        "keywords": ["auth"],
-                                        "reasonCode": "PRIOR_DECISION_REFERENCED",
-                                        "clarification": None,
-                                    }
-                                )
+                                "content": "SEARCH\n"
                             }
                         }
                     ]
@@ -328,6 +347,46 @@ def test_qwen_provider_parses_schema_constrained_response(monkeypatch) -> None:
     result = provider.propose(request)
 
     assert result.proposal.action == "search"
-    assert captured["body"]["response_format"]["type"] == "json_schema"
-    assert captured["body"]["temperature"] == 0
+    assert result.proposal.query == "전에 정한 인증 정책"
+    assert result.proposal.scopes == ("code", "human", "session")
+    assert result.proposal.reason_code == "CONTEXT_SEARCH_REQUIRED"
+    assert "response_format" not in captured["body"]
+    assert "temperature" not in captured["body"]
+    assert captured["body"]["max_tokens"] == 8
+    assert captured["body"]["messages"][1]["content"] == "전에 정한 인증 정책"
+    system_prompt = captured["body"]["messages"][0]["content"]
+    assert "exactly one word" in system_prompt
+    assert "SKIP, SEARCH, or ASK" in system_prompt
     assert captured["closed"] is True
+
+
+def test_qwen_provider_rejects_non_classifier_response(monkeypatch) -> None:
+    class Response:
+        status = 200
+
+        def read(self, maximum: int) -> bytes:
+            return json.dumps(
+                {"choices": [{"message": {"content": "I would search."}}]}
+            ).encode()
+
+    class Connection:
+        def request(self, method, target, body, headers):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    provider = QwenGateProvider(base_url="http://127.0.0.1:8080/v1")
+    monkeypatch.setattr(provider, "_connection", lambda: Connection())
+    request = GateRequest.create(
+        message="전에 정한 인증 정책",
+        session_id="session-a",
+        project="demo",
+        working_directory="/tmp/demo",
+    )
+
+    with pytest.raises(GateProviderError, match="invalid gate classifier response"):
+        provider.propose(request)

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
-from purpory.supervise.gate.runtime import GateModelManager
+from purpory.supervise.gate.runtime import GateModelManager, _gate_device
 from purpory.supervise.model_cli import dispatch_model
 
 
@@ -61,6 +61,7 @@ def test_start_uses_detached_transformers_server_and_warms_model(
         "purpory.supervise.gate.runtime._transformers_executable",
         lambda: "/venv/bin/transformers",
     )
+    monkeypatch.setattr("purpory.supervise.gate.runtime._gate_device", lambda: "cpu")
     monkeypatch.setattr("purpory.supervise.gate.runtime._available_port", lambda: 43123)
     monkeypatch.setattr(
         "purpory.supervise.gate.runtime._spawn",
@@ -82,16 +83,42 @@ def test_start_uses_detached_transformers_server_and_warms_model(
     result = manager.start(wait_seconds=5)
 
     command = captured["command"]
-    assert command[:4] == (
+    assert command[:3] == (
         "/venv/bin/transformers",
         "serve",
-        "--force-model",
         f"Qwen/Qwen3.5-0.8B@{'a' * 40}",
     )
-    assert "--continuous-batching" in command
+    assert "--continuous-batching" not in command
+    assert command[command.index("--device") + 1] == "cpu"
     assert captured["endpoint"] == "http://127.0.0.1:43123/v1"
     assert result["action"] == "started"
     assert result["ready"] is True
+
+
+def test_gate_device_defaults_to_cpu_on_macos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PURPORY_GATE_DEVICE", raising=False)
+    monkeypatch.setattr("purpory.supervise.gate.runtime.sys.platform", "darwin")
+
+    assert _gate_device() == "cpu"
+
+
+def test_gate_device_allows_an_explicit_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PURPORY_GATE_DEVICE", "mps")
+
+    assert _gate_device() == "mps"
+
+
+def test_gate_device_rejects_option_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PURPORY_GATE_DEVICE", "--help")
+
+    with pytest.raises(ValueError, match="one device identifier"):
+        _gate_device()
 
 
 def test_provider_uses_managed_endpoint_without_environment_url(

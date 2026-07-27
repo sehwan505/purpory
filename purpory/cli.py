@@ -356,7 +356,11 @@ def dispatch_command(cmd: str) -> None:
 
         dispatch_model(sys.argv[2:])
     elif cmd == "provider":
-        from purpory.llm import _custom_providers_path, BACKENDS
+        from purpory.llm import (
+            _custom_providers_path,
+            _read_custom_providers_file,
+            BACKENDS,
+        )
         import json as _json
 
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -364,12 +368,9 @@ def dispatch_command(cmd: str) -> None:
 
         if subcmd == "list":
             global_path.parent.mkdir(parents=True, exist_ok=True)
-            existing: dict = {}
-            if global_path.is_file():
-                try:
-                    existing = _json.loads(global_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            existing = (
+                _read_custom_providers_file(global_path) if global_path.is_file() else {}
+            )
             if not existing:
                 print("No custom providers registered.")
             else:
@@ -381,12 +382,9 @@ def dispatch_command(cmd: str) -> None:
             if not name:
                 print("Usage: purpory provider show <name>", file=sys.stderr)
                 sys.exit(1)
-            existing = {}
-            if global_path.is_file():
-                try:
-                    existing = _json.loads(global_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            existing = (
+                _read_custom_providers_file(global_path) if global_path.is_file() else {}
+            )
             if name not in existing:
                 print(f"Provider '{name}' not found.", file=sys.stderr)
                 sys.exit(1)
@@ -456,12 +454,9 @@ def dispatch_command(cmd: str) -> None:
                 )
                 sys.exit(1)
             global_path.parent.mkdir(parents=True, exist_ok=True)
-            existing = {}
-            if global_path.is_file():
-                try:
-                    existing = _json.loads(global_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            existing = (
+                _read_custom_providers_file(global_path) if global_path.is_file() else {}
+            )
             existing[name] = {
                 "base_url": base_url,
                 "default_model": default_model,
@@ -477,12 +472,9 @@ def dispatch_command(cmd: str) -> None:
             if not name:
                 print("Usage: purpory provider remove <name>", file=sys.stderr)
                 sys.exit(1)
-            existing = {}
-            if global_path.is_file():
-                try:
-                    existing = _json.loads(global_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            existing = (
+                _read_custom_providers_file(global_path) if global_path.is_file() else {}
+            )
             if name not in existing:
                 print(f"Provider '{name}' not found.", file=sys.stderr)
                 sys.exit(1)
@@ -2763,8 +2755,7 @@ def dispatch_command(cmd: str) -> None:
                 ast_result = _ast_extract(code_files, **ast_kwargs)
             except Exception as exc:
                 print(f"[purpory extract] AST extraction failed: {exc}", file=sys.stderr)
-                ast_result = {"nodes": [], "edges": [], "input_tokens": 0, "output_tokens": 0}
-                _extraction_incomplete = True  # the whole AST pass was lost
+                sys.exit(1)
         stages.mark("AST extract")
 
         # Semantic extraction on docs/papers/images. Check cache first.

@@ -3,6 +3,7 @@ import math
 import re
 import tempfile
 from pathlib import Path
+import pytest
 from purpory.build import build_from_json
 from purpory.cluster import cluster
 from purpory.export import to_json, to_cypher, to_graphml, to_html, to_canvas, to_obsidian
@@ -724,6 +725,21 @@ def test_backup_env_disable(tmp_path, monkeypatch):
     (tmp_path / "graph.json").write_text('{"nodes":[],"links":[]}')
     (tmp_path / ".purpory_semantic_marker").write_text("{}")
     assert backup_if_protected(tmp_path) is None
+
+
+def test_backup_failure_blocks_protected_overwrite(tmp_path, monkeypatch):
+    """A required backup is a guard, not a best-effort side effect."""
+    from purpory.export import backup_if_protected
+
+    (tmp_path / "graph.json").write_text('{"nodes":[],"links":[]}')
+    (tmp_path / ".purpory_semantic_marker").write_text("{}")
+    monkeypatch.setattr(
+        "purpory.export.shutil.copy2",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="could not back up protected graph"):
+        backup_if_protected(tmp_path)
 
 
 def _mkG(n):

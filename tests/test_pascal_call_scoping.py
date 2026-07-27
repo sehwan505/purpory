@@ -1,7 +1,7 @@
 """Regression tests for scoped call resolution in the Pascal/Delphi extractor.
 
-Before this fix, both `extract_pascal` (tree-sitter path) and
-`_extract_pascal_regex` (fallback path) resolved every call by a single
+Before this fix, both `extract_pascal` (tree-sitter path) and the explicit
+`_extract_pascal_regex` path resolved every call by a single
 file-wide ``{method_name_lower: node_id}`` dict with no class scoping. Two
 unrelated classes declaring a same-named method (a common Pascal/Delphi
 pattern -- property accessors, generated wrapper classes such as TLB import
@@ -48,7 +48,7 @@ def _has_call(r, src_id, tgt_id):
 
 @pytest.mark.parametrize("extract", [
     pytest.param(0, id="tree-sitter"),
-    pytest.param(1, id="regex-fallback"),
+    pytest.param(1, id="explicit-regex"),
 ])
 def test_calls_scoped_to_own_class(extract):
     r = _extractors()[extract](FIXTURE_PATH)
@@ -59,7 +59,7 @@ def test_calls_scoped_to_own_class(extract):
 
 @pytest.mark.parametrize("extract", [
     pytest.param(0, id="tree-sitter"),
-    pytest.param(1, id="regex-fallback"),
+    pytest.param(1, id="explicit-regex"),
 ])
 def test_calls_do_not_cross_unrelated_classes(extract):
     r = _extractors()[extract](FIXTURE_PATH)
@@ -74,7 +74,7 @@ def test_calls_do_not_cross_unrelated_classes(extract):
 
 @pytest.mark.parametrize("extract", [
     pytest.param(0, id="tree-sitter"),
-    pytest.param(1, id="regex-fallback"),
+    pytest.param(1, id="explicit-regex"),
 ])
 def test_calls_scoped_other_direction(extract):
     r = _extractors()[extract](FIXTURE_PATH)
@@ -90,7 +90,7 @@ def test_calls_scoped_other_direction(extract):
 
 @pytest.mark.parametrize("extract", [
     pytest.param(0, id="tree-sitter"),
-    pytest.param(1, id="regex-fallback"),
+    pytest.param(1, id="explicit-regex"),
 ])
 def test_calls_resolve_via_ancestor_chain(extract):
     r = _extractors()[extract](FIXTURE_PATH)

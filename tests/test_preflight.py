@@ -36,7 +36,7 @@ def test_ask_keeps_original_prompt_and_directs_agent_to_clarify() -> None:
     assert response is not None
     assert "decision" not in response
     context = response["hookSpecificOutput"]["additionalContext"]
-    assert "Do not start" in context
+    assert "INTENT ALIGNMENT SUGGESTION" in context
     assert "Request ID: 17" in context
     assert "Which environment" in context
 
@@ -74,6 +74,39 @@ def test_prepare_prefixes_native_session_with_agent(tmp_path: Path, monkeypatch)
     assert captured["session_id"] == "codex:native-session"
     assert captured["message"] == "Explain the auth flow"
     assert captured["retain_input"] is True
+    assert "project" not in captured
+
+
+def test_prepare_anchors_nested_hook_cwd_to_repository_root(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "repository"
+    nested = root / "src" / "feature"
+    nested.mkdir(parents=True)
+    (root / ".git").mkdir()
+    captured: dict[str, object] = {}
+
+    class Service:
+        def __init__(self, **kwargs) -> None:
+            captured["root"] = kwargs["root"]
+
+        def prepare(self, message: str, **kwargs):
+            captured.update(kwargs)
+            return {"action": "skip"}
+
+    monkeypatch.setattr(preflight, "ContextService", Service)
+    monkeypatch.setattr(preflight, "_gate_provider", lambda: None)
+
+    preflight.prepare_prompt(
+        "codex",
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Explain the auth flow",
+            "session_id": "native-session",
+            "cwd": str(nested),
+        },
+    )
+
+    assert captured["root"] == root.resolve()
+    assert captured["working_directory"] == nested.resolve()
 
 
 def test_prepare_can_disable_local_input_retention(tmp_path: Path, monkeypatch) -> None:

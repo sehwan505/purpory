@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-DEFAULT_STALE_DAYS = 60
+DEFAULT_STALE_DAYS = 90
 SECONDS_PER_DAY = 86_400
 
 

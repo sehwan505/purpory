@@ -110,7 +110,7 @@ def test_project_local_providers_loaded_with_optin(tmp_path, monkeypatch):
 
 
 def test_non_http_provider_base_url_rejected(tmp_path, monkeypatch):
-    """A provider whose base_url uses a non-http(s) scheme is skipped on load (F1)."""
+    """An invalid provider entry fails the registry load instead of disappearing."""
     providers_file = tmp_path / "providers.json"
     providers_file.write_text(json.dumps({
         "sneaky": {"base_url": "file:///etc/passwd", "default_model": "m", "env_key": "K"}
@@ -121,8 +121,54 @@ def test_non_http_provider_base_url_rejected(tmp_path, monkeypatch):
                         lambda global_=True: providers_file if global_ else tmp_path / "local.json")
     monkeypatch.setattr(llm, "BACKENDS", {**llm.BACKENDS})
 
-    loaded = llm._load_custom_providers()
-    assert "sneaky" not in loaded
+    with pytest.raises(ValueError, match="invalid base_url"):
+        llm._load_custom_providers()
+
+
+def test_malformed_provider_registry_is_not_treated_as_empty(tmp_path):
+    from purpory.llm import _read_custom_providers_file
+
+    providers_file = tmp_path / "providers.json"
+    providers_file.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="could not load custom providers"):
+        _read_custom_providers_file(providers_file)
+
+
+def test_provider_add_does_not_overwrite_malformed_registry(tmp_path, monkeypatch):
+    import sys
+
+    from purpory import llm
+    from purpory.cli import dispatch_command
+
+    providers_file = tmp_path / "providers.json"
+    original = "{broken"
+    providers_file.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(
+        llm,
+        "_custom_providers_path",
+        lambda global_=True: providers_file if global_ else tmp_path / "local.json",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "purpory",
+            "provider",
+            "add",
+            "strict",
+            "--base-url",
+            "https://example.test/v1",
+            "--default-model",
+            "model",
+            "--env-key",
+            "STRICT_API_KEY",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="could not load custom providers"):
+        dispatch_command("provider")
+    assert providers_file.read_text(encoding="utf-8") == original
 
 
 def test_provider_base_url_ok_scheme_and_warnings(capsys):
