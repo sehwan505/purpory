@@ -8,6 +8,24 @@ import pytest
 import purpory.__main__ as mainmod
 
 
+def _state_out(root):
+    from purpory.supervise.structural import project_state_directory
+
+    return project_state_directory(root) / "purpory-out"
+
+
+def _graph(root):
+    from purpory.supervise.structural import load_structural_graph
+
+    return load_structural_graph(root)
+
+
+def _store_graph(root, graph):
+    from purpory.supervise.structural import store_structural_graph
+
+    store_structural_graph(graph, root=root)
+
+
 def _make_corpus(tmp_path):
     """Minimal corpus: one Go code file + one Markdown doc.
 
@@ -156,10 +174,7 @@ def test_extract_succeeds_when_at_least_one_chunk_completes(
     except SystemExit as exc:
         assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
 
-    # graph.json should exist on the happy path
-    assert (out_dir / "purpory-out" / "graph.json").exists(), (
-        "graph.json must be written on the happy path"
-    )
+    assert _graph(corpus)
     assert {
         str(path) for path in cache_call["allowed_source_files"]
     } == {str(corpus / "README.md")}
@@ -513,7 +528,7 @@ def test_extract_mode_deep_dispatches_over_warm_cache(monkeypatch, tmp_path):
     )
     # The deep entry landed in its own namespace, not cache/semantic/. Entries are
     # nested under a p{prompt-fingerprint}/ subdir (#1939), hence the recursive glob.
-    assert any((corpus / "purpory-out" / "cache" / "semantic-deep").glob("**/*.json"))
+    assert any((_state_out(corpus) / "cache" / "semantic-deep").glob("**/*.json"))
 
 
 def test_extract_force_flag_redispatches_and_stamps_manifest(monkeypatch, tmp_path):
@@ -545,9 +560,9 @@ def test_extract_force_flag_redispatches_and_stamps_manifest(monkeypatch, tmp_pa
 
     # The forced run still wrote the semantic cache and stamped the manifest.
     # Entries nest under a p{prompt-fingerprint}/ subdir (#1939).
-    assert any((corpus / "purpory-out" / "cache" / "semantic").glob("**/*.json"))
+    assert any((_state_out(corpus) / "cache" / "semantic").glob("**/*.json"))
     manifest = json.loads(
-        (corpus / "purpory-out" / "manifest.json").read_text()
+        (_state_out(corpus) / "manifest.json").read_text()
     )
     assert manifest.get("README.md", {}).get("semantic_hash"), (
         "forced re-dispatch must still stamp the manifest"
@@ -640,10 +655,8 @@ def test_extract_codeonly_succeeds_without_api_key(monkeypatch, tmp_path):
     except SystemExit as exc:
         assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
 
-    graph = out_dir / "purpory-out" / "graph.json"
-    assert graph.exists(), "code-only extract must write graph.json without a key"
-    import json
-    assert len(json.loads(graph.read_text()).get("nodes", [])) > 0
+    graph = _graph(corpus)
+    assert graph and graph.get("nodes")
 
 
 def test_missing_manifest_code_only_preserves_semantic_layer(monkeypatch, tmp_path):
@@ -667,8 +680,8 @@ def test_missing_manifest_code_only_preserves_semantic_layer(monkeypatch, tmp_pa
     # 1) seed a code-only graph
     _run_extract(monkeypatch, ["purpory", "extract", str(corpus),
                                "--code-only", "--out", str(out_dir)])
-    graph_path = purpory_out / "graph.json"
-    graph = json.loads(graph_path.read_text())
+    graph = _graph(corpus)
+    assert graph is not None
 
     # 2) inject a committed semantic layer for README.md (nodes + edge + hyperedge)
     graph["nodes"].append({"id": "doc_readme_a", "label": "Concept A",
@@ -681,9 +694,7 @@ def test_missing_manifest_code_only_preserves_semantic_layer(monkeypatch, tmp_pa
     graph.setdefault("hyperedges", []).append(
         {"id": "h1", "label": "Shared", "nodes": ["doc_readme_a", "doc_readme_b"],
          "relation": "participate_in", "source_file": "README.md"})
-    graph_path.write_text(json.dumps(graph))
-    (purpory_out / ".purpory_semantic_marker").write_text(
-        json.dumps({"output_tokens": 1}))
+    _store_graph(corpus, graph)
 
     # 3) manifest goes missing (fresh clone / deliberately untracked)
     (purpory_out / "manifest.json").unlink()
@@ -691,7 +702,8 @@ def test_missing_manifest_code_only_preserves_semantic_layer(monkeypatch, tmp_pa
     # 4) re-run the SAME code-only extract
     _run_extract(monkeypatch, ["purpory", "extract", str(corpus),
                                "--code-only", "--out", str(out_dir)])
-    after = json.loads(graph_path.read_text())
+    after = _graph(corpus)
+    assert after is not None
     assert _sem_doc_count(after) >= 2, (
         "committed semantic doc nodes must survive a missing-manifest "
         f"--code-only rebuild (#1925); got {_sem_doc_count(after)}"
@@ -706,7 +718,8 @@ def test_missing_manifest_code_only_preserves_semantic_layer(monkeypatch, tmp_pa
     (purpory_out / "manifest.json").unlink(missing_ok=True)
     _run_extract(monkeypatch, ["purpory", "extract", str(corpus),
                                "--code-only", "--out", str(out_dir)])
-    gone = json.loads(graph_path.read_text())
+    gone = _graph(corpus)
+    assert gone is not None
     assert _sem_doc_count(gone) == 0, (
         "a genuinely deleted doc must still be evicted (#1909 semantics preserved)"
     )
@@ -738,8 +751,8 @@ def test_extract_out_keeps_project_root_clean(monkeypatch, tmp_path):
         assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
 
     out = external / "purpory-out"
-    assert (out / "graph.json").exists(), "graph.json must land under --out"
     assert (out / "manifest.json").exists(), "manifest.json must land under --out"
+    assert _graph(corpus)
     assert not (corpus / "purpory-out").exists(), (
         "scanned project must not grow a purpory-out/ when --out is set"
     )
@@ -826,9 +839,8 @@ def _two_file_corpus(tmp_path):
     return project
 
 
-def _node_sources(graph_path):
-    import json
-    data = json.loads(graph_path.read_text(encoding="utf-8"))
+def _node_sources(root):
+    data = _graph(root) or {}
     return {n.get("source_file", "") for n in data.get("nodes", [])}
 
 
@@ -856,9 +868,8 @@ def test_incremental_extract_prunes_newly_excluded_file_not_in_manifest(
         monkeypatch,
         ["purpory", "extract", str(project), "--out", str(out_dir)],
     )
-    graph_path = out_dir / "purpory-out" / "graph.json"
     manifest_path = out_dir / "purpory-out" / "manifest.json"
-    assert any("x.py" in s for s in _node_sources(graph_path)), (
+    assert any("x.py" in s for s in _node_sources(project)), (
         "seed extract must produce nodes for x.py"
     )
 
@@ -874,7 +885,7 @@ def test_incremental_extract_prunes_newly_excluded_file_not_in_manifest(
         ["purpory", "extract", str(project), "--out", str(out_dir)],
     )
 
-    sources = _node_sources(graph_path)
+    sources = _node_sources(project)
     assert not any("x.py" in s for s in sources), (
         f"newly-excluded x.py must be pruned from graph.json, still see {sources}"
     )
@@ -903,7 +914,6 @@ def test_incremental_extract_prunes_excluded_file_listed_in_manifest(
         monkeypatch,
         ["purpory", "extract", str(project), "--out", str(out_dir)],
     )
-    graph_path = out_dir / "purpory-out" / "graph.json"
     manifest_path = out_dir / "purpory-out" / "manifest.json"
     assert any("x.py" in k for k in json.loads(manifest_path.read_text()))
 
@@ -913,7 +923,7 @@ def test_incremental_extract_prunes_excluded_file_listed_in_manifest(
         ["purpory", "extract", str(project), "--out", str(out_dir)],
     )
 
-    sources = _node_sources(graph_path)
+    sources = _node_sources(project)
     assert not any("x.py" in s for s in sources)
     assert any("keep.py" in s for s in sources)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -926,7 +936,7 @@ def test_incremental_extract_prunes_excluded_file_listed_in_manifest(
         monkeypatch,
         ["purpory", "extract", str(project), "--out", str(out_dir)],
     )
-    sources = _node_sources(graph_path)
+    sources = _node_sources(project)
     assert not any("x.py" in s for s in sources)
     assert any("keep.py" in s for s in sources)
 
@@ -949,8 +959,7 @@ def test_no_cluster_incremental_prunes_newly_excluded_file(
     with pytest.raises(SystemExit) as exc:
         mainmod.main()
     assert exc.value.code == 0
-    graph_path = out_dir / "purpory-out" / "graph.json"
-    assert any("x.py" in s for s in _node_sources(graph_path))
+    assert any("x.py" in s for s in _node_sources(project))
     capsys.readouterr()
 
     (project / ".purporyignore").write_text("x.py\n")
@@ -962,7 +971,7 @@ def test_no_cluster_incremental_prunes_newly_excluded_file(
         "excluded-but-alive file must not be reported as deleted"
     )
 
-    sources = _node_sources(graph_path)
+    sources = _node_sources(project)
     assert not any("x.py" in s for s in sources), (
         f"--no-cluster early exit must prune excluded sources, still see {sources}"
     )

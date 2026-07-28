@@ -27,7 +27,6 @@ def _mixed_repo(tmp_path: Path) -> Path:
 
 def _run(repo: Path, *extra: str):
     env = {k: v for k, v in os.environ.items() if k not in _KEY_VARS}
-    env["PURPORY_OUT"] = str(repo / "purpory-out")
     return subprocess.run(
         [PYTHON, "-m", "purpory", "extract", ".", *extra],
         cwd=repo, capture_output=True, text=True, env=env,
@@ -40,8 +39,16 @@ def test_code_only_succeeds_without_key(tmp_path):
     assert r.returncode == 0, f"--code-only should succeed with no key: {r.stderr}"
     out = r.stdout + r.stderr
     assert "--code-only: skipping" in out
-    graph = repo / "purpory-out" / "graph.json"
-    assert graph.exists(), "code graph must still be written"
+    assert not (repo / "purpory-out").exists()
+    graph = repo / "graph.json"
+    exported = subprocess.run(
+        [PYTHON, "-m", "purpory", "export", "json", "--output", str(graph)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env={k: v for k, v in os.environ.items() if k not in _KEY_VARS},
+    )
+    assert exported.returncode == 0, exported.stderr
     import json
     g = json.loads(graph.read_text())
     labels = [n.get("label") for n in g["nodes"]]

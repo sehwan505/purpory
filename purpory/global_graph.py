@@ -66,30 +66,48 @@ def global_add(source_path: Path, repo_tag: str) -> dict:
     Returns a summary dict with keys: repo_tag, nodes_added, nodes_removed, skipped.
     Skipped=True means the source graph hasn't changed since last add.
     """
-    from purpory.build import prefix_graph_for_global, prune_repo_from_graph
-
     if not source_path.exists():
         raise FileNotFoundError(f"graph not found: {source_path}")
+    from purpory.security import check_graph_file_size_cap
+
+    check_graph_file_size_cap(source_path)
+    data = json.loads(source_path.read_text(encoding="utf-8"))
+    return _global_add(
+        data,
+        repo_tag,
+        source=str(source_path.resolve()),
+        source_hash=_file_hash(source_path),
+    )
+
+
+def global_add_data(data: dict, repo_tag: str, *, source: str = "sqlite") -> dict:
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    source_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return _global_add(data, repo_tag, source=source, source_hash=source_hash)
+
+
+def _global_add(
+    data: dict,
+    repo_tag: str,
+    *,
+    source: str,
+    source_hash: str,
+) -> dict:
+    from purpory.build import prefix_graph_for_global, prune_repo_from_graph
 
     manifest = _load_manifest()
-    src_hash = _file_hash(source_path)
-
     existing = manifest["repos"].get(repo_tag, {})
     existing_path = existing.get("source_path", "")
-    if existing_path and existing_path != str(source_path.resolve()):
+    if existing_path and existing_path != source:
         print(
             f"[purpory global] warning: repo tag '{repo_tag}' previously pointed to "
-            f"{existing_path!r}, now updating to {str(source_path.resolve())!r}. "
+            f"{existing_path!r}, now updating to {source!r}. "
             f"Use --as <tag> to give it a different name.",
             file=sys.stderr,
         )
-    if existing.get("source_hash") == src_hash:
+    if existing.get("source_hash") == source_hash:
         return {"repo_tag": repo_tag, "nodes_added": 0, "nodes_removed": 0, "skipped": True}
 
-    # Load source graph
-    from purpory.security import check_graph_file_size_cap
-    check_graph_file_size_cap(source_path)
-    data = json.loads(source_path.read_text(encoding="utf-8"))
     if "links" not in data and "edges" in data:
         data = dict(data, links=data["edges"])
     try:
@@ -132,10 +150,10 @@ def global_add(source_path: Path, repo_tag: str) -> dict:
 
     manifest["repos"][repo_tag] = {
         "added_at": datetime.now(timezone.utc).isoformat(),
-        "source_path": str(source_path.resolve()),
+        "source_path": source,
         "node_count": added,
         "edge_count": prefixed.number_of_edges(),
-        "source_hash": src_hash,
+        "source_hash": source_hash,
     }
     _save_manifest(manifest)
 

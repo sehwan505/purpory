@@ -662,7 +662,12 @@ def clear_cache(root: Path = Path(".")) -> None:
                 f.unlink()
 
 
-def prune_semantic_cache(root: Path, live_hashes: set[str]) -> int:
+def prune_semantic_cache(
+    root: Path,
+    live_hashes: set[str],
+    *,
+    cache_root: Path | None = None,
+) -> int:
     """Remove orphaned semantic cache entries, returning the count pruned.
 
     The semantic cache is content-hash-keyed (``{file_hash}.json`` under
@@ -699,7 +704,8 @@ def prune_semantic_cache(root: Path, live_hashes: set[str]) -> int:
     one doc on a future run, never incorrect output.
     """
     _out = Path(_PURPORY_OUT)
-    base = _out if _out.is_absolute() else Path(root).resolve() / _out
+    location = cache_root if cache_root is not None else root
+    base = _out if _out.is_absolute() else Path(location).resolve() / _out
     pruned = 0
     for kind in ("semantic", "semantic-deep"):
         semantic_dir = base / "cache" / kind
@@ -722,6 +728,7 @@ def check_semantic_cache(
     mode: str | None = None,
     prompt: "str | Path | None" = None,
     prompt_file: "str | Path | None" = None,
+    cache_root: Path | None = None,
 ) -> tuple[list[dict], list[dict], list[dict], list[str]]:
     """Check semantic extraction cache for a list of absolute file paths.
 
@@ -757,7 +764,14 @@ def check_semantic_cache(
         p = Path(fpath)
         if not p.is_absolute():
             p = Path(root) / p
-        result = load_cached(p, root, kind=kind, prompt=prompt, prompt_file=prompt_file)
+        result = load_cached(
+            p,
+            root,
+            kind=kind,
+            cache_root=cache_root,
+            prompt=prompt,
+            prompt_file=prompt_file,
+        )
         if result is not None:
             cached_nodes.extend(result.get("nodes", []))
             cached_edges.extend(result.get("edges", []))
@@ -808,6 +822,7 @@ def save_semantic_cache(
     prompt: "str | Path | None" = None,
     prompt_file: "str | Path | None" = None,
     partial_source_files: Iterable[str | Path] | None = None,
+    cache_root: Path | None = None,
 ) -> int:
     """Save semantic extraction results to cache, keyed by source_file.
 
@@ -977,6 +992,7 @@ def save_semantic_cache(
                     p,
                     root,
                     kind=kind,
+                    cache_root=cache_root,
                     prompt=prompt,
                     prompt_file=prompt_file,
                     allow_legacy=False,
@@ -1006,6 +1022,14 @@ def save_semantic_cache(
             )
             if is_partial:
                 result = {**result, "partial": True}
-            save_cached(p, result, root, kind=kind, prompt=prompt, prompt_file=prompt_file)
+            save_cached(
+                p,
+                result,
+                root,
+                kind=kind,
+                cache_root=cache_root,
+                prompt=prompt,
+                prompt_file=prompt_file,
+            )
             saved += 1
     return saved

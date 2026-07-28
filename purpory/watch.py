@@ -408,7 +408,7 @@ class _StoredSourcePaths:
 
 
 def _reconcile_existing_graph(
-    existing_graph: Path,
+    existing: dict,
     result: dict,
     *,
     out: Path,
@@ -421,17 +421,12 @@ def _reconcile_existing_graph(
     deleted_source_identities: set[str],
 ) -> tuple[dict, dict]:
     """Merge fresh extraction with preserved graph entries and evict stale sources."""
-    existing_graph_data: dict = {}
-    if not existing_graph.exists():
-        return result, existing_graph_data
+    if not existing:
+        return result, {}
 
     try:
         from purpory.build import _norm_source_file as _nsf
         from purpory.extract import _get_extractor
-        from purpory.security import check_graph_file_size_cap
-
-        check_graph_file_size_cap(existing_graph)
-        existing = json.loads(existing_graph.read_text(encoding="utf-8"))
         existing_graph_data = existing
         source_paths = _StoredSourcePaths(
             existing,
@@ -604,8 +599,11 @@ def _canonical_graph_for_compare(graph_data: dict) -> dict:
 
 
 def _canonical_topology_for_compare(graph_data: dict) -> dict:
-    canonical = dict(graph_data)
-    canonical.pop("built_at_commit", None)
+    canonical = {
+        key: graph_data[key]
+        for key in ("directed", "multigraph", "graph", "nodes", "links", "edges", "hyperedges")
+        if key in graph_data
+    }
 
     nodes = canonical.get("nodes")
     if isinstance(nodes, list):
@@ -795,15 +793,16 @@ def _rebuild_code(
     ``block_on_lock=True`` to wait instead of skip (used by the interactive
     ``purpory update`` CLI).
 
-    ``no_cluster`` skips community detection and writes raw merged extraction
-    JSON to purpory-out/graph.json (mirrors ``extract --no-cluster``).
+    ``no_cluster`` skips community detection and stores raw merged extraction.
 
     Returns True on success, False on error or skipped-due-to-lock.
     """
     if not _stabilize_rebuild_cwd(watch_path):
         return False
 
-    out = watch_path / _PURPORY_OUT
+    from purpory.supervise.structural import project_state_directory
+
+    out = project_state_directory(watch_path) / _PURPORY_OUT
     if acquire_lock:
         # #1059: incremental (changed_paths is not None) hooks must not drop
         # their change set when another rebuild is already running. Queue
@@ -857,16 +856,13 @@ def _rebuild_code(
 
     watch_root = watch_path.resolve()
     project_root = Path.cwd().resolve() if not watch_path.is_absolute() else watch_root
-    report_root = _report_root_label(watch_path)
     try:
         from purpory.extract import extract, _get_extractor
         from purpory.detect import detect
         from purpory.build import build_from_json, _norm_source_file as _nsf
         from purpory.cluster import cluster, remap_communities_to_previous, score_all
         from purpory.analyze import god_nodes, surprising_connections, suggest_questions
-        from purpory.report import generate
-        from purpory.export import to_json, to_html
-        from purpory.security import check_graph_file_size_cap
+        from purpory.supervise.structural import load_structural_graph
 
         # Re-apply the excludes the initial extract recorded, so an update/watch/
         # hook rebuild does not silently re-include deliberately excluded paths
@@ -886,8 +882,8 @@ def _rebuild_code(
                 code_files.append(p)
                 ast_doc_files.append(p)
 
-        existing_graph = out / "graph.json"
-        if not code_files and not existing_graph.exists():
+        existing_graph_data = load_structural_graph(project_root) or {}
+        if not code_files and not existing_graph_data:
             print("[purpory watch] No code files found - nothing to rebuild.")
             return False
 
@@ -904,10 +900,9 @@ def _rebuild_code(
         # graph must be allowed to self-heal on a full rebuild without the
         # shrink-guard refusing the smaller write.
         semantic_doc_files: set[Path] = set()
-        if ast_doc_files and existing_graph.exists():
+        if ast_doc_files and existing_graph_data:
             try:
-                check_graph_file_size_cap(existing_graph)
-                prior = json.loads(existing_graph.read_text(encoding="utf-8"))
+                prior = existing_graph_data
                 prior_paths = _StoredSourcePaths(
                     prior,
                     out=out,
@@ -1029,7 +1024,7 @@ def _rebuild_code(
         # source_file matches a path that was changed (re-extracted) or deleted —
         # otherwise the old nodes for those files would survive forever.
         result, existing_graph_data = _reconcile_existing_graph(
-            existing_graph,
+            existing_graph_data,
             result,
             out=out,
             project_root=project_root,
@@ -1054,7 +1049,7 @@ def _rebuild_code(
         else:
             rebuilt_sources = {(_nsf(str(p), _rebuilt_root) or str(p)) for p in extract_targets}
         rebuilt_sources |= set(deleted_paths)
-        out.mkdir(exist_ok=True)
+        out.mkdir(parents=True, exist_ok=True)
 
         if no_cluster:
             # Normalise to "links" key so schema is consistent with the full clustered path.
@@ -1067,18 +1062,18 @@ def _rebuild_code(
                 "nodes": _dedupe_nodes(result.get("nodes", [])),
                 "links": _dedupe_edges(result.get("edges", [])),
             }
-            candidate_graph_text = _json_text(candidate_graph_data)
-            same_graph = False
-            if existing_graph.exists():
-                try:
-                    check_graph_file_size_cap(existing_graph)
-                    existing_payload = json.loads(existing_graph.read_text(encoding="utf-8"))
-                    same_graph = (
-                        json.dumps(_canonical_graph_for_compare(existing_payload), sort_keys=True, ensure_ascii=False)
-                        == json.dumps(_canonical_graph_for_compare(candidate_graph_data), sort_keys=True, ensure_ascii=False)
-                    )
-                except Exception:
-                    same_graph = False
+            same_graph = (
+                json.dumps(
+                    _canonical_graph_for_compare(existing_graph_data),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+                == json.dumps(
+                    _canonical_graph_for_compare(candidate_graph_data),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+            )
             if not same_graph:
                 if not _check_shrink(
                     force, existing_graph_data, candidate_graph_data,
@@ -1086,13 +1081,10 @@ def _rebuild_code(
                     rebuilt_sources=rebuilt_sources,
                 ):
                     return False
-                existing_graph.write_text(candidate_graph_text, encoding="utf-8")
             from purpory.supervise.structural import store_structural_graph
 
             store_structural_graph(candidate_graph_data, root=project_root)
 
-            # Write the user-supplied path only after the candidate graph is
-            # accepted, so a refused shrink cannot mismatch graph and marker.
             (out / ".purpory_root").write_text(str(watch_path), encoding="utf-8")
 
             try:
@@ -1102,7 +1094,10 @@ def _rebuild_code(
                 # scan but still exist on disk (newly excluded) are pruned
                 # instead of surviving as phantom "deleted" entries (#1908).
                 save_manifest(
-                    detected["files"], kind="ast", root=project_root,
+                    detected["files"],
+                    manifest_path=str(out / "manifest.json"),
+                    kind="ast",
+                    root=project_root,
                     scan_corpus={f for _fl in detected["files"].values() for f in _fl},
                 )
             except Exception:
@@ -1114,14 +1109,14 @@ def _rebuild_code(
                 flag.unlink()
 
             if same_graph:
-                print("[purpory watch] No code-graph changes detected (--no-cluster); outputs left untouched.")
+                print("[purpory watch] No code-graph changes detected (--no-cluster).")
             else:
                 print(
                     "[purpory watch] Rebuilt (no clustering): "
                     f"{len(candidate_graph_data.get('nodes', []))} nodes, "
                     f"{len(candidate_graph_data.get('links', []))} edges"
                 )
-                print(f"[purpory watch] graph.json updated in {out}")
+                print("[purpory watch] SQLite graph updated.")
             return True
 
         detection = {
@@ -1145,7 +1140,10 @@ def _rebuild_code(
                     from purpory.detect import save_manifest
                     # Full-scan save: prune excluded-but-alive rows (#1908).
                     save_manifest(
-                        detected["files"], kind="ast", root=project_root,
+                        detected["files"],
+                        manifest_path=str(out / "manifest.json"),
+                        kind="ast",
+                        root=project_root,
                         scan_corpus={f for _fl in detected["files"].values() for f in _fl},
                     )
                 except Exception:
@@ -1153,7 +1151,7 @@ def _rebuild_code(
                 flag = out / "needs_update"
                 if flag.exists():
                     flag.unlink()
-                print("[purpory watch] No code-graph topology changes detected; outputs left untouched.")
+                print("[purpory watch] No code-graph topology changes detected.")
                 return True
 
         communities = cluster(G)
@@ -1163,13 +1161,11 @@ def _rebuild_code(
         cohesion = score_all(G, communities)
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
-        labels_file = out / ".purpory_labels.json"
-        try:
-            raw = json.loads(labels_file.read_text(encoding="utf-8")) if labels_file.exists() else {}
-            labels = {int(k): v for k, v in raw.items() if int(k) in communities}
-        except Exception:
-            raw = {}
-            labels = {}
+        labels = {
+            int(node["community"]): str(node["community_name"])
+            for node in existing_graph_data.get("nodes", [])
+            if node.get("community") is not None and node.get("community_name")
+        }
         missing = {cid: members for cid, members in communities.items() if cid not in labels}
         if missing:
             # Deterministic hub name (highest-degree member) beats a bare "Community N"
@@ -1177,103 +1173,62 @@ def _rebuild_code(
             from purpory.cluster import label_communities_by_hub
             labels.update(label_communities_by_hub(G, missing))
         questions = suggest_questions(G, communities, labels)
-        from purpory.report import load_learning_for_report as _llfr
-        report = generate(G, communities, cohesion, labels, gods, surprises, detection,
-                          {"input": 0, "output": 0}, report_root, suggested_questions=questions,
-                          built_at_commit=commit, learning=_llfr(out / "graph.json"))
-        report_path = out / "GRAPH_REPORT.md"
-        labels_json = json.dumps({str(k): v for k, v in sorted(labels.items())}, ensure_ascii=False, indent=2) + "\n"
-        graph_tmp = out / ".graph.tmp.json"
-        json_written = to_json(G, communities, str(graph_tmp), force=True, built_at_commit=commit, community_labels=labels)
-        if not json_written:
-            return False
-        candidate_graph_data = json.loads(graph_tmp.read_text(encoding="utf-8"))
-        same_graph = False
-        same_report = False
-        if existing_graph.exists():
-            try:
-                check_graph_file_size_cap(existing_graph)
-                existing_payload = json.loads(existing_graph.read_text(encoding="utf-8"))
-                same_graph = (
-                    json.dumps(_canonical_graph_for_compare(existing_payload), sort_keys=True, ensure_ascii=False)
-                    == json.dumps(_canonical_graph_for_compare(candidate_graph_data), sort_keys=True, ensure_ascii=False)
-                )
-            except Exception:
-                same_graph = False
-        if report_path.exists():
-            old_report = report_path.read_text(encoding="utf-8")
-            same_report = _report_for_compare(old_report) == _report_for_compare(report)
-        no_change = same_graph and same_report
+        from purpory.export import graph_data
+
+        candidate_graph_data = graph_data(
+            G,
+            communities,
+            built_at_commit=commit,
+            community_labels=labels,
+        )
+        no_change = (
+            json.dumps(
+                _canonical_graph_for_compare(existing_graph_data),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            == json.dumps(
+                _canonical_graph_for_compare(candidate_graph_data),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+        )
         if no_change:
-            graph_tmp.unlink(missing_ok=True)
-            print("[purpory watch] No code-graph changes detected; graph.json/GRAPH_REPORT.md left untouched.")
+            print("[purpory watch] No code-graph changes detected.")
         else:
             if not _check_shrink(
                 force, existing_graph_data, candidate_graph_data,
-                tmp=graph_tmp,
                 had_explicit_deletions=bool(deleted_paths),
                 rebuilt_sources=rebuilt_sources,
             ):
                 return False
-            from purpory.export import backup_if_protected as _backup
-            _backup(out)
-            graph_tmp.replace(existing_graph)
-            report_path.write_text(report, encoding="utf-8")
-            labels_file.write_text(labels_json, encoding="utf-8")
-        from purpory.supervise.structural import store_structural_graph
+            from purpory.supervise.structural import store_structural_graph
 
-        store_structural_graph(
-            {
-                **candidate_graph_data,
-                "analysis": {
-                    "communities": {str(k): v for k, v in communities.items()},
-                    "cohesion": {str(k): v for k, v in cohesion.items()},
-                    "gods": gods,
-                    "surprises": surprises,
-                    "questions": questions,
+            store_structural_graph(
+                {
+                    **candidate_graph_data,
+                    "analysis": {
+                        "communities": {str(k): v for k, v in communities.items()},
+                        "cohesion": {str(k): v for k, v in cohesion.items()},
+                        "gods": gods,
+                        "surprises": surprises,
+                        "questions": questions,
+                    },
                 },
-            },
-            root=project_root,
-        )
+                root=project_root,
+            )
 
         (out / ".purpory_root").write_text(str(watch_path), encoding="utf-8")
 
         from purpory.detect import save_manifest
         # Full-scan save: prune excluded-but-alive rows (#1908).
         save_manifest(
-            detected["files"], kind="ast", root=project_root,
+            detected["files"],
+            manifest_path=str(out / "manifest.json"),
+            kind="ast",
+            root=project_root,
             scan_corpus={f for _fl in detected["files"].values() for f in _fl},
         )
-
-        # to_html raises ValueError for graphs > MAX_NODES_FOR_VIZ (5000).
-        # Wrap so core outputs (graph.json + GRAPH_REPORT.md) always land.
-        html_written = False
-        if not no_change:
-            try:
-                to_html(G, communities, str(out / "graph.html"), community_labels=labels or None)
-                html_written = True
-            except ValueError as viz_err:
-                print(f"[purpory watch] Skipped graph.html: {viz_err}")
-                stale = out / "graph.html"
-                if stale.exists():
-                    stale.unlink()
-
-        # Regenerate callflow HTML if the user previously generated one —
-        # opt-in by existence so users who never ran callflow-html aren't affected.
-        callflow_files = list(out.glob("*-callflow.html"))
-        if callflow_files and not no_change:
-            try:
-                from purpory.callflow_html import write_callflow_html
-                for cf in callflow_files:
-                    write_callflow_html(
-                        graph=out / "graph.json",
-                        report=out / "GRAPH_REPORT.md",
-                        labels=out / ".purpory_labels.json",
-                        output=cf,
-                        verbose=False,
-                    )
-            except Exception as cf_err:
-                print(f"[purpory watch] callflow HTML update skipped: {cf_err}")
 
         # clear stale needs_update flag if present
         flag = out / "needs_update"
@@ -1283,10 +1238,7 @@ def _rebuild_code(
         if not no_change:
             print(f"[purpory watch] Rebuilt: {G.number_of_nodes()} nodes, "
                   f"{G.number_of_edges()} edges, {len(communities)} communities")
-            products = "graph.json" + (", graph.html" if html_written else "") + " and GRAPH_REPORT.md"
-            if callflow_files:
-                products += f", {len(callflow_files)} callflow HTML"
-            print(f"[purpory watch] {products} updated in {out}")
+            print("[purpory watch] SQLite graph updated.")
         return True
 
     except Exception as exc:
@@ -1302,7 +1254,9 @@ def check_update(watch_path: Path) -> bool:
     re-extraction via `/purpory --update` — this function only signals
     that the update is needed.
     """
-    flag = Path(watch_path) / _PURPORY_OUT / "needs_update"
+    from purpory.supervise.structural import project_state_directory
+
+    flag = project_state_directory(watch_path) / _PURPORY_OUT / "needs_update"
     if flag.exists():
         print(f"[purpory check-update] Pending non-code changes in {watch_path}.")
         print("[purpory check-update] Run `/purpory --update` to apply semantic re-extraction.")
@@ -1311,7 +1265,9 @@ def check_update(watch_path: Path) -> bool:
 
 def _notify_only(watch_path: Path) -> None:
     """Write a flag file and print a notification (fallback for non-code-only corpora)."""
-    flag = watch_path / _PURPORY_OUT / "needs_update"
+    from purpory.supervise.structural import project_state_directory
+
+    flag = project_state_directory(watch_path) / _PURPORY_OUT / "needs_update"
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.write_text("1", encoding="utf-8")
     print(f"\n[purpory watch] New or changed files detected in {watch_path}")

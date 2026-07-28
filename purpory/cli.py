@@ -124,7 +124,7 @@ def _stamped_manifest_files(
 
 
 def _stale_graph_sources(
-    graph_path: Path,
+    graph_source: Path | dict,
     scan_root: Path,
     seen_files: set[str],
 ) -> list[str]:
@@ -152,10 +152,15 @@ def _stale_graph_sources(
     files, so nodes from walked-but-unsupported sources (e.g. introspected
     Cargo.toml manifests) are not misread as stale.
     """
-    try:
-        data = json.loads(graph_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    if isinstance(graph_source, dict):
+        data = graph_source
+        out_base = scan_root
+    else:
+        try:
+            data = json.loads(graph_source.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        out_base = graph_source.parent.parent
     if not isinstance(data, dict):
         return []
     try:
@@ -163,7 +168,6 @@ def _stale_graph_sources(
     except (OSError, RuntimeError):
         root_res = scan_root
     # <out>/purpory-out/graph.json — relative source_files may be anchored here.
-    out_base = graph_path.parent.parent
     try:
         out_base = out_base.resolve()
     except (OSError, RuntimeError):
@@ -218,7 +222,7 @@ def _stale_graph_sources(
     return stale
 
 
-def _prune_graph_json_sources(graph_path: Path, stale_sources: list[str]) -> int:
+def _prune_graph_json_sources(graph_source: Path | dict, stale_sources: list[str]) -> int:
     """Drop nodes/edges/hyperedges owned by ``stale_sources`` from graph.json
     in place. Returns the number of nodes removed.
 
@@ -229,10 +233,13 @@ def _prune_graph_json_sources(graph_path: Path, stale_sources: list[str]) -> int
     ``stale_sources`` comes from :func:`_stale_graph_sources`, i.e. the
     graph's own ``source_file`` spellings, so exact string matching is enough.
     """
-    try:
-        data = json.loads(graph_path.read_text(encoding="utf-8"))
-    except Exception:
-        return 0
+    if isinstance(graph_source, dict):
+        data = graph_source
+    else:
+        try:
+            data = json.loads(graph_source.read_text(encoding="utf-8"))
+        except Exception:
+            return 0
     if not isinstance(data, dict):
         return 0
     stale = set(stale_sources)
@@ -264,12 +271,13 @@ def _prune_graph_json_sources(graph_path: Path, stale_sources: list[str]) -> int
     data[links_key] = kept_edges
     if "hyperedges" in data:
         data["hyperedges"] = kept_hyper
-    from purpory.export import backup_if_protected as _backup
+    if not isinstance(graph_source, dict):
+        from purpory.export import backup_if_protected as _backup
 
-    _backup(graph_path.parent)
-    from purpory.paths import write_json_atomic
+        _backup(graph_source.parent)
+        from purpory.paths import write_json_atomic
 
-    write_json_atomic(graph_path, data, indent=2)
+        write_json_atomic(graph_source, data, indent=2)
     return n_removed
 
 
@@ -1144,7 +1152,6 @@ def dispatch_command(cmd: str) -> None:
         force_relabel = cmd == "label"
         # Mirror the tree/export arg-parsing pattern: walk argv so flags and
         # the optional positional path can appear in any order (#724).
-        no_viz = "--no-viz" in sys.argv
         no_label = "--no-label" in sys.argv
         missing_only = "--missing-only" in sys.argv
         co_timing = "--timing" in sys.argv
@@ -1152,8 +1159,6 @@ def dispatch_command(cmd: str) -> None:
         label_backend = _backend_arg.split("=", 1)[1] if _backend_arg else None
         _model_arg = next((a for a in sys.argv if a.startswith("--model=")), None)
         label_model = _model_arg.split("=", 1)[1] if _model_arg else None
-        _min_cs_arg = next((a for a in sys.argv if a.startswith("--min-community-size=")), None)
-        min_community_size = int(_min_cs_arg.split("=")[1]) if _min_cs_arg else 3
         args = sys.argv[2:]
         watch_path: Path | None = None
         graph_override: Path | None = None
@@ -1214,11 +1219,6 @@ def dispatch_command(cmd: str) -> None:
                 i_arg += 1
         if watch_path is None:
             watch_path = Path(".")
-        graph_json = (
-            graph_override
-            if graph_override is not None
-            else watch_path / _PURPORY_OUT / "graph.json"
-        )
         from purpory.build import build_from_json
         from purpory.cluster import cluster, score_all, remap_communities_to_previous
         from purpory.analyze import (
@@ -1226,45 +1226,13 @@ def dispatch_command(cmd: str) -> None:
             surprising_connections,
             suggest_questions,
         )
-        from purpory.report import generate
-        from purpory.export import to_json, to_html
-
         stages = _StageTimer(co_timing)
         print("Loading existing graph...")
-        # Solution 3 (#1019): don't hard-exit on an oversized graph.json here.
-        # Core outputs (graph.json + GRAPH_REPORT.md) still get written; the
-        # graph.html render below falls back to the community-aggregation view
-        # (node_limit=5000) when over the cap.
-        from purpory.security import check_graph_file_size_cap as _check_cap
-
-        _over_cap = False
-        if graph_override is not None:
-            if not graph_json.exists():
-                print(
-                    f"error: no graph found at {graph_json} — run /purpory first",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            try:
-                _check_cap(graph_json)
-            except ValueError:
-                _over_cap = True
-                try:
-                    _over_cap_bytes = graph_json.stat().st_size
-                except OSError:
-                    _over_cap_bytes = -1
-                print(
-                    f"warning: graph.json exceeds cap ({_over_cap_bytes} bytes); "
-                    f"falling back to community-aggregation view (node_limit=5000)",
-                    file=sys.stderr,
-                )
-            _raw = json.loads(graph_json.read_text(encoding="utf-8"))
-        else:
-            try:
-                _raw, _, _ = _load_graph_data(root=watch_path)
-            except Exception as exc:
-                print(f"error: could not load graph: {exc}", file=sys.stderr)
-                sys.exit(1)
+        try:
+            _raw, _, _ = _load_graph_data(graph_override, root=watch_path)
+        except Exception as exc:
+            print(f"error: could not load graph: {exc}", file=sys.stderr)
+            sys.exit(1)
         _directed = bool(_raw.get("directed", False))
         G = build_from_json(_raw, directed=_directed)
         print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
@@ -1288,36 +1256,16 @@ def dispatch_command(cmd: str) -> None:
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
         stages.mark("analyze")
-        # Where outputs (GRAPH_REPORT.md, re-clustered graph.json, labels,
-        # analysis, html) land. When `--graph` points at a graph INSIDE a
-        # purpory-out/ dir (another project/tenant's output), write beside it,
-        # not into a stray purpory-out/ in the CWD (#1747). But when `--graph`
-        # points at an arbitrary path — e.g. a `backup/graph.json` archived
-        # before re-clustering (#934) — fall back to the CWD's purpory-out/,
-        # which is the restore-into-place workflow that test pins. The default
-        # (no --graph) case already has graph_json under watch_path/purpory-out.
-        _out_name = Path(_PURPORY_OUT).name
-        if graph_override is not None and graph_json.parent.name == _out_name:
-            out = graph_json.parent
-        else:
-            out = watch_path / _PURPORY_OUT
-        out.mkdir(parents=True, exist_ok=True)
-        labels_path = out / ".purpory_labels.json"
-        existing_labels: dict[int, str] = {}
-        if labels_path.exists():
-            try:
-                existing_labels = {
-                    int(k): v
-                    for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()
-                    if isinstance(v, str)
-                }
-            except Exception:
-                existing_labels = {}
+        existing_labels = {
+            int(node["community"]): str(node["community_name"])
+            for node in _raw.get("nodes", [])
+            if node.get("community") is not None and node.get("community_name")
+        }
         # Accumulate token usage from the labeling LLM calls so cluster-only mode
         # reports real cost instead of a hardcoded zero (#1694). Stays {0, 0} on
         # the reuse / no-label paths, which make no LLM calls.
         label_token_usage = {"input": 0, "output": 0}
-        if labels_path.exists() and not force_relabel:
+        if existing_labels and not force_relabel:
             # Reuse saved labels, but don't blindly trust them: the graph may have
             # been re-scoped/re-clustered since labeling, in which case a cid now
             # covers a DIFFERENT community and its old (LLM) name is wrong (#label-stale).
@@ -1329,17 +1277,15 @@ def dispatch_command(cmd: str) -> None:
             # fall back to hub-filling only the communities missing a label.
             from purpory.cluster import community_member_sigs, label_communities_by_hub
 
-            sig_path = labels_path.parent / (labels_path.name + ".sig")
-            saved_sigs: dict[int, str] = {}
-            if sig_path.exists():
-                try:
-                    saved_sigs = {
-                        int(k): v
-                        for k, v in json.loads(sig_path.read_text(encoding="utf-8")).items()
-                        if isinstance(v, str)
-                    }
-                except Exception:
-                    saved_sigs = {}
+            stored_analysis = _raw.get("analysis", {})
+            raw_sigs = (
+                stored_analysis.get("communitySignatures", {})
+                if isinstance(stored_analysis, dict)
+                else {}
+            )
+            saved_sigs = {
+                int(k): v for k, v in raw_sigs.items() if isinstance(v, str)
+            }
             cur_sigs = community_member_sigs(communities)
             count_mismatch = len(existing_labels) != len(communities)
             labels = {}
@@ -1413,44 +1359,19 @@ def dispatch_command(cmd: str) -> None:
             )
         stages.mark("label")
         questions = suggest_questions(G, communities, labels)
-        tokens = label_token_usage
-        from purpory.export import _git_head as _gh
+        from purpory.cluster import community_member_sigs
 
-        _commit = _gh()
-        from purpory.report import load_learning_for_report as _llfr
-
-        report = generate(
-            G,
-            communities,
-            cohesion,
-            labels,
-            gods,
-            surprises,
-            {"warning": "cluster-only mode — file stats not available"},
-            tokens,
-            str(watch_path),
-            suggested_questions=questions,
-            min_community_size=min_community_size,
-            built_at_commit=_commit,
-            learning=_llfr(out / "graph.json"),
-        )
-        (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
-        stages.mark("report")
-        from purpory.export import backup_if_protected as _backup
-
-        _backup(out)
         analysis = {
             "communities": {str(k): v for k, v in communities.items()},
             "cohesion": {str(k): v for k, v in cohesion.items()},
             "gods": gods,
             "surprises": surprises,
             "questions": questions,
+            "tokens": label_token_usage,
+            "communitySignatures": {
+                str(k): v for k, v in community_member_sigs(communities).items()
+            },
         }
-        (out / ".purpory_analysis.json").write_text(
-            json.dumps(analysis, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        to_json(G, communities, str(out / "graph.json"), community_labels=labels)
         from purpory.export import graph_data as _graph_data
         from purpory.supervise.structural import store_structural_graph
 
@@ -1461,56 +1382,9 @@ def dispatch_command(cmd: str) -> None:
             },
             root=watch_path,
         )
-        from purpory.paths import write_json_atomic as _wja
-
-        _wja(labels_path, {str(k): v for k, v in labels.items()}, ensure_ascii=False)
-        # Membership signatures beside the labels so a later cluster-only can detect
-        # which communities changed and avoid reusing a stale label (see reuse above).
-        from purpory.cluster import community_member_sigs as _cms
-
-        (labels_path.parent / (labels_path.name + ".sig")).write_text(
-            json.dumps({str(k): v for k, v in _cms(communities).items()}), encoding="utf-8"
-        )
-
-        # Mirror watch.py pattern: gate to_html so core outputs (graph.json +
-        # GRAPH_REPORT.md) always land. Honor --no-viz explicitly; otherwise
-        # fall back to ValueError handling so an oversized graph doesn't crash
-        # the CLI mid-write and leave a stale graph.html on disk.
-        html_target = out / "graph.html"
-        if no_viz:
-            if html_target.exists():
-                html_target.unlink()
-            stages.mark("export")
-            stages.total()
-            print(
-                f"Done - {len(communities)} communities. GRAPH_REPORT.md and graph.json updated (--no-viz; graph.html removed)."
-            )
-        else:
-            try:
-                # Over-cap fallback (#1019): force the community-aggregation
-                # path so an oversized graph still renders a usable graph.html.
-                _node_limit = 5000 if _over_cap else None
-                to_html(
-                    G,
-                    communities,
-                    str(html_target),
-                    community_labels=labels or None,
-                    node_limit=_node_limit,
-                )
-                stages.mark("export")
-                stages.total()
-                print(
-                    f"Done - {len(communities)} communities. GRAPH_REPORT.md, graph.json and graph.html updated."
-                )
-            except ValueError as viz_err:
-                if html_target.exists():
-                    html_target.unlink()
-                print(f"Skipped graph.html: {viz_err}")
-                stages.mark("export")
-                stages.total()
-                print(
-                    f"Done - {len(communities)} communities. GRAPH_REPORT.md and graph.json updated."
-                )
+        stages.mark("store")
+        stages.total()
+        print(f"Done - {len(communities)} communities stored in SQLite.")
 
     elif cmd == "update":
         force = os.environ.get("PURPORY_FORCE", "").lower() in ("1", "true", "yes")
@@ -1535,12 +1409,7 @@ def dispatch_command(cmd: str) -> None:
         if watch_arg is not None:
             watch_path = Path(watch_arg)
         else:
-            # Try to recover the scan root saved by the last full build
-            saved = Path(_PURPORY_OUT) / ".purpory_root"
-            if saved.exists():
-                watch_path = Path(saved.read_text(encoding="utf-8").strip())
-            else:
-                watch_path = Path(".")
+            watch_path = Path(".")
         if not watch_path.exists():
             print(f"error: path not found: {watch_path}", file=sys.stderr)
             sys.exit(1)
@@ -1826,6 +1695,7 @@ def dispatch_command(cmd: str) -> None:
         if subcmd not in (
             "html",
             "json",
+            "report",
             "callflow-html",
             "obsidian",
             "wiki",
@@ -1840,6 +1710,7 @@ def dispatch_command(cmd: str) -> None:
                 file=sys.stderr,
             )
             print("  json      [--output PATH]", file=sys.stderr)
+            print("  report    [--output PATH]", file=sys.stderr)
             print(
                 "  callflow-html [GRAPH|DIR] [--graph PATH] [--labels PATH] [--report PATH] [--sections PATH] [--output HTML]",
                 file=sys.stderr,
@@ -1879,6 +1750,7 @@ def dispatch_command(cmd: str) -> None:
         sections_path: Path | None = None
         callflow_output: Path | None = None
         json_output = Path("graph.json")
+        report_output = Path("GRAPH_REPORT.md")
         callflow_lang = "auto"
         callflow_max_sections = 15
         callflow_diagram_scale = 1.0
@@ -1923,6 +1795,8 @@ def dispatch_command(cmd: str) -> None:
                 parsed_output = Path(args[i + 1]).expanduser()
                 if subcmd == "json":
                     json_output = parsed_output
+                elif subcmd == "report":
+                    report_output = parsed_output
                 else:
                     callflow_output = parsed_output
                     if not callflow_output.is_absolute():
@@ -2084,6 +1958,33 @@ def dispatch_command(cmd: str) -> None:
                 if community is None or not isinstance(name, str) or not name:
                     continue
                 labels[int(community)] = name
+
+        if subcmd == "report":
+            from purpory.report import generate
+
+            report_output.parent.mkdir(parents=True, exist_ok=True)
+            report_output.write_text(
+                generate(
+                    G,
+                    communities,
+                    cohesion,
+                    labels,
+                    gods_data,
+                    _an.get("surprises", []) if isinstance(_an, dict) else [],
+                    {"warning": "exported from canonical SQLite graph"},
+                    _an.get("tokens", {"input": 0, "output": 0})
+                    if isinstance(_an, dict)
+                    else {"input": 0, "output": 0},
+                    str(Path.cwd()),
+                    suggested_questions=_an.get("questions", [])
+                    if isinstance(_an, dict)
+                    else [],
+                    built_at_commit=_raw.get("built_at_commit"),
+                ),
+                encoding="utf-8",
+            )
+            print(f"graph report written: {report_output}")
+            sys.exit(0)
 
         out_dir = _explicit_graph.parent if _explicit_graph is not None else Path(_PURPORY_OUT)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -2490,9 +2391,12 @@ def dispatch_command(cmd: str) -> None:
         if cli_max_workers is not None:
             os.environ["PURPORY_MAX_WORKERS"] = str(cli_max_workers)
 
-        # Resolve output dir. The user-facing contract is "<out>/purpory-out/"
-        # so a fresh checkout writes purpory-out/ at the project root.
-        out_root = out_dir.resolve() if out_dir else target
+        from purpory.supervise.structural import (
+            load_structural_graph,
+            project_state_directory,
+        )
+
+        out_root = out_dir.resolve() if out_dir else project_state_directory(target)
         purpory_out = out_root / _PURPORY_OUT
         purpory_out.mkdir(parents=True, exist_ok=True)
         # Persist --exclude so later update/watch/hook rebuilds re-apply it
@@ -2510,7 +2414,7 @@ def dispatch_command(cmd: str) -> None:
         )
 
         manifest_path = purpory_out / "manifest.json"
-        existing_graph_path = purpory_out / "graph.json"
+        existing_graph_data = load_structural_graph(target)
         # #1925: a missing manifest.json must not degrade to a full scan that
         # discards the existing graph's semantic layer. An existing graph.json
         # is a sufficient incremental baseline: detect_incremental treats an
@@ -2519,7 +2423,7 @@ def dispatch_command(cmd: str) -> None:
         # and genuinely-deleted sources against the current corpus, so doc/
         # paper/image nodes survive a --code-only rebuild instead of being
         # dropped with the rest of the committed graph.
-        incremental_mode = existing_graph_path.exists() if has_path else False
+        incremental_mode = existing_graph_data is not None if has_path else False
         # --force: full scan, not the manifest-gated incremental diff — a warm
         # unchanged tree would otherwise dispatch zero files (#1894).
         incremental_mode = incremental_mode and not force
@@ -2528,7 +2432,7 @@ def dispatch_command(cmd: str) -> None:
         elif incremental_mode and not manifest_path.exists():
             print(
                 "[purpory extract] manifest.json missing; using existing "
-                "graph.json as the incremental baseline (all files re-checked; "
+                "SQLite graph as the incremental baseline (all files re-checked; "
                 "nodes for files outside this run's scope are preserved)"
             )
 
@@ -2566,7 +2470,9 @@ def dispatch_command(cmd: str) -> None:
             # graph's own sources are reconciled against the current corpus.
             _seen_files = {f for _fl in files_by_type.values() for f in _fl}
             _seen_files.update(detection.get("unclassified", []))
-            graph_stale_sources = _stale_graph_sources(existing_graph_path, target, _seen_files)
+            graph_stale_sources = _stale_graph_sources(
+                existing_graph_data or {}, target, _seen_files
+            )
         else:
             print(f"[purpory extract] scanning {target}")
             detection = _detect(
@@ -2827,7 +2733,11 @@ def dispatch_command(cmd: str) -> None:
             else:
                 cached_nodes, cached_edges, cached_hyperedges, uncached_paths = (
                     _check_semantic_cache(
-                        sem_paths_str, root=out_root, mode=sem_cache_mode, prompt=sem_prompt
+                        sem_paths_str,
+                        root=target,
+                        mode=sem_cache_mode,
+                        prompt=sem_prompt,
+                        cache_root=out_root,
                     )
                 )
             sem_cache_hits = len(semantic_files) - len(uncached_paths)
@@ -2848,6 +2758,7 @@ def dispatch_command(cmd: str) -> None:
                     "backend": backend,
                     "model": model,
                     "root": target,
+                    "cache_root": out_root,
                 }
                 if deep_mode:
                     corpus_kwargs["deep_mode"] = True
@@ -2927,11 +2838,12 @@ def dispatch_command(cmd: str) -> None:
                         fresh.get("nodes", []),
                         fresh.get("edges", []),
                         fresh.get("hyperedges", []),
-                        root=out_root,
+                        root=target,
                         allowed_source_files=uncached_paths,
                         mode=sem_cache_mode,
                         prompt=sem_prompt,
                         partial_source_files=_partial_semantic_files or None,
+                        cache_root=out_root,
                     )
                 except Exception as exc:
                     print(
@@ -2963,14 +2875,14 @@ def dispatch_command(cmd: str) -> None:
                 for _fp in files_by_type.get(_kind, []):
                     _abs = Path(_fp)
                     if not _abs.is_absolute():
-                        _abs = Path(out_root) / _abs
+                        _abs = target / _abs
                     if not _abs.is_file():
                         continue  # deleted/missing — leave out so its entry is pruned
                     try:
-                        _live_hashes.add(_file_hash(_abs, out_root))
+                        _live_hashes.add(_file_hash(_abs, target, cache_root=out_root))
                     except OSError:
                         pass
-            _prune_semantic_cache(out_root, _live_hashes)
+            _prune_semantic_cache(target, _live_hashes, cache_root=out_root)
         except Exception as exc:
             print(
                 f"[purpory extract] warning: could not prune semantic cache: {exc}", file=sys.stderr
@@ -3026,9 +2938,6 @@ def dispatch_command(cmd: str) -> None:
             + sem_result.get("output_tokens", 0),
         }
 
-        graph_json_path = purpory_out / "graph.json"
-        analysis_path = purpory_out / ".purpory_analysis.json"
-
         # Build a manifest-safe files dict: only stamp semantic_hash for files
         # that actually produced output (cache hit or fresh extraction). Files
         # whose chunk failed have no source_file entry in sem_result — leaving
@@ -3069,11 +2978,6 @@ def dispatch_command(cmd: str) -> None:
             # across modes (#1317; node dedup also collapses shared Swift module
             # anchors emitted per importing file, #1327).
             from purpory.build import dedupe_edges as _dedupe_edges, dedupe_nodes as _dedupe_nodes
-            from purpory.export import (
-                backup_if_protected as _backup,
-                existing_graph_node_count as _existing_graph_node_count,
-            )
-
             if (
                 incremental_mode
                 and not code_files
@@ -3089,8 +2993,13 @@ def dispatch_command(cmd: str) -> None:
                 # scrub the newly-excluded sources from the raw graph (#1909).
                 # This path never runs build_merge, so prune in place.
                 if graph_stale_sources:
-                    _n_pruned = _prune_graph_json_sources(existing_graph_path, graph_stale_sources)
+                    _n_pruned = _prune_graph_json_sources(
+                        existing_graph_data or {}, graph_stale_sources
+                    )
                     if _n_pruned:
+                        from purpory.supervise.structural import store_structural_graph
+
+                        store_structural_graph(existing_graph_data or {}, root=target)
                         print(
                             f"[purpory extract] pruned {_n_pruned} node(s) from "
                             f"{len(graph_stale_sources)} source file(s) no longer "
@@ -3098,7 +3007,7 @@ def dispatch_command(cmd: str) -> None:
                         )
                 print(
                     "[purpory extract] no incremental changes detected "
-                    "(--no-cluster); outputs left untouched."
+                    "(--no-cluster); graph left untouched."
                 )
                 try:
                     _save_manifest(
@@ -3127,45 +3036,62 @@ def dispatch_command(cmd: str) -> None:
                     _e["source_file"] = (
                         _node_sf.get(_e.get("source")) or _node_sf.get(_e.get("target")) or ""
                     )
-            # RT-parity for the raw path: an incomplete build must not force a
-            # partial graph over a larger complete one here either. The clustered
-            # path gets this from to_json's #479 guard; this path never calls
-            # to_json, so replicate the shrink check against the existing file and
-            # exit before the write/manifest unless --allow-partial is set.
-            if _extraction_incomplete and not cli_allow_partial:
-                from purpory.export import MALFORMED_GRAPH as _MALFORMED_GRAPH
+            if incremental_mode:
+                from purpory.build import build_merge as _build_merge
+                from purpory.export import graph_data as _graph_data
 
-                _existing_n = _existing_graph_node_count(graph_json_path)
-                _malformed = _existing_n is _MALFORMED_GRAPH
-                _shrinks = isinstance(_existing_n, int) and len(merged["nodes"]) < _existing_n
-                if _malformed or _shrinks:
-                    _detail = (
-                        f"the existing {graph_json_path} is present but unparseable "
-                        "(corrupt or a mid-write), so a shrink cannot be ruled out"
-                        if _malformed
-                        else f"smaller than the existing {graph_json_path} "
-                        f"({len(merged['nodes'])} < {_existing_n} nodes)"
-                    )
+                _prune_sources = list(deleted_files)
+                for _src in list(excluded_files) + graph_stale_sources:
+                    if _src not in _prune_sources:
+                        _prune_sources.append(_src)
+                _graph = _build_merge(
+                    [merged],
+                    graph_data=existing_graph_data,
+                    prune_sources=_prune_sources or None,
+                    root=target,
+                )
+                _raw = _graph_data(_graph, {})
+                for _node in _raw.get("nodes", []):
+                    _node.pop("community", None)
+                    _node.pop("community_name", None)
+                    _node.pop("norm_label", None)
+                _raw["input_tokens"] = merged["input_tokens"]
+                _raw["output_tokens"] = merged["output_tokens"]
+                merged = _raw
+            if _extraction_incomplete and not cli_allow_partial:
+                _existing_n = len((existing_graph_data or {}).get("nodes", []))
+                if len(merged["nodes"]) < _existing_n:
                     print(
                         "[purpory extract] error: extraction was incomplete (an AST/"
-                        f"semantic pass failed) and the resulting --no-cluster graph is {_detail}. "
+                        "semantic pass failed) and the resulting --no-cluster graph is "
+                        f"smaller than the existing SQLite graph "
+                        f"({len(merged['nodes'])} < {_existing_n} nodes). "
                         "Refusing to overwrite a complete graph with a partial one. Re-run after "
                         "fixing the failures, or pass --allow-partial to overwrite anyway.",
                         file=sys.stderr,
                     )
                     sys.exit(1)
-            _backup(purpory_out)
-            from purpory.paths import write_json_atomic as _write_json_atomic
-
-            _write_json_atomic(graph_json_path, merged, indent=2)
             from purpory.supervise.structural import store_structural_graph
 
             store_structural_graph(merged, root=target)
+            if global_merge:
+                from purpory.global_graph import global_add_data
+
+                tag = global_repo_tag or target.name
+                result = global_add_data(merged, tag, source=f"sqlite:{target.resolve()}")
+                if result["skipped"]:
+                    print(f"[purpory global] '{tag}' unchanged since last add - skipped.")
+                else:
+                    print(
+                        f"[purpory global] '{tag}' merged into global graph "
+                        f"(+{result['nodes_added']} nodes, -{result['nodes_removed']} pruned)."
+                    )
             stages.mark("write")
             cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
             print(
-                f"[purpory extract] wrote {graph_json_path} — "
-                f"{len(merged['nodes'])} nodes, {len(merged['edges'])} edges "
+                "[purpory extract] stored SQLite graph — "
+                f"{len(merged['nodes'])} nodes, "
+                f"{len(merged.get('links', merged.get('edges', [])))} edges "
                 f"(no clustering)"
             )
             if merged["input_tokens"] or merged["output_tokens"]:
@@ -3188,24 +3114,6 @@ def dispatch_command(cmd: str) -> None:
                 print(
                     f"[purpory extract] warning: could not write manifest: {exc}", file=sys.stderr
                 )
-            if global_merge:
-                from purpory.global_graph import global_add as _global_add
-
-                _tag = global_repo_tag or target.name
-                try:
-                    result = _global_add(purpory_out / "graph.json", _tag)
-                    if result["skipped"]:
-                        print(f"[purpory global] '{_tag}' unchanged since last add - skipped.")
-                    else:
-                        print(
-                            f"[purpory global] '{_tag}' merged into global graph "
-                            f"(+{result['nodes_added']} nodes, -{result['nodes_removed']} pruned)."
-                        )
-                except Exception as exc:
-                    print(
-                        f"[purpory global] warning: failed to merge into global graph: {exc}",
-                        file=sys.stderr,
-                    )
             stages.total()
             sys.exit(0)
 
@@ -3216,7 +3124,6 @@ def dispatch_command(cmd: str) -> None:
             build_merge as _build_merge,
         )
         from purpory.cluster import cluster as _cluster, score_all as _score_all
-        from purpory.export import to_json as _to_json
         from purpory.analyze import god_nodes as _god_nodes, surprising_connections as _surprising
 
         dedup_backend = backend if dedup_llm else None
@@ -3231,7 +3138,7 @@ def dispatch_command(cmd: str) -> None:
                     _prune_sources.append(_src)
             G = _build_merge(
                 [merged],
-                graph_path=existing_graph_path,
+                graph_data=existing_graph_data,
                 prune_sources=_prune_sources or None,
                 dedup=True,
                 dedup_llm_backend=dedup_backend,
@@ -3264,67 +3171,27 @@ def dispatch_command(cmd: str) -> None:
             surprises = []
         stages.mark("analyze")
 
-        from purpory.export import backup_if_protected as _backup
-
-        _backup(purpory_out)
-        # force=True bypasses the #479 shrink guard entirely. A full build
-        # legitimately shrinks (fuzzy dedup collapse, deleted code) so it keeps
-        # force=True — EXCEPT when this run's extraction was incomplete (an
-        # extractor pass crashed or some semantic chunks failed). Then a partial
-        # graph could silently overwrite a good complete one, so fall back to the
-        # shrink guard (force=False) unless the user opts in with --allow-partial.
-        #
-        # Both write paths are guarded: the clustered path here via to_json's
-        # #479 check, and the `--no-cluster` raw-dump path above via the same
-        # shrink check against the existing file (existing_graph_node_count).
-        #
-        # Trade-off: this reuses to_json's coarse node-count guard, not the
-        # source-aware _check_shrink that watch/update use. On an incremental run
-        # a legitimate deletion that coincides with an unrelated transient chunk
-        # failure can therefore be refused here — recoverable by re-running or
-        # passing --allow-partial (the good graph is preserved and the manifest
-        # is not stamped, so the retry re-extracts).
-        _force_write = cli_allow_partial or not _extraction_incomplete
-        _wrote = _to_json(G, communities, str(graph_json_path), force=_force_write)
-        if not _wrote:
-            # The shrink guard refused: this partial build is smaller than the
-            # existing graph. Exit before writing the manifest/marker below, which
-            # would otherwise stamp these files as done and make the next
-            # incremental run skip re-extracting them (poisoning the manifest
-            # against the graph we declined to write). Exit non-zero so a retry
-            # re-attempts.
+        existing_node_count = len((existing_graph_data or {}).get("nodes", []))
+        if (
+            _extraction_incomplete
+            and not cli_allow_partial
+            and G.number_of_nodes() < existing_node_count
+        ):
             print(
                 "[purpory extract] error: extraction was incomplete (an AST/semantic "
-                f"pass failed) and the resulting graph is smaller than the existing "
-                f"{graph_json_path}. Refusing to overwrite a complete graph with a "
+                "pass failed) and the resulting graph is smaller than the existing "
+                f"SQLite graph ({G.number_of_nodes()} < {existing_node_count} nodes). "
+                "Refusing to overwrite a complete graph with a "
                 "partial one. Re-run after fixing the failures, or pass --allow-partial "
                 "to overwrite anyway.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        stages.mark("export")
+        stages.mark("store")
         if merged.get("output_tokens", 0) > 0:
             (purpory_out / ".purpory_semantic_marker").write_text(
                 json.dumps({"output_tokens": merged["output_tokens"]}), encoding="utf-8"
             )
-        if global_merge:
-            from purpory.global_graph import global_add as _global_add
-
-            _tag = global_repo_tag or target.name
-            try:
-                result = _global_add(purpory_out / "graph.json", _tag)
-                if result["skipped"]:
-                    print(f"[purpory global] '{_tag}' unchanged since last add - skipped.")
-                else:
-                    print(
-                        f"[purpory global] '{_tag}' merged into global graph "
-                        f"(+{result['nodes_added']} nodes, -{result['nodes_removed']} pruned)."
-                    )
-            except Exception as exc:
-                print(
-                    f"[purpory global] warning: failed to merge into global graph: {exc}",
-                    file=sys.stderr,
-                )
         analysis = {
             "communities": {str(k): v for k, v in communities.items()},
             "cohesion": {str(k): v for k, v in cohesion.items()},
@@ -3338,13 +3205,20 @@ def dispatch_command(cmd: str) -> None:
         from purpory.export import graph_data as _graph_data
         from purpory.supervise.structural import store_structural_graph
 
-        store_structural_graph(
-            {**_graph_data(G, communities), "analysis": analysis},
-            root=target,
-        )
-        from purpory.paths import write_json_atomic as _wja
+        snapshot = {**_graph_data(G, communities), "analysis": analysis}
+        store_structural_graph(snapshot, root=target)
+        if global_merge:
+            from purpory.global_graph import global_add_data
 
-        _wja(analysis_path, analysis, indent=2)
+            tag = global_repo_tag or target.name
+            result = global_add_data(snapshot, tag, source=f"sqlite:{target.resolve()}")
+            if result["skipped"]:
+                print(f"[purpory global] '{tag}' unchanged since last add - skipped.")
+            else:
+                print(
+                    f"[purpory global] '{tag}' merged into global graph "
+                    f"(+{result['nodes_added']} nodes, -{result['nodes_removed']} pruned)."
+                )
         try:
             _save_manifest(
                 _manifest_files,
@@ -3359,11 +3233,10 @@ def dispatch_command(cmd: str) -> None:
 
         cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
         print(
-            f"[purpory extract] wrote {graph_json_path}: "
+            "[purpory extract] stored SQLite graph: "
             f"{G.number_of_nodes()} nodes, {G.number_of_edges()} edges, "
             f"{len(communities)} communities"
         )
-        print(f"[purpory extract] wrote {analysis_path}")
         if incremental_mode:
             _excl_note = f", {len(excluded_files)} excluded" if excluded_files else ""
             print(
@@ -3383,14 +3256,6 @@ def dispatch_command(cmd: str) -> None:
                 f"{merged['output_tokens']:,} out, "
                 f"est. cost (~{backend}): ${cost:.4f}"
             )
-        # extract intentionally stops at graph.json + analysis; the report and
-        # community labels are produced by `cluster-only` (or an agent's Step 5).
-        # Point standalone users at it so communities get named (#1097).
-        print(
-            "[purpory extract] next: run "
-            f"`purpory cluster-only {purpory_out.parent}` "
-            "to generate GRAPH_REPORT.md and name communities"
-        )
         stages.total()
 
     elif cmd == "cache-check":

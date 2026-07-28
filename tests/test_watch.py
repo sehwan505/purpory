@@ -10,24 +10,64 @@ import pytest
 from purpory.watch import _notify_only, _WATCHED_EXTENSIONS, _rebuild_lock, _check_shrink
 
 
+def _state_out(root: Path) -> Path:
+    from purpory.supervise.structural import project_state_directory
+
+    return project_state_directory(root) / "purpory-out"
+
+
+@pytest.fixture(autouse=True)
+def legacy_graph_fixture(monkeypatch):
+    import purpory.watch as watch_module
+    from purpory.paths import write_json_atomic
+    from purpory.supervise.identity import resolve_project_id, resolve_project_root
+    from purpory.supervise.repository import ContextGraphRepository
+
+    rebuild = watch_module._rebuild_code
+    exported: dict[Path, str] = {}
+
+    def bridged_rebuild(watch_path, *args, **kwargs):
+        try:
+            root = Path(watch_path).resolve()
+            project_root = Path.cwd().resolve() if not Path(watch_path).is_absolute() else root
+        except FileNotFoundError:
+            return rebuild(watch_path, *args, **kwargs)
+        legacy_graph = root / "purpory-out" / "graph.json"
+        repository = ContextGraphRepository()
+        project = resolve_project_id(resolve_project_root(project_root))
+        if legacy_graph.is_file():
+            contents = legacy_graph.read_text(encoding="utf-8")
+            if contents != exported.get(legacy_graph):
+                repository.import_graph(legacy_graph, project=project)
+        result = rebuild(watch_path, *args, **kwargs)
+        graph = repository.structural_graph(project=project)
+        if result and graph is not None:
+            legacy_graph.parent.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(legacy_graph, graph, indent=2)
+            exported[legacy_graph] = legacy_graph.read_text(encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(watch_module, "_rebuild_code", bridged_rebuild)
+
+
 # --- _notify_only ---
 
 def test_notify_only_creates_flag(tmp_path):
     _notify_only(tmp_path)
-    flag = tmp_path / "purpory-out" / "needs_update"
+    flag = _state_out(tmp_path) / "needs_update"
     assert flag.exists()
     assert flag.read_text() == "1"
 
 def test_notify_only_creates_flag_dir(tmp_path):
     # purpory-out dir does not exist yet
-    assert not (tmp_path / "purpory-out").exists()
+    assert not _state_out(tmp_path).exists()
     _notify_only(tmp_path)
-    assert (tmp_path / "purpory-out").is_dir()
+    assert _state_out(tmp_path).is_dir()
 
 def test_notify_only_idempotent(tmp_path):
     _notify_only(tmp_path)
     _notify_only(tmp_path)
-    flag = tmp_path / "purpory-out" / "needs_update"
+    flag = _state_out(tmp_path) / "needs_update"
     assert flag.read_text() == "1"
 
 
@@ -67,7 +107,7 @@ def test_check_update_no_flag_returns_true(tmp_path):
 def test_check_update_with_flag_returns_true_and_prints(tmp_path, capsys):
     """check_update returns True and prints notification when flag exists."""
     from purpory.watch import check_update
-    flag = tmp_path / "purpory-out" / "needs_update"
+    flag = _state_out(tmp_path) / "needs_update"
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.write_text("1")
     result = check_update(tmp_path)
@@ -79,7 +119,7 @@ def test_check_update_with_flag_returns_true_and_prints(tmp_path, capsys):
 def test_check_update_does_not_clear_flag(tmp_path):
     """check_update never removes the needs_update flag (clearing is LLM's job)."""
     from purpory.watch import check_update
-    flag = tmp_path / "purpory-out" / "needs_update"
+    flag = _state_out(tmp_path) / "needs_update"
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.write_text("1")
     check_update(tmp_path)
@@ -154,7 +194,7 @@ def test_purpory_root_preserves_relative_when_invoked_with_relative_path(tmp_pat
     monkeypatch.chdir(corpus)
     assert _rebuild_code(Path("."), acquire_lock=False) is True
 
-    saved = (corpus / "purpory-out" / ".purpory_root").read_text(encoding="utf-8")
+    saved = (_state_out(corpus) / ".purpory_root").read_text(encoding="utf-8")
     assert saved == ".", (
         f".purpory_root must preserve the user-supplied path; got {saved!r}"
     )
@@ -273,7 +313,7 @@ def test_rebuild_honors_persisted_excludes(tmp_path):
     (corpus / "src" / "app.py").write_text("def keep(): return 1\n", encoding="utf-8")
     (corpus / "main.py").write_text("def top(): return 2\n", encoding="utf-8")
     (corpus / "vendor" / "lib.py").write_text("def vendored(): pass\n", encoding="utf-8")
-    _write_build_config(corpus / "purpory-out", excludes=["vendor"])
+    _write_build_config(_state_out(corpus), excludes=["vendor"])
 
     assert _rebuild_code(corpus, no_cluster=True, acquire_lock=False) is True
 
@@ -295,7 +335,7 @@ def test_purpory_root_preserves_absolute_when_user_supplied(tmp_path):
     (corpus / "lib.py").write_text("def f(): pass\n", encoding="utf-8")
     assert _rebuild_code(corpus, acquire_lock=False) is True
 
-    saved = (corpus / "purpory-out" / ".purpory_root").read_text(encoding="utf-8")
+    saved = (_state_out(corpus) / ".purpory_root").read_text(encoding="utf-8")
     assert saved == str(corpus), (
         f"absolute caller path must be preserved as-is; got {saved!r}"
     )
@@ -825,16 +865,12 @@ def test_rebuild_code_is_idempotent_when_cluster_ids_flap(tmp_path, monkeypatch)
 
     assert _rebuild_code(tmp_path)
     graph_path = tmp_path / "purpory-out" / "graph.json"
-    report_path = tmp_path / "purpory-out" / "GRAPH_REPORT.md"
     first_graph = graph_path.read_text(encoding="utf-8")
-    first_report = report_path.read_text(encoding="utf-8")
 
     assert _rebuild_code(tmp_path)
     second_graph = graph_path.read_text(encoding="utf-8")
-    second_report = report_path.read_text(encoding="utf-8")
 
     assert first_graph == second_graph
-    assert first_report == second_report
 
 
 def test_rebuild_code_skips_cluster_when_topology_unchanged(tmp_path, monkeypatch):
@@ -1331,7 +1367,7 @@ def test_rebuild_code_does_not_update_root_marker_when_write_is_refused(tmp_path
     try:
         os.chdir(tmp_path)
         assert watch_mod._rebuild_code(src, no_cluster=True, acquire_lock=False) is True
-        marker = src / "purpory-out" / ".purpory_root"
+        marker = _state_out(src) / ".purpory_root"
         assert marker.read_text(encoding="utf-8") == str(src)
 
         app.write_text("def after():\n    return 2\n", encoding="utf-8")
@@ -1401,7 +1437,7 @@ def test_queue_and_drain_pending_round_trip(tmp_path):
     and returns the same set of paths."""
     from purpory.watch import _queue_pending, _drain_pending, _PENDING_FILENAME
 
-    out = tmp_path / "purpory-out"
+    out = _state_out(tmp_path)
     paths = [Path("a.py"), Path("sub/b.py"), Path("c.md")]
     _queue_pending(out, paths)
 
@@ -1424,7 +1460,7 @@ def test_drain_pending_dedupes_and_skips_blank_lines(tmp_path):
     writes leaving blank lines must not poison the merge."""
     from purpory.watch import _queue_pending, _drain_pending
 
-    out = tmp_path / "purpory-out"
+    out = _state_out(tmp_path)
     _queue_pending(out, [Path("a.py"), Path("b.py")])
     _queue_pending(out, [Path("b.py"), Path("c.py")])
     # Simulate a torn write leaving an empty line.
@@ -1438,8 +1474,8 @@ def test_drain_pending_dedupes_and_skips_blank_lines(tmp_path):
 def test_drain_pending_read_failure_is_not_an_empty_queue(tmp_path, monkeypatch):
     from purpory.watch import _drain_pending, _PENDING_FILENAME
 
-    out = tmp_path / "purpory-out"
-    out.mkdir()
+    out = _state_out(tmp_path)
+    out.mkdir(parents=True)
     pending = out / _PENDING_FILENAME
     pending.write_text("a.py\n", encoding="utf-8")
     real_read_text = Path.read_text
@@ -1458,8 +1494,8 @@ def test_drain_pending_read_failure_is_not_an_empty_queue(tmp_path, monkeypatch)
 def test_invalid_build_excludes_do_not_become_an_empty_list(tmp_path):
     from purpory.watch import _read_build_excludes, _BUILD_CONFIG_FILENAME
 
-    out = tmp_path / "purpory-out"
-    out.mkdir()
+    out = _state_out(tmp_path)
+    out.mkdir(parents=True)
     (out / _BUILD_CONFIG_FILENAME).write_text("{broken", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="could not read Purpory build config"):
@@ -1497,8 +1533,8 @@ def test_rebuild_code_queues_on_lock_contention(tmp_path, monkeypatch, capsys):
     silently dropping the change set."""
     from purpory.watch import _rebuild_code, _rebuild_lock, _PENDING_FILENAME
 
-    out = tmp_path / "purpory-out"
-    out.mkdir()
+    out = _state_out(tmp_path)
+    out.mkdir(parents=True)
 
     # Hold the lock so the next non-blocking attempt fails. Use a real
     # _rebuild_lock context manager in this same process — flock on the same
@@ -1531,8 +1567,8 @@ def test_rebuild_code_merges_pending_on_acquire(tmp_path, monkeypatch):
     and pass the merged change set to the inner rebuild call."""
     from purpory import watch as watch_mod
 
-    out = tmp_path / "purpory-out"
-    out.mkdir()
+    out = _state_out(tmp_path)
+    out.mkdir(parents=True)
     # Pre-populate the queue as if an earlier contender had dropped its paths.
     watch_mod._queue_pending(out, [Path("queued1.py"), Path("queued2.py")])
 
@@ -1572,8 +1608,8 @@ def test_rebuild_code_drains_late_arrivals(tmp_path, monkeypatch):
     from purpory import watch as watch_mod
     from purpory.watch import _rebuild_code as orig_rebuild
 
-    out = tmp_path / "purpory-out"
-    out.mkdir()
+    out = _state_out(tmp_path)
+    out.mkdir(parents=True)
 
     inner_calls: list[list[str]] = []
     call_state = {"i": 0}
@@ -1610,8 +1646,8 @@ def test_rebuild_code_full_corpus_skips_pending_queue(tmp_path, monkeypatch):
     from purpory import watch as watch_mod
     from purpory.watch import _rebuild_code as orig_rebuild
 
-    out = tmp_path / "purpory-out"
-    out.mkdir()
+    out = _state_out(tmp_path)
+    out.mkdir(parents=True)
 
     # Pre-existing queued paths from an earlier incremental hook.
     watch_mod._queue_pending(out, [Path("earlier.py")])

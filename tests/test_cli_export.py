@@ -239,10 +239,7 @@ def test_query_uses_purpory_out_env(tmp_path):
     assert len(r.stdout) > 0
 
 
-def test_extract_writes_to_purpory_out_env(tmp_path):
-    """#1423: `purpory extract` honours PURPORY_OUT for where it WRITES, not only
-    where readers look — previously it hardcoded purpory-out/ and ignored the
-    override. Code-only corpus, so no LLM backend is needed."""
+def test_extract_stores_graph_without_creating_output_artifacts(tmp_path):
     (tmp_path / "m.py").write_text("def a():\n    return b()\n\n\ndef b():\n    return 1\n")
     env = os.environ.copy()
     env["PURPORY_OUT"] = "custom-out"
@@ -250,13 +247,18 @@ def test_extract_writes_to_purpory_out_env(tmp_path):
     r = _run(["extract", "."], tmp_path, env=env)
 
     assert r.returncode == 0, r.stderr
-    assert (tmp_path / "custom-out" / "graph.json").exists(), r.stdout
-    assert (tmp_path / "custom-out" / "manifest.json").exists()
-    # The default dir must NOT be created when the override is set.
-    assert not (tmp_path / "purpory-out").exists(), "extract ignored PURPORY_OUT and wrote purpory-out/"
-    # Manifest keys are relative to the scan root (portable) — #1417.
-    keys = list(json.loads((tmp_path / "custom-out" / "manifest.json").read_text()).keys())
-    assert keys == ["m.py"], keys
+    assert not (tmp_path / "custom-out").exists()
+    assert not (tmp_path / "purpory-out").exists()
+
+    graph_path = tmp_path / "snapshot.json"
+    exported = _run(
+        ["export", "json", "--output", str(graph_path)],
+        tmp_path,
+        env=env,
+    )
+    assert exported.returncode == 0, exported.stderr
+    data = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert data["nodes"]
 
 
 # ── purpory path ────────────────────────────────────────────────────────────
@@ -317,15 +319,16 @@ def test_export_unknown_format_fails(tmp_path):
     assert r.returncode != 0
 
 
-def test_update_no_cluster_writes_raw_graph(tmp_path):
+def test_update_no_cluster_stores_raw_graph(tmp_path):
     src = tmp_path / "sample.py"
     src.write_text("def f():\n    return 1\n", encoding="utf-8")
 
     r = _run(["update", ".", "--no-cluster"], tmp_path)
     assert r.returncode == 0, r.stderr
 
-    graph_path = tmp_path / "purpory-out" / "graph.json"
-    assert graph_path.exists()
+    graph_path = tmp_path / "graph.json"
+    exported = _run(["export", "json", "--output", str(graph_path)], tmp_path)
+    assert exported.returncode == 0, exported.stderr
     data = json.loads(graph_path.read_text(encoding="utf-8"))
     assert "nodes" in data and "links" in data
     assert all("community" not in node for node in data["nodes"])
@@ -333,8 +336,7 @@ def test_update_no_cluster_writes_raw_graph(tmp_path):
 
 # Regression test for #934 - cluster-only crashes when purpory-out/ doesn't exist
 
-def test_cluster_only_creates_output_dir_when_missing(tmp_path):
-    """cluster-only must not crash with FileNotFoundError when purpory-out/ is absent (#934)."""
+def test_cluster_only_does_not_create_output_dir_when_missing(tmp_path):
     # Build graph.json somewhere other than the default purpory-out/ location
     # so we can point --graph at it while purpory-out/ doesn't exist yet.
     graph_src = tmp_path / "backup" / "graph.json"
@@ -351,13 +353,15 @@ def test_cluster_only_creates_output_dir_when_missing(tmp_path):
 
     r = _run(["cluster-only", ".", "--graph", str(graph_src), "--no-viz"], tmp_path)
     assert r.returncode == 0, r.stderr
-    assert (tmp_path / "purpory-out" / "GRAPH_REPORT.md").exists()
+    assert not (tmp_path / "purpory-out").exists()
+
+    report = tmp_path / "report.md"
+    exported = _run(["export", "report", "--output", str(report)], tmp_path)
+    assert exported.returncode == 0, exported.stderr
+    assert report.exists()
 
 
-def test_cluster_only_graph_in_purpory_out_writes_beside_it(tmp_path):
-    """#1747 Case 2: `cluster-only --graph <elsewhere>/purpory-out/graph.json`
-    must write GRAPH_REPORT.md and the re-clustered graph beside that graph, not
-    into a stray purpory-out/ in the CWD."""
+def test_cluster_only_graph_input_does_not_write_beside_it(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     out_dir = _make_graph(project)  # project/purpory-out/graph.json
@@ -369,8 +373,8 @@ def test_cluster_only_graph_in_purpory_out_writes_beside_it(tmp_path):
         cwd,
     )
     assert r.returncode == 0, r.stderr
-    assert (out_dir / "GRAPH_REPORT.md").exists()          # beside --graph
-    assert not (cwd / "purpory-out").exists()             # no CWD pollution
+    assert not (out_dir / "GRAPH_REPORT.md").exists()
+    assert not (cwd / "purpory-out").exists()
 
 
 def test_extract_out_does_not_pollute_corpus(tmp_path):
@@ -386,18 +390,21 @@ def test_extract_out_does_not_pollute_corpus(tmp_path):
         tmp_path,
     )
     assert r.returncode == 0, r.stderr
-    assert (out / "purpory-out" / "graph.json").exists()   # graph in --out
-    assert not (corpus / "purpory-out").exists()           # corpus untouched
+    assert not (out / "purpory-out" / "graph.json").exists()
+    assert not (corpus / "purpory-out").exists()
+
+    graph_path = tmp_path / "snapshot.json"
+    exported = _run(
+        ["export", "json", "--output", str(graph_path)],
+        corpus,
+    )
+    assert exported.returncode == 0, exported.stderr
+    assert graph_path.exists()
 
 
 # Regression test for #1027 - cluster-only must remap labels via node overlap
 
-def test_cluster_only_persists_analysis_sidecar(tmp_path):
-    """cluster-only must refresh .purpory_analysis.json alongside graph.json.
-
-    Downstream export commands use the sidecar for community membership and
-    should not see stale or missing community analysis after a recluster.
-    """
+def test_cluster_only_persists_analysis_in_database(tmp_path):
     out = _make_graph(tmp_path)
     analysis_path = out / ".purpory_analysis.json"
     analysis_path.unlink()
@@ -407,16 +414,19 @@ def test_cluster_only_persists_analysis_sidecar(tmp_path):
         tmp_path,
     )
     assert r.returncode == 0, r.stderr
-    assert analysis_path.exists()
+    assert not analysis_path.exists()
 
-    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    snapshot = tmp_path / "snapshot.json"
+    exported = _run(["export", "json", "--output", str(snapshot)], tmp_path)
+    assert exported.returncode == 0, exported.stderr
+    graph = json.loads(snapshot.read_text(encoding="utf-8"))
+    analysis = graph["analysis"]
     assert analysis["communities"]
     assert analysis["cohesion"]
     assert "gods" in analysis
     assert "surprises" in analysis
     assert "questions" in analysis
 
-    graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
     graph_cids = {
         str(node["community"])
         for node in graph.get("nodes", [])
@@ -568,7 +578,10 @@ def test_graph_json_node_ids_are_portable_across_checkout_paths(tmp_path):
         (root / "pkg" / "app.py").write_text("from pkg.mod import f\ndef g(): return f()\n")
         r = _run(["extract", ".", "--code-only", "--no-cluster"], root)
         assert r.returncode == 0, r.stderr
-        data = json.loads((root / "purpory-out" / "graph.json").read_text())
+        graph_path = root / "graph.json"
+        exported = _run(["export", "json", "--output", str(graph_path)], root)
+        assert exported.returncode == 0, exported.stderr
+        data = json.loads(graph_path.read_text())
         return sorted(n["id"] for n in data["nodes"])
 
     a = _build(tmp_path / "alice_home" / "proj")
