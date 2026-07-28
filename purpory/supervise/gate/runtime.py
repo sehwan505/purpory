@@ -388,8 +388,9 @@ class GateModelManager:
         start_if_needed: bool = False,
         start_timeout_seconds: float = DEFAULT_START_TIMEOUT_SECONDS,
     ) -> GateProvider | None:
+        installation = self.installation()
         status = self.status()
-        if not status["installed"]:
+        if installation is None or not status["installed"]:
             return None
         if not status["ready"] and start_if_needed:
             status = self.start(wait_seconds=start_timeout_seconds)
@@ -407,6 +408,7 @@ class GateModelManager:
             model=f"{status['model']}@{status['revision']}",
             model_revision=str(status["revision"]),
             timeout_seconds=request_timeout,
+            tokenizer_path=installation.snapshot_path,
         )
 
     def logs(self, *, lines: int = 100) -> dict[str, Any]:

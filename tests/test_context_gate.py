@@ -5,9 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
+from purpory.supervise.gate.contract import (
+    MAX_MESSAGE_CHARS,
+    GateProposal,
+    GateRequest,
+    ProviderResult,
+)
 from purpory.supervise.gate.provider import GateProviderError
-from purpory.supervise.gate.qwen import QwenGateProvider
+from purpory.supervise.gate.qwen import (
+    DEFAULT_MAX_INPUT_TOKENS,
+    QwenGateProvider,
+)
 from purpory.supervise.library import ContextService
 
 
@@ -255,6 +263,42 @@ def test_provider_failure_without_evidence_skips_after_audited_search(tmp_path: 
     assert service.requests(status="open") == []
 
 
+def test_oversized_prompt_bypasses_gate_without_losing_original(tmp_path: Path) -> None:
+    calls = 0
+
+    class CapturingProvider:
+        def input_limit_reason(self, request: GateRequest) -> str:
+            return (
+                f"gate prompt requires {DEFAULT_MAX_INPUT_TOKENS + 1} tokens, "
+                f"exceeding operating limit {DEFAULT_MAX_INPUT_TOKENS}"
+            )
+
+        def propose(self, request: GateRequest) -> ProviderResult:
+            nonlocal calls
+            calls += 1
+            raise AssertionError("oversized prompt must not invoke the gate model")
+
+    service = ContextService(
+        db_path=tmp_path / "context.db",
+        root=tmp_path,
+        gate_provider=CapturingProvider(),
+    )
+    message = "important beginning\n" + ("context " * 10_000) + "\nimportant ending"
+
+    result = service.prepare(
+        message,
+        session_id="session-a",
+        retain_input=True,
+    )
+
+    assert result["action"] == "skip"
+    assert result["proposal"]["reasonCode"] == "GATE_UNAVAILABLE"
+    assert "model invocation skipped" in result["fallback"]
+    assert calls == 0
+    assert len(message) <= MAX_MESSAGE_CHARS
+    assert service.context_decisions()[0]["inputText"] == message
+
+
 def test_unchanged_context_is_not_injected_twice_into_one_session(tmp_path: Path) -> None:
     provider = StubGateProvider(_proposal("search", query="database", scopes=["human"]))
     service = ContextService(db_path=tmp_path / "context.db", root=tmp_path, gate_provider=provider)
@@ -325,6 +369,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
 
     class Connection:
         def request(self, method, target, body, headers):
+            captured["calls"] = captured.get("calls", 0) + 1
             captured["method"] = method
             captured["target"] = target
             captured["body"] = json.loads(body)
@@ -358,6 +403,28 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
     assert "exactly one word" in system_prompt
     assert "SKIP, SEARCH, or ASK" in system_prompt
     assert captured["closed"] is True
+
+    class SizedIds:
+        def __len__(self) -> int:
+            return 20
+
+    class FakeTokenizer:
+        def encode(self, rendered: str, *, add_special_tokens: bool):
+            return type("Encoding", (), {"ids": SizedIds()})()
+
+    provider.tokenizer_path = Path("/unused/tokenizer.json")
+    provider.max_input_tokens = 19
+    provider._tokenizer = FakeTokenizer()
+    long_request = GateRequest.create(
+        message="important beginning\n" + ("context " * 10_000) + "\nimportant ending",
+        session_id="session-a",
+        project="demo",
+        working_directory="/tmp/demo",
+    )
+    with pytest.raises(GateProviderError, match="exceeding operating limit 19"):
+        provider.propose(long_request)
+
+    assert captured["calls"] == 1
 
 
 def test_qwen_provider_rejects_non_classifier_response(monkeypatch) -> None:

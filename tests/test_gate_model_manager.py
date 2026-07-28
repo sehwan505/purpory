@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
+from purpory.supervise.gate.qwen import DEFAULT_MAX_INPUT_TOKENS
 from purpory.supervise.gate.runtime import GateModelManager, _gate_device
 from purpory.supervise.model_cli import dispatch_model
 
@@ -142,6 +143,8 @@ def test_provider_uses_managed_endpoint_without_environment_url(
     assert provider is not None
     assert provider.endpoint == "http://127.0.0.1:43123/v1/chat/completions"
     assert provider.model == f"Qwen/Qwen3.5-0.8B@{'a' * 40}"
+    assert provider.tokenizer_path == manager.installation().snapshot_path
+    assert provider.max_input_tokens == DEFAULT_MAX_INPUT_TOKENS
 
 
 def test_stop_terminates_only_recorded_runtime(

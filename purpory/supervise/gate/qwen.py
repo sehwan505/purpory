@@ -6,6 +6,8 @@ import json
 import os
 import time
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
+from importlib import import_module
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +22,9 @@ from purpory.supervise.gate.provider import GateProviderError
 
 DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B"
 DEFAULT_TIMEOUT_SECONDS = 2.0
+DEFAULT_MAX_INPUT_TOKENS = 20_000
+DEFAULT_MAX_CONTEXT_TOKENS = 262_144
+MAX_RESPONSE_TOKENS = 8
 MAX_RESPONSE_BYTES = 65_536
 
 SYSTEM_PROMPT = """You are Purpory's memory gate classifier. Decide only whether the current request:
@@ -61,6 +66,9 @@ class QwenGateProvider:
         api_key: str | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         allow_remote: bool = False,
+        tokenizer_path: str | Path | None = None,
+        max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
+        max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
     ) -> None:
         normalized = base_url.rstrip("/")
         if normalized.endswith("/chat/completions"):
@@ -78,12 +86,28 @@ class QwenGateProvider:
             )
         if timeout_seconds <= 0 or timeout_seconds > 60:
             raise ValueError("gate timeout must be between 0 and 60 seconds")
+        if max_context_tokens <= MAX_RESPONSE_TOKENS:
+            raise ValueError(
+                f"gate context limit must exceed {MAX_RESPONSE_TOKENS} tokens"
+            )
+        if max_input_tokens <= 0 or max_input_tokens + MAX_RESPONSE_TOKENS > max_context_tokens:
+            raise ValueError(
+                "gate input limit must be positive and fit within the model context limit"
+            )
         self.endpoint = endpoint
         self._parsed_endpoint = parsed
         self.model = model.strip() or DEFAULT_MODEL
         self.model_revision = model_revision.strip() if model_revision else None
         self.api_key = api_key
         self.timeout_seconds = float(timeout_seconds)
+        self.tokenizer_path = (
+            Path(tokenizer_path).expanduser().resolve()
+            if tokenizer_path is not None
+            else None
+        )
+        self.max_input_tokens = int(max_input_tokens)
+        self.max_context_tokens = int(max_context_tokens)
+        self._tokenizer: Any | None = None
 
     @classmethod
     def from_environment(cls) -> "QwenGateProvider":
@@ -105,6 +129,9 @@ class QwenGateProvider:
         )
 
     def propose(self, request: GateRequest) -> ProviderResult:
+        limit_reason = self.input_limit_reason(request)
+        if limit_reason is not None:
+            raise GateProviderError(limit_reason)
         body = {
             "model": self.model,
             "messages": [
@@ -112,8 +139,8 @@ class QwenGateProvider:
                 {
                     "role": "user",
                     # The classifier needs the request itself, not the full
-                    # context catalog. Keeping this turn small materially
-                    # improves routing accuracy on the local 0.8B model.
+                    # context catalog. Oversized requests bypass this provider
+                    # in the gateway instead of being silently transformed.
                     "content": request.message,
                 },
             ],
@@ -121,7 +148,7 @@ class QwenGateProvider:
             # so the local 0.8B model performs one bounded classification. The
             # adapter deterministically expands that classification into the
             # richer internal proposal contract.
-            "max_tokens": 8,
+            "max_tokens": MAX_RESPONSE_TOKENS,
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -158,6 +185,51 @@ class QwenGateProvider:
             model_revision=self.model_revision,
             latency_ms=latency_ms,
         )
+
+    def input_limit_reason(self, request: GateRequest) -> str | None:
+        """Return why this request cannot fit, without altering its message."""
+        if self.tokenizer_path is None:
+            return None
+        prompt_tokens = self._count_prompt_tokens(request.message)
+        if prompt_tokens > self.max_input_tokens:
+            return (
+                f"gate prompt requires {prompt_tokens} tokens, "
+                f"exceeding operating limit {self.max_input_tokens}"
+            )
+        required_tokens = prompt_tokens + MAX_RESPONSE_TOKENS
+        if required_tokens <= self.max_context_tokens:
+            return None
+        return (
+            f"gate request requires {required_tokens} tokens "
+            f"(prompt {prompt_tokens} + output {MAX_RESPONSE_TOKENS}), "
+            f"exceeding model context limit {self.max_context_tokens}"
+        )
+
+    def _count_prompt_tokens(self, message: str) -> int:
+        path = self.tokenizer_path
+        if path is None:
+            raise GateProviderError("gate tokenizer is not configured")
+        if self._tokenizer is None:
+            tokenizer_file = path / "tokenizer.json" if path.is_dir() else path
+            if not tokenizer_file.is_file():
+                raise GateProviderError(f"gate tokenizer is missing: {tokenizer_file}")
+            try:
+                tokenizer_type = import_module("tokenizers").Tokenizer
+                self._tokenizer = tokenizer_type.from_file(str(tokenizer_file))
+            except (AttributeError, ImportError, OSError, ValueError) as exc:
+                raise GateProviderError(f"could not load gate tokenizer: {exc}") from exc
+        tokenizer = self._tokenizer
+        if tokenizer is None:
+            raise GateProviderError("gate tokenizer could not be initialized")
+        rendered = (
+            f"<|im_start|>system\n{SYSTEM_PROMPT.strip()}<|im_end|>\n"
+            f"<|im_start|>user\n{message.strip()}<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        )
+        try:
+            return len(tokenizer.encode(rendered, add_special_tokens=False).ids)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise GateProviderError(f"could not count gate input tokens: {exc}") from exc
 
     def _connection(self) -> HTTPConnection:
         hostname = self._parsed_endpoint.hostname

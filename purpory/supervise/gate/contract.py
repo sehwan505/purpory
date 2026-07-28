@@ -25,7 +25,8 @@ REASON_CODES = frozenset(
     }
 )
 
-MAX_MESSAGE_CHARS = 32_768
+MAX_MESSAGE_CHARS = 1_048_576
+MAX_QUERY_CHARS = 4_096
 MAX_PATHS = 32
 MAX_PATH_CHARS = 1_024
 MAX_NAMESPACES = 128
@@ -173,7 +174,7 @@ class GateProposal:
 
         raw_query = value.get("query")
         query = None if raw_query is None else _clean_string(
-            raw_query, field="query", maximum=4_096
+            raw_query, field="query", maximum=MAX_QUERY_CHARS
         )
         raw_clarification = value.get("clarification")
         clarification = None if raw_clarification is None else _clean_string(
