@@ -142,6 +142,7 @@ def test_provider_uses_managed_endpoint_without_environment_url(
     assert provider is not None
     assert provider.endpoint == "http://127.0.0.1:43123/v1/chat/completions"
     assert provider.model == f"Qwen/Qwen3.5-0.8B@{'a' * 40}"
+    assert provider.tokenizer_path == manager.installation().snapshot_path
 
 
 def test_stop_terminates_only_recorded_runtime(

@@ -191,3 +191,34 @@ def test_hook_fails_closed_when_preflight_crashes(tmp_path: Path, monkeypatch) -
     response = json.loads(stdout.getvalue())
     assert response["decision"] == "block"
     assert "mandatory context preflight" in response["reason"]
+
+
+def test_oversized_prompt_continues_without_invoking_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FailingGateProvider:
+        def input_limit_reason(self, request):
+            return "gate request exceeds model context limit"
+
+        def propose(self, request):
+            raise AssertionError("oversized prompt must bypass the gate model")
+
+    monkeypatch.setenv("PURPORY_CONTEXT_DB", str(tmp_path / "context.db"))
+    monkeypatch.setattr(preflight, "_gate_provider", FailingGateProvider)
+    stdin = io.BytesIO(
+        json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "begin\n" + ("large context " * 10_000) + "\nexecute this",
+                "session_id": "session",
+                "cwd": str(tmp_path),
+            }
+        ).encode()
+    )
+    stdout = io.StringIO()
+
+    preflight.run_preflight("codex", stdin=stdin, stdout=stdout)
+
+    # No hook response means the coding agent receives and executes the
+    # original prompt instead of Purpory replacing it with a block decision.
+    assert stdout.getvalue() == ""

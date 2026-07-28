@@ -12,14 +12,15 @@ from purpory.supervise.gate.contract import (
     GateProposal,
     GateRequest,
     MAX_NAMESPACES,
+    MAX_QUERY_CHARS,
 )
 from purpory.supervise.gate.provider import GateProvider, GateProviderError
 from purpory.supervise.provisioning import ContextProvisioningService
 from purpory.supervise.repository import ContextGraphRepository
 
 
-def _fallback_proposal(message: str) -> GateProposal:
-    normalized = message.strip().lower().rstrip("!?. ")
+def _fallback_proposal(request: GateRequest) -> GateProposal:
+    normalized = request.message.strip().lower().rstrip("!?. ")
     greetings = {"hi", "hello", "hey", "안녕", "안녕하세요", "반가워"}
     if normalized in greetings:
         return GateProposal.from_mapping(
@@ -32,10 +33,21 @@ def _fallback_proposal(message: str) -> GateProposal:
                 "clarification": None,
             }
         )
+    if len(request.message) > MAX_QUERY_CHARS:
+        return GateProposal.from_mapping(
+            {
+                "action": "skip",
+                "query": None,
+                "scopes": [],
+                "keywords": [],
+                "reasonCode": "GATE_UNAVAILABLE",
+                "clarification": None,
+            }
+        )
     return GateProposal.from_mapping(
         {
             "action": "search",
-            "query": message,
+            "query": request.message,
             "scopes": ["human", "code", "session"],
             "keywords": [],
             "reasonCode": "GATE_UNAVAILABLE",
@@ -93,13 +105,21 @@ class GatewayService:
         provider_result = None
         fallback_reason = None
         if self.provider is not None:
+            limit_check = getattr(self.provider, "input_limit_reason", None)
             try:
-                provider_result = self.provider.propose(request)
+                limit_reason = limit_check(request) if callable(limit_check) else None
             except (GateProviderError, OSError, ValueError) as exc:
-                fallback_reason = str(exc)
+                limit_reason = f"gate input validation failed: {exc}"
+            if limit_reason is None:
+                try:
+                    provider_result = self.provider.propose(request)
+                except (GateProviderError, OSError, ValueError) as exc:
+                    fallback_reason = str(exc)
+            else:
+                fallback_reason = f"{limit_reason}; model invocation skipped"
         else:
             fallback_reason = "gate provider is not configured"
-        proposal = provider_result.proposal if provider_result else _fallback_proposal(message)
+        proposal = provider_result.proposal if provider_result else _fallback_proposal(request)
 
         delivery: list[dict[str, Any]] = []
         omitted: list[dict[str, Any]] = []
