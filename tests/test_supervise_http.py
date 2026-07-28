@@ -79,6 +79,7 @@ def test_graph_api_imports_snapshot_and_bounds_response(
         ),
         encoding="utf-8",
     )
+    context_server.service.sync_graph()
 
     status, body = _request(
         context_server,

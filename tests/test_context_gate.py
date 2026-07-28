@@ -126,6 +126,7 @@ def test_gate_retrieves_structural_nodes_without_seed_topics(tmp_path: Path) -> 
         _proposal("search", query="TokenService", scopes=["code"], keywords=["TokenService"])
     )
     service = ContextService(db_path=tmp_path / "context.db", root=tmp_path, gate_provider=provider)
+    service.sync_graph()
 
     result = service.prepare("Where is TokenService?", session_id="session-a")
 

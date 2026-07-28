@@ -534,6 +534,26 @@ def dispatch_command(cmd: str) -> None:
         from purpory.prs import cmd_prs
 
         cmd_prs(sys.argv[2:])
+    elif cmd == "import":
+        import argparse as _ap
+
+        parser = _ap.ArgumentParser(prog="purpory import")
+        parser.add_argument("graph")
+        parser.add_argument("--root", default=".")
+        options = parser.parse_args(sys.argv[2:])
+        from purpory.supervise.identity import resolve_project_id, resolve_project_root
+        from purpory.supervise.repository import ContextGraphRepository
+
+        project_root = resolve_project_root(options.root)
+        result = ContextGraphRepository().import_graph(
+            options.graph,
+            project=resolve_project_id(project_root),
+        )
+        action = "Imported" if result["imported"] else "Already current"
+        print(
+            f"{action}: {result['nodes']} nodes, {result['edges']} edges, "
+            f"{result['hyperedges']} hyperedges."
+        )
     elif cmd == "hook":
         from purpory.hooks import (
             install as hook_install,
@@ -1805,6 +1825,7 @@ def dispatch_command(cmd: str) -> None:
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd not in (
             "html",
+            "json",
             "callflow-html",
             "obsidian",
             "wiki",
@@ -1818,6 +1839,7 @@ def dispatch_command(cmd: str) -> None:
                 "  html      [--graph PATH] [--labels PATH] [--node-limit N] [--no-viz]",
                 file=sys.stderr,
             )
+            print("  json      [--output PATH]", file=sys.stderr)
             print(
                 "  callflow-html [GRAPH|DIR] [--graph PATH] [--labels PATH] [--report PATH] [--sections PATH] [--output HTML]",
                 file=sys.stderr,
@@ -1856,6 +1878,7 @@ def dispatch_command(cmd: str) -> None:
         report_path_explicit = False
         sections_path: Path | None = None
         callflow_output: Path | None = None
+        json_output = Path("graph.json")
         callflow_lang = "auto"
         callflow_max_sections = 15
         callflow_diagram_scale = 1.0
@@ -1897,9 +1920,13 @@ def dispatch_command(cmd: str) -> None:
                 sections_path = Path(args[i + 1])
                 i += 2
             elif a == "--output" and i + 1 < len(args):
-                callflow_output = Path(args[i + 1]).expanduser()
-                if not callflow_output.is_absolute():
-                    callflow_output = Path.cwd() / callflow_output
+                parsed_output = Path(args[i + 1]).expanduser()
+                if subcmd == "json":
+                    json_output = parsed_output
+                else:
+                    callflow_output = parsed_output
+                    if not callflow_output.is_absolute():
+                        callflow_output = Path.cwd() / callflow_output
                 i += 2
             elif a == "--lang" and i + 1 < len(args):
                 callflow_lang = args[i + 1]
@@ -1979,6 +2006,13 @@ def dispatch_command(cmd: str) -> None:
         except Exception as exc:
             print(f"error: could not load graph: {exc}", file=sys.stderr)
             sys.exit(1)
+
+        if subcmd == "json":
+            from purpory.paths import write_json_atomic
+
+            write_json_atomic(json_output, _raw, indent=2)
+            print(f"graph JSON written: {json_output}")
+            sys.exit(0)
 
         if subcmd == "callflow-html":
             from purpory.callflow_html import write_callflow_html as _write_callflow_html

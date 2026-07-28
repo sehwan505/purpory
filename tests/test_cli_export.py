@@ -69,6 +69,31 @@ def _make_graph(tmp_path: Path) -> Path:
 
 # ── purpory export html ─────────────────────────────────────────────────────
 
+
+def test_explicit_json_import_export_roundtrip(tmp_path):
+    source = tmp_path / "legacy.json"
+    source.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": "service", "label": "Service"}],
+                "links": [],
+                "hyperedges": [{"id": "flow", "nodes": ["service"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    imported = _run(["import", str(source), "--root", "."], tmp_path)
+    source.unlink()
+    exported = _run(["export", "json", "--output", "snapshot.json"], tmp_path)
+
+    assert imported.returncode == 0, imported.stderr
+    assert exported.returncode == 0, exported.stderr
+    snapshot = json.loads((tmp_path / "snapshot.json").read_text(encoding="utf-8"))
+    assert snapshot["nodes"][0]["id"] == "service"
+    assert snapshot["hyperedges"][0]["id"] == "flow"
+
+
 def test_export_html_creates_file(tmp_path):
     _make_graph(tmp_path)
     r = _run(["export", "html"], tmp_path)

@@ -204,7 +204,7 @@ def test_remember_lists_and_atomically_applies_project_batch(
     assert listed[0]["hash"]
 
 
-def test_update_synchronizes_the_canonical_context_graph(monkeypatch, capsys, tmp_path) -> None:
+def test_update_does_not_reimport_a_graph_artifact(monkeypatch, capsys, tmp_path) -> None:
     from purpory.supervise.library import ContextService
     import purpory.watch
 
@@ -213,10 +213,10 @@ def test_update_synchronizes_the_canonical_context_graph(monkeypatch, capsys, tm
     monkeypatch.setattr(
         ContextService,
         "sync_graph",
-        lambda self: {"imported": True, "nodes": 12, "edges": 34},
+        lambda self: pytest.fail("unexpected artifact import"),
     )
     monkeypatch.setattr(sys, "argv", ["purpory", "update", str(tmp_path)])
 
     main()
 
-    assert "Context graph synchronized: 12 nodes, 34 edges." in capsys.readouterr().out
+    assert "Code graph updated." in capsys.readouterr().out
