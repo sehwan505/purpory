@@ -1423,6 +1423,13 @@ def dispatch_command(cmd: str) -> None:
             encoding="utf-8",
         )
         to_json(G, communities, str(out / "graph.json"), community_labels=labels)
+        from purpory.export import graph_data as _graph_data
+        from purpory.supervise.structural import store_structural_graph
+
+        store_structural_graph(
+            _graph_data(G, communities, community_labels=labels),
+            root=watch_path,
+        )
         from purpory.paths import write_json_atomic as _wja
 
         _wja(labels_path, {str(k): v for k, v in labels.items()}, ensure_ascii=False)
@@ -1514,14 +1521,6 @@ def dispatch_command(cmd: str) -> None:
         # exiting silently when a hook-driven rebuild happens to be running.
         ok = _rebuild_code(watch_path, force=force, no_cluster=no_cluster, block_on_lock=True)
         if ok:
-            from purpory.supervise.library import ContextService
-
-            graph_path = watch_path / _PURPORY_OUT / "graph.json"
-            sync = ContextService(
-                root=watch_path.resolve(),
-                graph_path=graph_path,
-            ).sync_graph()
-            print(f"Context graph synchronized: {sync['nodes']} nodes, {sync['edges']} edges.")
             print(
                 "Code graph updated. For doc/paper/image changes run /purpory --update in your AI assistant."
             )
@@ -3131,6 +3130,9 @@ def dispatch_command(cmd: str) -> None:
             from purpory.paths import write_json_atomic as _write_json_atomic
 
             _write_json_atomic(graph_json_path, merged, indent=2)
+            from purpory.supervise.structural import store_structural_graph
+
+            store_structural_graph(merged, root=target)
             stages.mark("write")
             cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
             print(
@@ -3272,6 +3274,10 @@ def dispatch_command(cmd: str) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+        from purpory.export import graph_data as _graph_data
+        from purpory.supervise.structural import store_structural_graph
+
+        store_structural_graph(_graph_data(G, communities), root=target)
         stages.mark("export")
         if merged.get("output_tokens", 0) > 0:
             (purpory_out / ".purpory_semantic_marker").write_text(

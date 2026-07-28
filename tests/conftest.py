@@ -12,6 +12,11 @@ _ANALYZE_WARNING_FILTERS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_context_database(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PURPORY_CONTEXT_DB", str(tmp_path / "context.db"))
+
+
 def pytest_collection_modifyitems(items: list[Any]) -> None:
     for item in items:
         if item.path.name != "test_analyze.py":

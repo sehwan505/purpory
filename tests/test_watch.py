@@ -180,7 +180,15 @@ def test_rebuild_code_writes_community_name(tmp_path):
     assert _rebuild_code(corpus, acquire_lock=False) is True
 
     graph = json.loads((corpus / "purpory-out" / "graph.json").read_text(encoding="utf-8"))
+    from purpory.supervise.repository import ContextGraphRepository
+
+    stored = ContextGraphRepository().structural_graph(project=str(corpus))
     clustered = [n for n in graph["nodes"] if n.get("community") is not None]
+    assert stored is not None
+    assert {node["id"] for node in stored["nodes"]} == {
+        node["id"] for node in graph["nodes"]
+    }
+    assert len(stored["links"]) == len(graph["links"])
     assert clustered, "expected clustered nodes in the rebuilt graph"
     assert all(n.get("community_name") for n in clustered), (
         "clustered nodes missing community_name — the update rebuild stripped the "

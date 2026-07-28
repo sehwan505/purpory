@@ -1087,6 +1087,9 @@ def _rebuild_code(
                 ):
                     return False
                 existing_graph.write_text(candidate_graph_text, encoding="utf-8")
+            from purpory.supervise.structural import store_structural_graph
+
+            store_structural_graph(candidate_graph_data, root=project_root)
 
             # Write the user-supplied path only after the candidate graph is
             # accepted, so a refused shrink cannot mismatch graph and marker.
@@ -1217,6 +1220,9 @@ def _rebuild_code(
             graph_tmp.replace(existing_graph)
             report_path.write_text(report, encoding="utf-8")
             labels_file.write_text(labels_json, encoding="utf-8")
+        from purpory.supervise.structural import store_structural_graph
+
+        store_structural_graph(candidate_graph_data, root=project_root)
 
         (out / ".purpory_root").write_text(str(watch_path), encoding="utf-8")
 

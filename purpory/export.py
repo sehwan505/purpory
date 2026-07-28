@@ -301,6 +301,25 @@ def to_json(
                 )
                 return False
 
+    data = graph_data(
+        G,
+        communities,
+        built_at_commit=built_at_commit,
+        community_labels=community_labels,
+    )
+    from purpory.paths import write_json_atomic
+
+    write_json_atomic(output_path, data, indent=2)
+    return True
+
+
+def graph_data(
+    G: nx.Graph,
+    communities: dict[int, list[str]],
+    *,
+    built_at_commit: str | None = None,
+    community_labels: dict[int, str] | None = None,
+) -> dict:
     node_community = _node_community_map(communities)
     _labels: dict[int, str] = {int(k): v for k, v in (community_labels or {}).items()}
     try:
@@ -330,11 +349,7 @@ def to_json(
     commit = built_at_commit if built_at_commit is not None else _git_head()
     if commit:
         data["built_at_commit"] = commit
-    from purpory.paths import write_json_atomic
-
-    # Atomic write: a crash/ENOSPC mid-write must not truncate a good graph.json.
-    write_json_atomic(output_path, data, indent=2)
-    return True
+    return data
 
 
 def prune_dangling_edges(graph_data: dict) -> tuple[dict, int]:
