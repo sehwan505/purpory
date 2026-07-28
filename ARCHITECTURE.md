@@ -18,9 +18,9 @@ learning and user-knowledge modeling remain in [`docs/TODO.md`](docs/TODO.md).
 ### Analysis Engine
 
 The analysis engine owns detection, tree-sitter extraction, graph construction, clustering,
-analysis, reporting, and export. It writes `graph.json` as a deterministic staging artifact.
-`purpory update` synchronizes that snapshot into the canonical SQLite graph. Read boundaries also
-check the snapshot hash so an externally regenerated artifact cannot leave context reads stale.
+analysis, reporting, and export. Extraction and update replace the canonical SQLite structural
+snapshot transactionally. JSON, reports, and visualizations are generated only by explicit export
+operations; legacy JSON enters the graph only through explicit import.
 
 ### Context Core
 
@@ -32,7 +32,7 @@ check the snapshot hash so an externally regenerated artifact cannot leave conte
   suppression.
 - `recall.py`: deterministic activation, association, corroboration, and filesystem cues.
 - `resolve.py`: live pointer resolution, sandboxing, rendering, and graph slices.
-- `bridge.py`: deterministic staging-artifact import and seed derivation.
+- `bridge.py`: deterministic compatibility-artifact import and seed derivation.
 - `gate/`: strict proposal schema, optional Qwen provider, fallback policy, and model lifecycle.
 - `preflight.py`: the shared Claude Code and Codex `UserPromptSubmit` adapter.
 - `serve/`: loopback HTTP, capability tokens, SSE, and packaged dashboard assets.
@@ -126,7 +126,7 @@ adapters may call it directly with a stable session ID.
 
 ## Preparation Flow
 
-1. Import a changed graph snapshot and construct a compact catalog without copying the corpus.
+1. Read the canonical structural snapshot and construct a compact catalog without copying the corpus.
 2. Ask the optional model for a constrained `skip | search | ask` proposal, or use deterministic
    fallback.
 3. Generate bounded FTS5 and active-path candidate pools from canonical SQLite nodes.

@@ -136,17 +136,34 @@ uv run purpory path "Checkout" "PaymentService"
 uv run purpory update .
 ```
 
-Graph artifacts default to `purpory-out/`. `update` also synchronizes `graph.json` into the canonical
-context database, and the dashboard renders a bounded database-backed graph without requiring a
-generated `graph.html`. Context pointers accept `@repo/path` and `@root/path`; realpath sandboxing
-prevents repository escape.
+Extraction, update, clustering, and queries use the canonical SQLite graph directly. Generated
+JSON, reports, and visualizations are opt-in exports:
+
+```bash
+uv run purpory export json --output graph.json
+uv run purpory export report --output GRAPH_REPORT.md
+uv run purpory export html
+```
+
+The dashboard renders a bounded database-backed graph without requiring generated files. Context
+pointers accept `@repo/path` and `@root/path`; realpath sandboxing prevents repository escape.
+
+For an existing checkout that has only legacy artifacts, import once and then use SQLite-backed
+commands normally:
+
+```bash
+uv run purpory import purpory-out/graph.json --root .
+```
+
+Purpory does not delete the legacy directory or read it implicitly after migration. Archive or
+remove it only after verifying `purpory query` and an explicit `purpory export json`.
 
 ## Architecture
 
 Purpory is a modular monolith:
 
 - SQLite is the canonical store for structural, human, and experiential context.
-- `graph.json` is a deterministic staging and export artifact imported into that same graph.
+- `graph.json` is an explicit compatibility import/export artifact, never an implicit staging store.
 - NetworkX is an ephemeral analysis representation, not a second source of truth.
 - CLI and HTTP adapters call the same `ContextService`.
 - Claude Code and Codex preflight hooks call that same service before every prompt.

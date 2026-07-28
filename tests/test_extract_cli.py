@@ -596,11 +596,13 @@ def test_cache_check_mode_deep_reads_deep_namespace(monkeypatch, tmp_path, capsy
     """cache-check --mode deep consults cache/semantic-deep/; without the flag
     it keeps reading cache/semantic/ (deep entries are invisible to it)."""
     from purpory.cache import save_semantic_cache
+    from purpory.supervise.structural import project_state_directory
 
     doc = tmp_path / "doc.md"
     doc.write_text("# Doc\n")
     save_semantic_cache([{"id": "d", "source_file": "doc.md"}], [],
-                        root=tmp_path, mode="deep")
+                        root=tmp_path, mode="deep",
+                        cache_root=project_state_directory(tmp_path))
     files_from = tmp_path / "files.txt"
     files_from.write_text(str(doc) + "\n")
 
@@ -983,13 +985,15 @@ def test_cache_check_prompt_file_scopes_hits_to_that_prompt(monkeypatch, tmp_pat
     extraction prompt, so an upgraded prompt reports a miss (re-extract) rather
     than replaying the older vintage."""
     from purpory.cache import save_semantic_cache
+    from purpory.supervise.structural import project_state_directory
 
     doc = tmp_path / "doc.md"
     doc.write_text("# Doc\n")
     spec = tmp_path / "extraction-spec.md"
     spec.write_text("PROMPT V1", encoding="utf-8")
     save_semantic_cache([{"id": "d", "source_file": "doc.md"}], [],
-                        root=tmp_path, prompt_file=str(spec))
+                        root=tmp_path, prompt_file=str(spec),
+                        cache_root=project_state_directory(tmp_path))
     files_from = tmp_path / "files.txt"
     files_from.write_text(str(doc) + "\n")
 

@@ -4,7 +4,6 @@ import contextlib
 import json
 import os
 import posixpath
-import re
 import sys
 import time
 from pathlib import Path
@@ -240,12 +239,6 @@ from purpory.detect import (
 
 _WATCHED_EXTENSIONS = CODE_EXTENSIONS | DOC_EXTENSIONS | PAPER_EXTENSIONS | IMAGE_EXTENSIONS
 _CODE_EXTENSIONS = CODE_EXTENSIONS
-
-
-def _report_root_label(watch_path: Path) -> str:
-    if watch_path.is_absolute():
-        return watch_path.name or str(watch_path)
-    return Path.cwd().name if watch_path == Path(".") else str(watch_path)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -718,7 +711,7 @@ def _check_shrink(
         tmp.unlink(missing_ok=True)
     print(
         f"[purpory] WARNING: new graph has {len(new_nodes)} nodes but existing "
-        f"graph.json has {len(existing_nodes)}. Refusing to overwrite — you may be "
+        f"SQLite graph has {len(existing_nodes)}. Refusing to overwrite — you may be "
         f"missing chunk files from a previous session. "
         f"Pass --force to override.",
         file=sys.stderr,
@@ -726,20 +719,12 @@ def _check_shrink(
     return False
 
 
-def _report_for_compare(report_text: str) -> str:
-    return re.sub(r"^- Built from commit: `[^`]+`\n?", "", report_text, flags=re.MULTILINE)
-
-
-def _json_text(data: dict) -> str:
-    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-
-
 def _stabilize_rebuild_cwd(watch_path: Path) -> bool:
     """Ensure relative rebuild paths have a usable CWD before queue/lock setup.
 
     Detached git hooks can inherit a transient working directory that is deleted
     before the background rebuild starts. In that state Path.cwd(),
-    Path('.').resolve(), and relative purpory-out mkdirs raise FileNotFoundError
+    Path('.').resolve(), and relative state-directory setup raise FileNotFoundError
     before the normal rebuild error handling can run. Hooks that know the repo
     root export PURPORY_REPO_ROOT so the rebuild can recover by chdir'ing there.
     """
@@ -777,8 +762,8 @@ def _rebuild_code(
 ) -> bool:
     """Re-run AST extraction + build + optional cluster + report for code files. No LLM needed.
 
-    When ``force`` is True the node-count safety check in ``to_json`` is bypassed
-    so the rebuilt graph overwrites graph.json even if it has fewer nodes.
+    When ``force`` is True the node-count safety check is bypassed so the rebuilt
+    SQLite graph may contain fewer nodes.
     Use this after refactors that legitimately delete code.
 
     When ``changed_paths`` is provided, only those files are re-extracted; nodes

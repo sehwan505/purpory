@@ -89,6 +89,8 @@ def run_benchmark(
     graph_path: str | None = None,
     corpus_words: int | None = None,
     questions: list[str] | None = None,
+    *,
+    graph_data: dict | None = None,
 ) -> dict:
     """Measure token reduction: corpus tokens vs purpory query tokens.
 
@@ -99,10 +101,14 @@ def run_benchmark(
 
     Returns dict with: corpus_tokens, avg_query_tokens, reduction_ratio, per_question
     """
-    graph_path = graph_path or _default_graph_json()
-    from purpory.security import check_graph_file_size_cap
-    check_graph_file_size_cap(Path(graph_path))
-    data = json.loads(Path(graph_path).read_text(encoding="utf-8"))
+    if graph_data is None:
+        graph_path = graph_path or _default_graph_json()
+        from purpory.security import check_graph_file_size_cap
+
+        check_graph_file_size_cap(Path(graph_path))
+        data = json.loads(Path(graph_path).read_text(encoding="utf-8"))
+    else:
+        data = graph_data
     try:
         G = json_graph.node_link_graph(data, edges="links")
     except TypeError:

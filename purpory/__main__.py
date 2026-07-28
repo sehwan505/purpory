@@ -105,13 +105,16 @@ def _run_cli() -> None:
         print("    --root <path>           project identity for the imported graph (default .)")
         print("  export json            explicitly export the SQLite graph to graph.json")
         print("    --output <path>         output file (default ./graph.json)")
+        print("    --root <path>           project identity to export (default .)")
+        print("  export report          explicitly generate a report from the SQLite graph")
+        print("    --output <path>         output file (default ./GRAPH_REPORT.md)")
+        print("    --root <path>           project identity to export (default .)")
         print('  path "A" "B"            shortest path between two nodes')
         print("    --graph <path>          use an explicit graph.json instead of SQLite")
         print('  explain "X"             plain-language explanation of a node and its neighbors')
         print("    --graph <path>          use an explicit graph.json instead of SQLite")
         print("  diagnose multigraph    report same-endpoint edge collapse risk in graph.json")
-        print("    --graph <path>          path to graph/extraction JSON")
-        print("                            (default purpory-out/graph.json)")
+        print("    --graph <path>          required graph/extraction JSON artifact")
         print("    --json                  emit machine-readable JSON")
         print("    --max-examples N        max same-endpoint examples to print (default 5)")
         print("    --directed              force directed post-build simulation")
@@ -142,20 +145,17 @@ def _run_cli() -> None:
             "  update <path>           re-extract code files and update the graph (no LLM needed)"
         )
         print(
-            "    --force                 overwrite graph.json even if the rebuild has fewer nodes"
+            "    --force                 allow the SQLite graph to shrink during the rebuild"
         )
         print(
             "                            (also: PURPORY_FORCE=1 env var; use after refactors that delete code)"
         )
-        print("    --no-cluster            skip clustering, write raw extraction only")
+        print("    --no-cluster            skip clustering and store the raw graph in SQLite")
         print(
-            "  cluster-only <path>     rerun clustering on an existing graph.json and regenerate report"
+            "  cluster-only <path>     rerun clustering on the SQLite graph"
         )
         print(
-            "    --no-viz                skip graph.html generation (useful for >5000 node graphs / CI)"
-        )
-        print(
-            "    --graph <path>          path to graph.json (default <path>/purpory-out/graph.json)"
+            "    --graph <path>          explicitly use a graph.json compatibility artifact"
         )
         print(
             "    --no-label              keep 'Community N' placeholders (skip LLM community naming)"
@@ -169,7 +169,7 @@ def _run_cli() -> None:
         )
         print("    --batch-size=N          communities per labeling LLM call (default 100)")
         print(
-            "  label <path>            (re)name communities with the configured LLM backend, regenerate report"
+            "  label <path>            (re)name communities stored in SQLite"
         )
         print(
             "    --missing-only         keep existing labels and only name missing/placeholder communities"
@@ -180,15 +180,15 @@ def _run_cli() -> None:
             "    --max-concurrency=N     parallel labeling LLM calls (default 4; forced to 1 for ollama/claude-cli)"
         )
         print("    --batch-size=N          communities per labeling LLM call (default 100)")
-        print('  query "<question>"       BFS traversal of graph.json for a question')
+        print('  query "<question>"       BFS traversal of the SQLite graph')
         print("    --dfs                   use depth-first instead of breadth-first")
         print("    --context C             explicit edge-context filter (repeatable)")
         print("    --budget N              cap output at N tokens (default 2000)")
-        print("    --graph <path>          path to graph.json (default purpory-out/graph.json)")
+        print("    --graph <path>          explicitly use a graph.json compatibility artifact")
         print('  affected "X"             reverse traversal to find nodes impacted by X')
         print("    --relation R            edge relation to traverse in reverse (repeatable)")
         print("    --depth N               reverse traversal depth (default 2)")
-        print("    --graph <path>          path to graph.json (default purpory-out/graph.json)")
+        print("    --graph <path>          explicitly use a graph.json compatibility artifact")
         print("  remember <key>         store durable human context")
         print("    --value TEXT           store inline knowledge")
         print("    --source POINTER       store a live @root or external reference")
@@ -206,9 +206,7 @@ def _run_cli() -> None:
         print("  model <verb>            manage the local Qwen gate runtime")
         print("    install|start|stop     download, warm, or stop the managed model")
         print("    status|logs            inspect runtime health and recent logs")
-        print(
-            "  save-result             save a Q&A result to purpory-out/memory/ for graph feedback loop"
-        )
+        print("  save-result             save a Q&A result for the graph feedback loop")
         print("    --question Q            the question asked")
         print("    --answer A              the answer to save")
         print("    --type T                query type: query|path_query|explain (default: query)")
@@ -217,13 +215,13 @@ def _run_cli() -> None:
         print(
             "    --correction TEXT       what the right answer was (pairs with --outcome corrected)"
         )
-        print("    --memory-dir DIR        memory directory (default: purpory-out/memory)")
+        print("    --memory-dir DIR        memory directory (default: project state)")
         print(
-            "  reflect                 aggregate purpory-out/memory/ outcomes into a deterministic lessons doc"
+            "  reflect                 aggregate saved outcomes into a deterministic lessons doc"
         )
-        print("    --memory-dir DIR        memory directory (default: purpory-out/memory)")
+        print("    --memory-dir DIR        memory directory (default: project state)")
         print(
-            "    --out FILE              output path (default: purpory-out/reflections/LESSONS.md)"
+            "    --out FILE              output path (default: project state reflections)"
         )
         print(
             "    --graph PATH            graph.json, for community grouping + dropping stale nodes (optional)"
@@ -239,8 +237,8 @@ def _run_cli() -> None:
         print(
             "  check-update <path>     check needs_update flag and notify if semantic re-extraction is pending (cron-safe)"
         )
-        print("  tree                    emit a D3 v7 collapsible-tree HTML for graph.json")
-        print("    --graph PATH            path to graph.json (default purpory-out/graph.json)")
+        print("  tree                    export a D3 v7 collapsible-tree HTML")
+        print("    --graph PATH            explicitly use a graph.json compatibility artifact")
         print("    --output HTML           output path (default purpory-out/GRAPH_TREE.html)")
         print("    --root PATH             filesystem root for the hierarchy")
         print("    --max-children N        cap children per node (default 200)")
@@ -281,11 +279,11 @@ def _run_cli() -> None:
         print(
             "    --api-timeout S         per-request timeout in seconds for the LLM client (default: 600)"
         )
-        print("    --out DIR               output dir (default: <path>); writes <DIR>/purpory-out/")
+        print("    --out DIR               operational cache/state root (graph remains in SQLite)")
         print(
             "    --google-workspace      export .gdoc/.gsheet/.gslides shortcuts via gws before extraction"
         )
-        print("    --no-cluster            skip clustering, write raw extraction only")
+        print("    --no-cluster            skip clustering and store the raw graph in SQLite")
         print(
             "    --code-only             index code (local AST, no API key) and skip doc/paper/image files"
         )
@@ -302,7 +300,7 @@ def _run_cli() -> None:
         print("  global remove <tag>      remove a repo's nodes from the global graph")
         print("  global list              list repos in the global graph")
         print("  global path              print path to the global graph file")
-        print("  benchmark [graph.json]  measure token reduction vs naive full-corpus approach")
+        print("  benchmark [graph.json]  benchmark SQLite by default or an explicit artifact")
         print("  export callflow-html    emit Mermaid-based architecture/call-flow HTML")
         print(
             "  hook install            install post-commit/post-checkout git hooks (all platforms)"

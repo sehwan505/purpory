@@ -10,12 +10,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-from purpory.paths import PURPORY_OUT as _PURPORY_OUT
 from pathlib import Path
 
-
-def _default_graph_path() -> str:
-    return str(Path(_PURPORY_OUT) / "graph.json")
+from purpory.paths import PURPORY_OUT as _PURPORY_OUT
 
 
 def _load_graph_data(
@@ -222,16 +219,16 @@ def _stale_graph_sources(
     return stale
 
 
-def _prune_graph_json_sources(graph_source: Path | dict, stale_sources: list[str]) -> int:
-    """Drop nodes/edges/hyperedges owned by ``stale_sources`` from graph.json
-    in place. Returns the number of nodes removed.
+def _prune_graph_sources(graph_source: Path | dict, stale_sources: list[str]) -> int:
+    """Drop nodes, edges, and hyperedges owned by ``stale_sources``.
 
     Used by the ``--no-cluster`` incremental early-exit: that path never runs
-    ``build_merge`` (it would raw-dump only the new chunks), so an
-    exclusion-only change must prune the existing raw graph directly or the
-    newly-excluded file's nodes survive forever (#1909).
+    ``build_merge``, so an exclusion-only change must prune the existing raw
+    graph directly or the newly-excluded file's nodes survive forever (#1909).
     ``stale_sources`` comes from :func:`_stale_graph_sources`, i.e. the
     graph's own ``source_file`` spellings, so exact string matching is enough.
+    Dictionary inputs are mutated in memory; path inputs retain legacy
+    artifact compatibility.
     """
     if isinstance(graph_source, dict):
         data = graph_source
@@ -725,6 +722,9 @@ def dispatch_command(cmd: str) -> None:
         # purpory save-result --question Q --answer A [--type T] [--nodes N1 N2 ...]
         #                      [--outcome useful|dead_end|corrected] [--correction TEXT]
         import argparse as _ap
+        from purpory.supervise.structural import project_state_directory
+
+        state_out = project_state_directory(".") / _PURPORY_OUT
 
         p = _ap.ArgumentParser(prog="purpory save-result")
         p.add_argument("--question", required=True)
@@ -734,7 +734,7 @@ def dispatch_command(cmd: str) -> None:
         p.add_argument("--nodes", nargs="*", default=[])
         p.add_argument("--outcome", choices=("useful", "dead_end", "corrected"), default=None)
         p.add_argument("--correction", default=None)
-        p.add_argument("--memory-dir", default=str(Path(_PURPORY_OUT) / "memory"))
+        p.add_argument("--memory-dir", default=str(state_out / "memory"))
         opts = p.parse_args(sys.argv[2:])
         if opts.answer_file:
             opts.answer = Path(opts.answer_file).read_text(encoding="utf-8").strip()
@@ -754,12 +754,15 @@ def dispatch_command(cmd: str) -> None:
         print(f"Saved to {out}")
     elif cmd == "reflect":
         import argparse as _ap
+        from purpory.supervise.structural import project_state_directory
+
+        state_out = project_state_directory(".") / _PURPORY_OUT
 
         p = _ap.ArgumentParser(prog="purpory reflect")
-        p.add_argument("--memory-dir", default=str(Path(_PURPORY_OUT) / "memory"))
+        p.add_argument("--memory-dir", default=str(state_out / "memory"))
         p.add_argument(
             "--out",
-            default=str(Path(_PURPORY_OUT) / "reflections" / "LESSONS.md"),
+            default=str(state_out / "reflections" / "LESSONS.md"),
         )
         p.add_argument("--graph", default=None)
         p.add_argument("--analysis", default=None)
@@ -786,12 +789,16 @@ def dispatch_command(cmd: str) -> None:
         from purpory.reflect import reflect as _reflect, lessons_fresh as _lessons_fresh
 
         graph_arg = opts.graph
-        if graph_arg is None:
-            default_graph = Path(_PURPORY_OUT) / "graph.json"
-            if default_graph.exists():
-                graph_arg = str(default_graph)
-
         _gp = Path(graph_arg) if graph_arg else None
+        graph_data = None
+        graph_freshness_path = _gp
+        if _gp is None:
+            from purpory.supervise.repository import ContextGraphRepository
+            from purpory.supervise.structural import load_structural_graph
+
+            graph_data = load_structural_graph(".")
+            if graph_data is not None:
+                graph_freshness_path = ContextGraphRepository().path
         _analysis_path = None
         _labels_path = None
         if _gp is not None:
@@ -803,7 +810,11 @@ def dispatch_command(cmd: str) -> None:
             )
 
         if opts.if_stale and _lessons_fresh(
-            Path(opts.out), Path(opts.memory_dir), _gp, _analysis_path, _labels_path
+            Path(opts.out),
+            Path(opts.memory_dir),
+            graph_freshness_path,
+            _analysis_path,
+            _labels_path,
         ):
             print(f"Lessons already up to date -> {opts.out} (skipped; omit --if-stale to force)")
         else:
@@ -813,6 +824,7 @@ def dispatch_command(cmd: str) -> None:
                 graph_path=_gp,
                 analysis_path=_analysis_path,
                 labels_path=_labels_path,
+                graph_data=graph_data,
                 half_life_days=opts.half_life_days,
                 min_corroboration=opts.min_corroboration,
             )
@@ -1015,7 +1027,7 @@ def dispatch_command(cmd: str) -> None:
             )
             sys.exit(1)
 
-        graph_path = Path(_default_graph_path())
+            graph_path: Path | None = None
         max_examples = 5
         directed: bool | None = None
         direction_flag: str | None = None
@@ -1081,6 +1093,9 @@ def dispatch_command(cmd: str) -> None:
             format_diagnostic_report,
         )
 
+        if graph_path is None:
+            print("error: --graph is required for artifact diagnostics", file=sys.stderr)
+            sys.exit(1)
         try:
             summary = diagnose_file(
                 graph_path,
@@ -1757,6 +1772,7 @@ def dispatch_command(cmd: str) -> None:
         callflow_max_diagram_nodes = 18
         callflow_max_diagram_edges = 24
         analysis_path = Path(_PURPORY_OUT) / ".purpory_analysis.json"
+        export_root = Path(".")
         node_limit = 5000
         no_viz = False
         obsidian_dir = Path(_PURPORY_OUT) / "obsidian"
@@ -1801,6 +1817,9 @@ def dispatch_command(cmd: str) -> None:
                     callflow_output = parsed_output
                     if not callflow_output.is_absolute():
                         callflow_output = Path.cwd() / callflow_output
+                i += 2
+            elif a == "--root" and i + 1 < len(args):
+                export_root = Path(args[i + 1]).expanduser()
                 i += 2
             elif a == "--lang" and i + 1 < len(args):
                 callflow_lang = args[i + 1]
@@ -1875,7 +1894,8 @@ def dispatch_command(cmd: str) -> None:
 
         try:
             _raw, _, _explicit_graph = _load_graph_data(
-                graph_path if graph_path_explicit else None
+                graph_path if graph_path_explicit else None,
+                root=export_root,
             )
         except Exception as exc:
             print(f"error: could not load graph: {exc}", file=sys.stderr)
@@ -1975,7 +1995,7 @@ def dispatch_command(cmd: str) -> None:
                     _an.get("tokens", {"input": 0, "output": 0})
                     if isinstance(_an, dict)
                     else {"input": 0, "output": 0},
-                    str(Path.cwd()),
+                    str(export_root.resolve()),
                     suggested_questions=_an.get("questions", [])
                     if isinstance(_an, dict)
                     else [],
@@ -2103,8 +2123,16 @@ def dispatch_command(cmd: str) -> None:
     elif cmd == "benchmark":
         from purpory.benchmark import run_benchmark, print_benchmark
 
-        graph_path = sys.argv[2] if len(sys.argv) > 2 else _default_graph_path()
-        _enforce_graph_size_cap_or_exit(Path(graph_path))
+        graph_path = sys.argv[2] if len(sys.argv) > 2 else None
+        graph_data = None
+        if graph_path is not None:
+            _enforce_graph_size_cap_or_exit(Path(graph_path))
+        else:
+            try:
+                graph_data, _, _ = _load_graph_data()
+            except Exception as exc:
+                print(f"error: could not load graph: {exc}", file=sys.stderr)
+                sys.exit(1)
         # Try to load corpus_words from detect output
         corpus_words = None
         detect_path = Path(".purpory_detect.json")
@@ -2114,7 +2142,11 @@ def dispatch_command(cmd: str) -> None:
                 corpus_words = detect_data.get("total_words")
             except Exception:
                 pass
-        result = run_benchmark(graph_path, corpus_words=corpus_words)
+        result = run_benchmark(
+            graph_path,
+            corpus_words=corpus_words,
+            graph_data=graph_data,
+        )
         print_benchmark(result)
 
     elif cmd == "global":
@@ -2993,7 +3025,7 @@ def dispatch_command(cmd: str) -> None:
                 # scrub the newly-excluded sources from the raw graph (#1909).
                 # This path never runs build_merge, so prune in place.
                 if graph_stale_sources:
-                    _n_pruned = _prune_graph_json_sources(
+                    _n_pruned = _prune_graph_sources(
                         existing_graph_data or {}, graph_stale_sources
                     )
                     if _n_pruned:
@@ -3268,9 +3300,7 @@ def dispatch_command(cmd: str) -> None:
         # references/extraction-spec.md), restricting hits to entries produced by
         # that same prompt (#1939). Omitting it reads the unattributed layout, which
         # cannot see entries a fingerprinted run wrote.
-        # Writes:
-        #   purpory-out/.purpory_cached.json   — already-cached nodes/edges/hyperedges
-        #   purpory-out/.purpory_uncached.txt  — paths that need extraction
+        # Writes cached/uncached handoff files into the project state directory.
         # Stdout: "Cache: N hit, M miss"
         from purpory.cache import check_semantic_cache
 
@@ -3308,10 +3338,17 @@ def dispatch_command(cmd: str) -> None:
             else:
                 i += 1
         files = [f for f in files_from.read_text(encoding="utf-8").splitlines() if f.strip()]
+        from purpory.supervise.structural import project_state_directory
+
+        cache_root = project_state_directory(root)
         cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(
-            files, root, mode=cache_mode, prompt_file=prompt_file
+            files,
+            root,
+            mode=cache_mode,
+            prompt_file=prompt_file,
+            cache_root=cache_root,
         )
-        out = root / _PURPORY_OUT
+        out = cache_root / _PURPORY_OUT
         out.mkdir(parents=True, exist_ok=True)
         if cached_nodes or cached_edges or cached_hyperedges:
             (out / ".purpory_cached.json").write_text(

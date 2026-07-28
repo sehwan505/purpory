@@ -94,6 +94,26 @@ def test_explicit_json_import_export_roundtrip(tmp_path):
     assert snapshot["hyperedges"][0]["id"] == "flow"
 
 
+def test_export_root_selects_project_database_snapshot(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    from purpory.supervise.structural import store_structural_graph
+
+    store_structural_graph(
+        {"nodes": [{"id": "service", "label": "Service"}], "links": []},
+        root=project,
+    )
+    output = tmp_path / "snapshot.json"
+
+    exported = _run(
+        ["export", "json", "--root", str(project), "--output", str(output)],
+        tmp_path,
+    )
+
+    assert exported.returncode == 0, exported.stderr
+    assert json.loads(output.read_text(encoding="utf-8"))["nodes"][0]["id"] == "service"
+
+
 def test_export_html_creates_file(tmp_path):
     _make_graph(tmp_path)
     r = _run(["export", "html"], tmp_path)

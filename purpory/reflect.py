@@ -237,6 +237,54 @@ def _load_known_nodes(graph_path: Path) -> set[str] | None:
     return known or None
 
 
+def _known_nodes_from_data(graph_data: dict) -> set[str] | None:
+    known: set[str] = set()
+    for node in graph_data.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        if node.get("id") is not None:
+            known.add(str(node["id"]))
+        if node.get("label") is not None:
+            known.add(str(node["label"]))
+    return known or None
+
+
+def _node_community_from_data(graph_data: dict) -> dict[str, str] | None:
+    labels: dict[str, str] = {}
+    id_to_label: dict[str, str] = {}
+    communities: dict[str, list[str]] = {}
+    for node in graph_data.get("nodes", []):
+        if not isinstance(node, dict) or node.get("id") is None:
+            continue
+        node_id = str(node["id"])
+        if node.get("label") is not None:
+            id_to_label[node_id] = str(node["label"])
+        community = node.get("community")
+        if community is None:
+            continue
+        cid = str(community)
+        communities.setdefault(cid, []).append(node_id)
+        if node.get("community_name"):
+            labels[cid] = str(node["community_name"])
+    analysis = graph_data.get("analysis")
+    if isinstance(analysis, dict) and isinstance(analysis.get("communities"), dict):
+        communities = {
+            str(cid): [str(node_id) for node_id in nodes]
+            for cid, nodes in analysis["communities"].items()
+            if isinstance(nodes, list)
+        }
+    if not communities:
+        return None
+    node_community: dict[str, str] = {}
+    for cid in sorted(communities):
+        community_label = labels.get(cid, f"Community {cid}")
+        for node_id in communities[cid]:
+            node_community.setdefault(node_id, community_label)
+            if node_id in id_to_label:
+                node_community.setdefault(id_to_label[node_id], community_label)
+    return node_community
+
+
 def _doc_community(nodes: list[str],
                    node_community: dict[str, str] | None) -> str:
     """The community a doc belongs to: the plurality community of its source nodes.
@@ -566,6 +614,7 @@ def reflect(memory_dir: Path, out_path: Path,
             analysis_path: Path | None = None,
             labels_path: Path | None = None,
             *,
+            graph_data: dict | None = None,
             now: datetime | None = None,
             half_life_days: float = _DEFAULT_HALF_LIFE_DAYS,
             min_corroboration: int = _DEFAULT_MIN_CORROBORATION,
@@ -579,7 +628,10 @@ def reflect(memory_dir: Path, out_path: Path,
 
     node_community = None
     known_nodes = None
-    if graph_path is not None:
+    if graph_data is not None:
+        node_community = _node_community_from_data(graph_data)
+        known_nodes = _known_nodes_from_data(graph_data)
+    elif graph_path is not None:
         graph_path = Path(graph_path)
         analysis_path = Path(analysis_path) if analysis_path else (
             graph_path.parent / ".purpory_analysis.json")

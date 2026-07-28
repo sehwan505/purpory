@@ -28,23 +28,21 @@ jobs:
         run: |
           echo "*.md" >> .purporyignore
           echo "*.txt" >> .purporyignore
-          uv run --frozen purpory extract purpory/ --out .
+          uv run --frozen purpory extract purpory/
           git checkout .purporyignore 2>/dev/null || rm -f .purporyignore
 
-      - name: Cluster, label communities and generate GRAPH_REPORT.md
-        # cluster-only writes GRAPH_REPORT.md and names communities (no LLM needed
-        # for basic numeric labels; --no-label skips LLM labeling entirely).
-        run: uv run --frozen purpory cluster-only . --no-label
+      - name: Cluster and label communities
+        run: uv run --frozen purpory cluster-only purpory/ --no-label
 
-      - name: Generate HTML viewer
-        run: uv run --frozen purpory export html --graph purpory-out/graph.json
+      - name: Export release artifacts
+        run: |
+          mkdir -p dist-graph
+          uv run --frozen purpory export json --root purpory/ --output dist-graph/graph.json
+          uv run --frozen purpory export report --root purpory/ --output dist-graph/GRAPH_REPORT.md
+          uv run --frozen purpory export html --graph dist-graph/graph.json
 
       - name: Bundle release asset
         run: |
-          mkdir -p dist-graph
-          cp purpory-out/graph.json dist-graph/
-          cp purpory-out/graph.html dist-graph/
-          [ -f purpory-out/GRAPH_REPORT.md ] && cp purpory-out/GRAPH_REPORT.md dist-graph/ || true
           tar -czf purpory-self-graph.tar.gz -C dist-graph .
           echo "Asset contents:"
           tar -tzf purpory-self-graph.tar.gz
