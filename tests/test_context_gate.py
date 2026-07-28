@@ -13,8 +13,7 @@ from purpory.supervise.gate.contract import (
 )
 from purpory.supervise.gate.provider import GateProviderError
 from purpory.supervise.gate.qwen import (
-    DEFAULT_MAX_CONTEXT_TOKENS,
-    MAX_RESPONSE_TOKENS,
+    DEFAULT_MAX_INPUT_TOKENS,
     QwenGateProvider,
 )
 from purpory.supervise.library import ContextService
@@ -270,8 +269,8 @@ def test_oversized_prompt_bypasses_gate_without_losing_original(tmp_path: Path) 
     class CapturingProvider:
         def input_limit_reason(self, request: GateRequest) -> str:
             return (
-                f"gate request requires {DEFAULT_MAX_CONTEXT_TOKENS + 1} tokens, "
-                f"exceeding model context limit {DEFAULT_MAX_CONTEXT_TOKENS}"
+                f"gate prompt requires {DEFAULT_MAX_INPUT_TOKENS + 1} tokens, "
+                f"exceeding operating limit {DEFAULT_MAX_INPUT_TOKENS}"
             )
 
         def propose(self, request: GateRequest) -> ProviderResult:
@@ -414,7 +413,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
             return type("Encoding", (), {"ids": SizedIds()})()
 
     provider.tokenizer_path = Path("/unused/tokenizer.json")
-    provider.max_context_tokens = 20 + MAX_RESPONSE_TOKENS - 1
+    provider.max_input_tokens = 19
     provider._tokenizer = FakeTokenizer()
     long_request = GateRequest.create(
         message="important beginning\n" + ("context " * 10_000) + "\nimportant ending",
@@ -422,7 +421,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
         project="demo",
         working_directory="/tmp/demo",
     )
-    with pytest.raises(GateProviderError, match="exceeding model context limit"):
+    with pytest.raises(GateProviderError, match="exceeding operating limit 19"):
         provider.propose(long_request)
 
     assert captured["calls"] == 1

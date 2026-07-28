@@ -22,6 +22,7 @@ from purpory.supervise.gate.provider import GateProviderError
 
 DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B"
 DEFAULT_TIMEOUT_SECONDS = 2.0
+DEFAULT_MAX_INPUT_TOKENS = 20_000
 DEFAULT_MAX_CONTEXT_TOKENS = 262_144
 MAX_RESPONSE_TOKENS = 8
 MAX_RESPONSE_BYTES = 65_536
@@ -66,6 +67,7 @@ class QwenGateProvider:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         allow_remote: bool = False,
         tokenizer_path: str | Path | None = None,
+        max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
         max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
     ) -> None:
         normalized = base_url.rstrip("/")
@@ -88,6 +90,10 @@ class QwenGateProvider:
             raise ValueError(
                 f"gate context limit must exceed {MAX_RESPONSE_TOKENS} tokens"
             )
+        if max_input_tokens <= 0 or max_input_tokens + MAX_RESPONSE_TOKENS > max_context_tokens:
+            raise ValueError(
+                "gate input limit must be positive and fit within the model context limit"
+            )
         self.endpoint = endpoint
         self._parsed_endpoint = parsed
         self.model = model.strip() or DEFAULT_MODEL
@@ -99,6 +105,7 @@ class QwenGateProvider:
             if tokenizer_path is not None
             else None
         )
+        self.max_input_tokens = int(max_input_tokens)
         self.max_context_tokens = int(max_context_tokens)
         self._tokenizer: Any | None = None
 
@@ -184,6 +191,11 @@ class QwenGateProvider:
         if self.tokenizer_path is None:
             return None
         prompt_tokens = self._count_prompt_tokens(request.message)
+        if prompt_tokens > self.max_input_tokens:
+            return (
+                f"gate prompt requires {prompt_tokens} tokens, "
+                f"exceeding operating limit {self.max_input_tokens}"
+            )
         required_tokens = prompt_tokens + MAX_RESPONSE_TOKENS
         if required_tokens <= self.max_context_tokens:
             return None
