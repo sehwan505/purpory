@@ -255,16 +255,18 @@ def _node_link_payload(data: dict) -> tuple[list, list] | None:
     return nodes, edges
 
 
-def load_graph(path: str | Path) -> tuple:
+def load_graph(path: str | Path | dict) -> tuple:
     """Load graph.json. Returns normalized (nodes, edges, hyperedges, metadata)."""
-    if path:
+    if isinstance(path, dict):
+        data = path
+    else:
         from purpory.security import check_graph_file_size_cap
 
         try:
             check_graph_file_size_cap(Path(path))
         except ValueError as exc:
             raise SystemExit(f"ERROR: {exc}") from exc
-    data = read_json(path)
+        data = read_json(path)
     if not isinstance(data, dict):
         raise SystemExit(f"ERROR: graph file must contain a JSON object: {path}")
 
@@ -1858,6 +1860,7 @@ def write_callflow_html(
     *,
     purpory_out: str | Path | None = None,
     graph: str | Path | None = None,
+    graph_data: dict | None = None,
     report: str | Path | None = None,
     labels: str | Path | None = None,
     sections: str | Path | None = None,
@@ -1886,14 +1889,16 @@ def write_callflow_html(
     )
 
     paths = resolve_purpory_paths(args)
-    if not paths["graph"].exists():
+    if graph_data is None and not paths["graph"].exists():
         raise FileNotFoundError(
             f"purpory output not found: {paths['graph']}. "
             "Run purpory first or pass --graph /path/to/graph.json."
         )
 
     # Load data
-    nodes, edges, hyperedges, meta = load_graph(paths["graph"])
+    nodes, edges, hyperedges, meta = load_graph(
+        graph_data if graph_data is not None else paths["graph"]
+    )
     labels = load_labels(paths["labels"])
     lang = detect_lang(args.lang, nodes, labels)
     if paths["sections"]:

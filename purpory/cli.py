@@ -18,6 +18,50 @@ def _default_graph_path() -> str:
     return str(Path(_PURPORY_OUT) / "graph.json")
 
 
+def _load_graph_data(
+    graph_path: str | Path | None = None,
+    *,
+    root: str | Path | None = None,
+) -> tuple[dict, str, Path | None]:
+    if graph_path is not None:
+        path = Path(graph_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"graph file not found: {path}")
+        if path.suffix != ".json":
+            raise ValueError("graph file must be a .json file")
+        from purpory.security import check_graph_file_size_cap
+
+        check_graph_file_size_cap(path)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or not isinstance(value.get("nodes"), list):
+            raise ValueError("graph file must contain a nodes list")
+        return value, str(path), path
+
+    from purpory.supervise.identity import resolve_project_id, resolve_project_root
+    from purpory.supervise.repository import ContextGraphRepository
+
+    root = resolve_project_root(root or Path.cwd())
+    repository = ContextGraphRepository()
+    value = repository.structural_graph(project=resolve_project_id(root))
+    if value is None:
+        raise FileNotFoundError(f"no structural graph in {repository.path}; run purpory extract")
+    return value, f"{repository.path}#{resolve_project_id(root)}", None
+
+
+def _networkx_graph(graph: dict, *, directed: bool = False):
+    from networkx.readwrite import json_graph
+
+    raw = graph
+    if "links" not in raw and "edges" in raw:
+        raw = {**raw, "links": raw["edges"]}
+    if directed:
+        raw = {**raw, "directed": True}
+    try:
+        return json_graph.node_link_graph(raw, edges="links")
+    except TypeError:
+        return json_graph.node_link_graph(raw)
+
+
 def _stamped_manifest_files(
     files_by_type: dict[str, list[str]],
     sem_result: dict,
@@ -515,14 +559,12 @@ def dispatch_command(cmd: str) -> None:
             )
             sys.exit(1)
         from purpory.serve import _query_graph_text
-        from purpory.security import sanitize_label
-        from networkx.readwrite import json_graph
         from purpory import querylog
 
         question = sys.argv[2]
         use_dfs = "--dfs" in sys.argv
         budget = 2000
-        graph_path = _default_graph_path()
+        graph_path: str | None = None
         context_filters: list[str] = []
         args = sys.argv[3:]
         i = 0
@@ -552,25 +594,9 @@ def dispatch_command(cmd: str) -> None:
                 i += 2
             else:
                 i += 1
-        gp = Path(graph_path).resolve()
-        if not gp.exists():
-            print(f"error: graph file not found: {gp}", file=sys.stderr)
-            sys.exit(1)
-        if not gp.suffix == ".json":
-            print(f"error: graph file must be a .json file", file=sys.stderr)
-            sys.exit(1)
-        _enforce_graph_size_cap_or_exit(gp)
         try:
-            import json as _json
-            import networkx as _nx
-
-            _raw = _json.loads(gp.read_text(encoding="utf-8"))
-            if "links" not in _raw and "edges" in _raw:
-                _raw = dict(_raw, links=_raw["edges"])
-            try:
-                G = json_graph.node_link_graph(_raw, edges="links")
-            except TypeError:
-                G = json_graph.node_link_graph(_raw)
+            _raw, _corpus, _ = _load_graph_data(graph_path)
+            G = _networkx_graph(_raw)
             try:
                 from purpory.build import graph_has_legacy_ids as _legacy
 
@@ -601,7 +627,7 @@ def dispatch_command(cmd: str) -> None:
         querylog.log_query(
             kind="query",
             question=question,
-            corpus=str(gp),
+            corpus=_corpus,
             result=_result,
             mode=_mode,
             depth=2,
@@ -616,10 +642,10 @@ def dispatch_command(cmd: str) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        from purpory.affected import DEFAULT_AFFECTED_RELATIONS, format_affected, load_graph
+        from purpory.affected import DEFAULT_AFFECTED_RELATIONS, format_affected
 
         query = sys.argv[2]
-        graph_path = _default_graph_path()
+        graph_path: str | None = None
         depth = 2
         relations: list[str] = []
         args = sys.argv[3:]
@@ -653,15 +679,9 @@ def dispatch_command(cmd: str) -> None:
                 i += 1
             else:
                 i += 1
-        gp = Path(graph_path).resolve()
-        if not gp.exists():
-            print(f"error: graph file not found: {gp}", file=sys.stderr)
-            sys.exit(1)
-        if not gp.suffix == ".json":
-            print("error: graph file must be a .json file", file=sys.stderr)
-            sys.exit(1)
         try:
-            graph = load_graph(gp)
+            raw, _, _ = _load_graph_data(graph_path)
+            graph = _networkx_graph(raw, directed=True)
         except Exception as exc:
             print(f"error: could not load graph: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -782,30 +802,21 @@ def dispatch_command(cmd: str) -> None:
             )
             sys.exit(1)
         from purpory.serve import _pick_scored_endpoint, _score_nodes
-        from networkx.readwrite import json_graph
         import networkx as _nx
 
         source_label = sys.argv[2]
         target_label = sys.argv[3]
-        graph_path = _default_graph_path()
+        graph_path: str | None = None
         args = sys.argv[4:]
         for i, a in enumerate(args):
             if a == "--graph" and i + 1 < len(args):
                 graph_path = args[i + 1]
-        gp = Path(graph_path).resolve()
-        if not gp.exists():
-            print(f"error: graph file not found: {gp}", file=sys.stderr)
-            sys.exit(1)
-        _enforce_graph_size_cap_or_exit(gp)
-        _raw = json.loads(gp.read_text(encoding="utf-8"))
-        if "links" not in _raw and "edges" in _raw:
-            _raw = dict(_raw, links=_raw["edges"])
-        # Force directed so the renderer can recover stored caller→callee direction.
-        _raw = {**_raw, "directed": True}
         try:
-            G = json_graph.node_link_graph(_raw, edges="links")
-        except TypeError:
-            G = json_graph.node_link_graph(_raw)
+            _raw, _corpus, _ = _load_graph_data(graph_path)
+            G = _networkx_graph(_raw, directed=True)
+        except Exception as exc:
+            print(f"error: could not load graph: {exc}", file=sys.stderr)
+            sys.exit(1)
         src_scored = _score_nodes(G, [t.lower() for t in source_label.split()])
         tgt_scored = _score_nodes(G, [t.lower() for t in target_label.split()])
         if not src_scored:
@@ -874,7 +885,7 @@ def dispatch_command(cmd: str) -> None:
         querylog.log_query(
             kind="path",
             question=f"{sys.argv[2]} -> {sys.argv[3]}",
-            corpus=str(gp),
+            corpus=_corpus,
             nodes_returned=hops,
         )
 
@@ -883,28 +894,19 @@ def dispatch_command(cmd: str) -> None:
             print('Usage: purpory explain "<node>" [--graph path]', file=sys.stderr)
             sys.exit(1)
         from purpory.serve import _find_node
-        from networkx.readwrite import json_graph
 
         label = sys.argv[2]
-        graph_path = _default_graph_path()
+        graph_path: str | None = None
         args = sys.argv[3:]
         for i, a in enumerate(args):
             if a == "--graph" and i + 1 < len(args):
                 graph_path = args[i + 1]
-        gp = Path(graph_path).resolve()
-        if not gp.exists():
-            print(f"error: graph file not found: {gp}", file=sys.stderr)
-            sys.exit(1)
-        _enforce_graph_size_cap_or_exit(gp)
-        _raw = json.loads(gp.read_text(encoding="utf-8"))
-        if "links" not in _raw and "edges" in _raw:
-            _raw = dict(_raw, links=_raw["edges"])
-        # Force directed so the renderer can recover stored caller→callee direction.
-        _raw = {**_raw, "directed": True}
         try:
-            G = json_graph.node_link_graph(_raw, edges="links")
-        except TypeError:
-            G = json_graph.node_link_graph(_raw)
+            _raw, _corpus, _graph_file = _load_graph_data(graph_path)
+            G = _networkx_graph(_raw, directed=True)
+        except Exception as exc:
+            print(f"error: could not load graph: {exc}", file=sys.stderr)
+            sys.exit(1)
         matches = _find_node(G, label)
         if not matches:
             print(f"No node matching '{label}' found.")
@@ -923,7 +925,7 @@ def dispatch_command(cmd: str) -> None:
             from purpory.reflect import load_learning_overlay as _llo
             from purpory.security import sanitize_label as _sl
 
-            _overlay = _llo(gp)
+            _overlay = _llo(_graph_file) if _graph_file is not None else {}
             _entry = _overlay.get(str(nid))
             if _entry:
                 _status = _sl(str(_entry.get("status", "")))
@@ -970,7 +972,7 @@ def dispatch_command(cmd: str) -> None:
         querylog.log_query(
             kind="explain",
             question=sys.argv[2],
-            corpus=str(gp),
+            corpus=_corpus,
             nodes_returned=len(connections),
         )
 
@@ -1197,13 +1199,6 @@ def dispatch_command(cmd: str) -> None:
             if graph_override is not None
             else watch_path / _PURPORY_OUT / "graph.json"
         )
-        if not graph_json.exists():
-            print(
-                f"error: no graph found at {graph_json} — run /purpory first",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        from networkx.readwrite import json_graph as _jg
         from purpory.build import build_from_json
         from purpory.cluster import cluster, score_all, remap_communities_to_previous
         from purpory.analyze import (
@@ -1223,20 +1218,33 @@ def dispatch_command(cmd: str) -> None:
         from purpory.security import check_graph_file_size_cap as _check_cap
 
         _over_cap = False
-        try:
-            _check_cap(graph_json)
-        except ValueError:
-            _over_cap = True
+        if graph_override is not None:
+            if not graph_json.exists():
+                print(
+                    f"error: no graph found at {graph_json} — run /purpory first",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             try:
-                _over_cap_bytes = graph_json.stat().st_size
-            except OSError:
-                _over_cap_bytes = -1
-            print(
-                f"warning: graph.json exceeds cap ({_over_cap_bytes} bytes); "
-                f"falling back to community-aggregation view (node_limit=5000)",
-                file=sys.stderr,
-            )
-        _raw = json.loads(graph_json.read_text(encoding="utf-8"))
+                _check_cap(graph_json)
+            except ValueError:
+                _over_cap = True
+                try:
+                    _over_cap_bytes = graph_json.stat().st_size
+                except OSError:
+                    _over_cap_bytes = -1
+                print(
+                    f"warning: graph.json exceeds cap ({_over_cap_bytes} bytes); "
+                    f"falling back to community-aggregation view (node_limit=5000)",
+                    file=sys.stderr,
+                )
+            _raw = json.loads(graph_json.read_text(encoding="utf-8"))
+        else:
+            try:
+                _raw, _, _ = _load_graph_data(root=watch_path)
+            except Exception as exc:
+                print(f"error: could not load graph: {exc}", file=sys.stderr)
+                sys.exit(1)
         _directed = bool(_raw.get("directed", False))
         G = build_from_json(_raw, directed=_directed)
         print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
@@ -1427,7 +1435,10 @@ def dispatch_command(cmd: str) -> None:
         from purpory.supervise.structural import store_structural_graph
 
         store_structural_graph(
-            _graph_data(G, communities, community_labels=labels),
+            {
+                **_graph_data(G, communities, community_labels=labels),
+                "analysis": analysis,
+            },
             root=watch_path,
         )
         from purpory.paths import write_json_atomic as _wja
@@ -1558,7 +1569,7 @@ def dispatch_command(cmd: str) -> None:
         from typing import Optional as _Opt
         from purpory.tree_html import write_tree_html, DEFAULT_MAX_CHILDREN
 
-        graph_path = Path(_PURPORY_OUT) / "graph.json"
+        graph_path: Path | None = None
         output_path: "_Opt[Path]" = None
         root: "_Opt[str]" = None
         max_children = DEFAULT_MAX_CHILDREN
@@ -1601,15 +1612,19 @@ def dispatch_command(cmd: str) -> None:
                 return
             else:
                 i_arg += 1
-        if not graph_path.is_file():
-            print(f"error: graph.json not found at {graph_path}", file=sys.stderr)
+        try:
+            graph, _, explicit_graph = _load_graph_data(graph_path)
+        except Exception as exc:
+            print(f"error: could not load graph: {exc}", file=sys.stderr)
             sys.exit(1)
-        _enforce_graph_size_cap_or_exit(graph_path)
         if output_path is None:
-            output_path = graph_path.parent / "GRAPH_TREE.html"
+            output_path = (
+                explicit_graph.parent if explicit_graph is not None else Path(_PURPORY_OUT)
+            ) / "GRAPH_TREE.html"
         out = write_tree_html(
-            graph_path=graph_path,
+            graph_path=explicit_graph,
             output_path=output_path,
+            graph_data=graph,
             root=root,
             max_children=max_children,
             top_k_edges=top_k_edges,
@@ -1957,17 +1972,20 @@ def dispatch_command(cmd: str) -> None:
         labels_path = labels_path.expanduser()
         report_path = report_path.expanduser()
 
-        if not graph_path.exists():
-            print(
-                f"error: graph not found: {graph_path}. Run /purpory <path> first.", file=sys.stderr
+        try:
+            _raw, _, _explicit_graph = _load_graph_data(
+                graph_path if graph_path_explicit else None
             )
+        except Exception as exc:
+            print(f"error: could not load graph: {exc}", file=sys.stderr)
             sys.exit(1)
 
         if subcmd == "callflow-html":
             from purpory.callflow_html import write_callflow_html as _write_callflow_html
 
             out = _write_callflow_html(
-                graph=graph_path,
+                graph=_explicit_graph,
+                graph_data=_raw,
                 report=report_path,
                 labels=labels_path,
                 sections=sections_path,
@@ -1982,44 +2000,14 @@ def dispatch_command(cmd: str) -> None:
             print(f"callflow HTML written - open in any browser: {out}")
             sys.exit(0)
 
-        from networkx.readwrite import json_graph as _jg
-        from purpory.build import build_from_json as _bfj
-        from purpory.security import check_graph_file_size_cap as _check_cap
-
-        # Solution 3 (#1019): for the HTML view, an oversized graph.json should
-        # not be a hard error. Detect the over-cap condition here and fall back
-        # to the community-aggregation view (node_limit=5000) below instead of
-        # exiting 1. All other subcommands keep the hard cap.
-        _over_cap = False
-        try:
-            _check_cap(graph_path)
-        except ValueError as _cap_err:
-            if subcmd == "html":
-                _over_cap = True
-                try:
-                    _over_cap_bytes = graph_path.stat().st_size
-                except OSError:
-                    _over_cap_bytes = -1
-                print(
-                    f"warning: graph.json exceeds cap ({_over_cap_bytes} bytes); "
-                    f"falling back to community-aggregation view (node_limit=5000)",
-                    file=sys.stderr,
-                )
-            else:
-                print(f"error: {_cap_err}", file=sys.stderr)
-                sys.exit(1)
-        _raw = json.loads(graph_path.read_text(encoding="utf-8"))
-        if "links" not in _raw and "edges" in _raw:
-            _raw = dict(_raw, links=_raw["edges"])
-        try:
-            G = _jg.node_link_graph(_raw, edges="links")
-        except TypeError:
-            G = _jg.node_link_graph(_raw)
+        G = _networkx_graph(_raw)
 
         # Load optional analysis/labels
         communities: dict[int, list[str]] = {}
-        if analysis_path.exists():
+        _an = _raw.get("analysis")
+        if not isinstance(_an, dict) and analysis_path.exists():
             _an = json.loads(analysis_path.read_text(encoding="utf-8"))
+        if isinstance(_an, dict):
             communities = {int(k): v for k, v in _an.get("communities", {}).items()}
             cohesion: dict[int, float] = {int(k): v for k, v in _an.get("cohesion", {}).items()}
             gods_data = _an.get("gods", [])
@@ -2055,8 +2043,16 @@ def dispatch_command(cmd: str) -> None:
             labels = {
                 int(k): v for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()
             }
+        if not labels:
+            for _, data in G.nodes(data=True):
+                community = data.get("community")
+                name = data.get("community_name")
+                if community is None or not isinstance(name, str) or not name:
+                    continue
+                labels[int(community)] = name
 
-        out_dir = graph_path.parent
+        out_dir = _explicit_graph.parent if _explicit_graph is not None else Path(_PURPORY_OUT)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
         if subcmd == "html":
             from purpory.export import to_html as _to_html
@@ -2069,7 +2065,7 @@ def dispatch_command(cmd: str) -> None:
             else:
                 # Over-cap fallback (#1019): force the community-aggregation
                 # path so the oversized graph still renders a usable artifact.
-                _effective_node_limit = 5000 if _over_cap else node_limit
+                _effective_node_limit = node_limit
                 _to_html(
                     G,
                     communities,
@@ -2079,8 +2075,6 @@ def dispatch_command(cmd: str) -> None:
                 )
                 if G.number_of_nodes() <= _effective_node_limit:
                     print(f"graph.html written - open in any browser, no server needed")
-                if _over_cap:
-                    sys.exit(0)
 
         elif subcmd == "obsidian":
             from purpory.export import to_obsidian as _to_obsidian, to_canvas as _to_canvas
@@ -3274,10 +3268,6 @@ def dispatch_command(cmd: str) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        from purpory.export import graph_data as _graph_data
-        from purpory.supervise.structural import store_structural_graph
-
-        store_structural_graph(_graph_data(G, communities), root=target)
         stages.mark("export")
         if merged.get("output_tokens", 0) > 0:
             (purpory_out / ".purpory_semantic_marker").write_text(
@@ -3311,6 +3301,13 @@ def dispatch_command(cmd: str) -> None:
                 "output": merged["output_tokens"],
             },
         }
+        from purpory.export import graph_data as _graph_data
+        from purpory.supervise.structural import store_structural_graph
+
+        store_structural_graph(
+            {**_graph_data(G, communities), "analysis": analysis},
+            root=target,
+        )
         from purpory.paths import write_json_atomic as _wja
 
         _wja(analysis_path, analysis, indent=2)

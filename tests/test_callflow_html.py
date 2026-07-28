@@ -46,6 +46,9 @@ def _make_purpory_out(tmp_path: Path) -> Path:
         ),
         encoding="utf-8",
     )
+    from purpory.supervise.structural import store_structural_graph
+
+    store_structural_graph(graph, root=tmp_path)
     return out
 
 

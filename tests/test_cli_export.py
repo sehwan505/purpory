@@ -35,7 +35,8 @@ def _make_graph(tmp_path: Path) -> Path:
     from purpory.build import build_from_json
     from purpory.cluster import cluster, score_all
     from purpory.analyze import god_nodes, surprising_connections
-    from purpory.export import to_json
+    from purpory.export import graph_data, to_json
+    from purpory.supervise.structural import store_structural_graph
 
     G = build_from_json(extraction)
     communities = cluster(G)
@@ -55,6 +56,13 @@ def _make_graph(tmp_path: Path) -> Path:
     (out / ".purpory_analysis.json").write_text(json.dumps(analysis))
     (out / ".purpory_labels.json").write_text(
         json.dumps({str(k): v for k, v in labels.items()})
+    )
+    store_structural_graph(
+        {
+            **graph_data(G, communities, community_labels=labels),
+            "analysis": analysis,
+        },
+        root=tmp_path,
     )
     return out
 
@@ -122,7 +130,7 @@ def test_export_wiki_accepts_edges_only_graph_json(tmp_path):
     data["edges"] = data.pop("links")
     graph_path.write_text(json.dumps(data))
 
-    r = _run(["export", "wiki"], tmp_path)
+    r = _run(["export", "wiki", "--graph", str(graph_path)], tmp_path)
 
     assert r.returncode == 0, r.stderr
     assert (out / "wiki" / "index.md").exists()
@@ -369,7 +377,10 @@ def test_cluster_only_persists_analysis_sidecar(tmp_path):
     analysis_path = out / ".purpory_analysis.json"
     analysis_path.unlink()
 
-    r = _run(["cluster-only", ".", "--no-viz"], tmp_path)
+    r = _run(
+        ["cluster-only", ".", "--graph", str(out / "graph.json"), "--no-viz"],
+        tmp_path,
+    )
     assert r.returncode == 0, r.stderr
     assert analysis_path.exists()
 
@@ -418,7 +429,7 @@ def test_cluster_only_remaps_labels_to_previous_cids(tmp_path):
         encoding="utf-8",
     )
 
-    r = _run(["cluster-only", ".", "--no-viz"], tmp_path)
+    r = _run(["cluster-only", ".", "--graph", str(graph_json), "--no-viz"], tmp_path)
     assert r.returncode == 0, r.stderr
 
     # Real signal: labels.json keys must align with the community ids actually
@@ -459,7 +470,7 @@ def test_export_html_falls_back_to_node_community_attribute(tmp_path):
     # analysis sidecar is gone.
     (out / ".purpory_analysis.json").unlink()
 
-    r = _run(["export", "html"], tmp_path)
+    r = _run(["export", "html", "--graph", str(out / "graph.json")], tmp_path)
     assert r.returncode == 0, r.stderr
     html = out / "graph.html"
     assert html.exists(), "graph.html should be generated from the fallback"
@@ -494,7 +505,7 @@ def test_export_html_fallback_recovers_multiple_communities(tmp_path):
 
     # Now remove the sidecar and confirm the CLI still succeeds end-to-end.
     (out / ".purpory_analysis.json").unlink()
-    r = _run(["export", "html"], tmp_path)
+    r = _run(["export", "html", "--graph", str(out / "graph.json")], tmp_path)
     assert r.returncode == 0, r.stderr
     assert (out / "graph.html").exists()
 
@@ -515,7 +526,7 @@ def test_export_html_no_community_data_at_all_still_succeeds(tmp_path):
         n.pop("community", None)
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
 
-    r = _run(["export", "html"], tmp_path)
+    r = _run(["export", "html", "--graph", str(graph_path)], tmp_path)
     # Should NOT crash. It may print a warning and skip rendering, but exit
     # code stays clean — same behaviour as the pre-fallback empty-communities
     # path, just no longer silently failing on the common case.

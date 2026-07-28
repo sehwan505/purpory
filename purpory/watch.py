@@ -1222,7 +1222,19 @@ def _rebuild_code(
             labels_file.write_text(labels_json, encoding="utf-8")
         from purpory.supervise.structural import store_structural_graph
 
-        store_structural_graph(candidate_graph_data, root=project_root)
+        store_structural_graph(
+            {
+                **candidate_graph_data,
+                "analysis": {
+                    "communities": {str(k): v for k, v in communities.items()},
+                    "cohesion": {str(k): v for k, v in cohesion.items()},
+                    "gods": gods,
+                    "surprises": surprises,
+                    "questions": questions,
+                },
+            },
+            root=project_root,
+        )
 
         (out / ".purpory_root").write_text(str(watch_path), encoding="utf-8")
 
