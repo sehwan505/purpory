@@ -114,6 +114,28 @@ def test_export_root_selects_project_database_snapshot(tmp_path):
     assert json.loads(output.read_text(encoding="utf-8"))["nodes"][0]["id"] == "service"
 
 
+def test_export_prefers_sqlite_labels_to_legacy_sidecar(tmp_path):
+    out = _make_graph(tmp_path)
+    from purpory.supervise.structural import load_structural_graph, store_structural_graph
+
+    graph = load_structural_graph(tmp_path)
+    assert graph is not None
+    for node in graph["nodes"]:
+        if node.get("community") is not None:
+            node["community_name"] = f"SQLite Label {node['community']}"
+    store_structural_graph(graph, root=tmp_path)
+
+    result = _run(["export", "report", "--output", "report.md"], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "SQLite Label" in report
+    assert not any(
+        label in report
+        for label in json.loads((out / ".purpory_labels.json").read_text()).values()
+    )
+
+
 def test_export_html_creates_file(tmp_path):
     _make_graph(tmp_path)
     r = _run(["export", "html"], tmp_path)

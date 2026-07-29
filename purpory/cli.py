@@ -1966,18 +1966,15 @@ def dispatch_command(cmd: str) -> None:
             if reconstructed:
                 communities = reconstructed
 
-        labels: dict[int, str] = {}
-        if labels_path.exists():
+        labels = {
+            int(data["community"]): data["community_name"]
+            for _, data in G.nodes(data=True)
+            if data.get("community") is not None and data.get("community_name")
+        }
+        if not labels and labels_path.exists():
             labels = {
                 int(k): v for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()
             }
-        if not labels:
-            for _, data in G.nodes(data=True):
-                community = data.get("community")
-                name = data.get("community_name")
-                if community is None or not isinstance(name, str) or not name:
-                    continue
-                labels[int(community)] = name
 
         if subcmd == "report":
             from purpory.report import generate

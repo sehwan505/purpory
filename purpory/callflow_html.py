@@ -1900,6 +1900,13 @@ def write_callflow_html(
         graph_data if graph_data is not None else paths["graph"]
     )
     labels = load_labels(paths["labels"])
+    labels.update(
+        {
+            str(node["community"]): str(node["community_name"])
+            for node in nodes
+            if node.get("community") is not None and node.get("community_name")
+        }
+    )
     lang = detect_lang(args.lang, nodes, labels)
     if paths["sections"]:
         sections = load_sections(paths["sections"])
