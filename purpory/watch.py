@@ -867,7 +867,7 @@ def _rebuild_code(
                 code_files.append(p)
                 ast_doc_files.append(p)
 
-        existing_graph_data = load_structural_graph(project_root) or {}
+        existing_graph_data = load_structural_graph(watch_root) or {}
         if not code_files and not existing_graph_data:
             print("[purpory watch] No code files found - nothing to rebuild.")
             return False
@@ -1068,7 +1068,7 @@ def _rebuild_code(
                     return False
             from purpory.supervise.structural import store_structural_graph
 
-            store_structural_graph(candidate_graph_data, root=project_root)
+            store_structural_graph(candidate_graph_data, root=watch_root)
 
             (out / ".purpory_root").write_text(str(watch_path), encoding="utf-8")
 
@@ -1200,7 +1200,7 @@ def _rebuild_code(
                         "questions": questions,
                     },
                 },
-                root=project_root,
+                root=watch_root,
             )
 
         (out / ".purpory_root").write_text(str(watch_path), encoding="utf-8")
