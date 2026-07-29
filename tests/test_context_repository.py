@@ -696,6 +696,28 @@ def test_structural_graph_roundtrips_complete_snapshot(tmp_path: Path) -> None:
     }
 
 
+def test_structural_graph_edge_order_is_stable_across_replacements(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    graph = {
+        "nodes": [{"id": str(index)} for index in range(9)],
+        "links": [
+            {
+                "source": str(index),
+                "target": str((index * 3 + 2) % 9),
+                "relation": chr(97 + index),
+            }
+            for index in range(9)
+        ],
+    }
+
+    repository.replace_structural_graph(graph, project="demo")
+    first = repository.structural_graph(project="demo")
+    assert first is not None
+    repository.replace_structural_graph(first, project="demo")
+
+    assert repository.structural_graph(project="demo") == first
+
+
 def test_delivery_history_is_append_only_in_context_events(tmp_path: Path) -> None:
     repository = ContextGraphRepository(tmp_path / "context.db")
     repository.set_topic("decision.database", value="PostgreSQL", kind="decision")

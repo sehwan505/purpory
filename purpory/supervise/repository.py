@@ -1746,7 +1746,8 @@ class ContextGraphRepository:
             )
 
         edge_rows: list[tuple[Any, ...]] = []
-        for position, link in enumerate(links):
+        edge_occurrences: dict[str, int] = {}
+        for link in links:
             source_key = str(link.get("source", ""))
             target_key = str(link.get("target", ""))
             source_id = node_ids.get(source_key)
@@ -1754,12 +1755,12 @@ class ContextGraphRepository:
             if source_id is None or target_id is None:
                 continue
             relation = str(link.get("relation") or "related")
-            edge_identity = stable_json(
-                [normalized_project, source_key, target_key, relation, position, link]
-            )
+            edge_identity = stable_json([normalized_project, source_key, target_key, relation, link])
+            occurrence = edge_occurrences.get(edge_identity, 0)
+            edge_occurrences[edge_identity] = occurrence + 1
             edge_rows.append(
                 (
-                    hashlib.sha256(edge_identity.encode("utf-8")).hexdigest(),
+                    hashlib.sha256(f"{edge_identity}\0{occurrence}".encode("utf-8")).hexdigest(),
                     source_id,
                     target_id,
                     relation,
