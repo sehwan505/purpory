@@ -404,6 +404,7 @@ def test_diagnose_multigraph_cli_json_output(monkeypatch, tmp_path: Path, capsys
     [
         ([], "Usage: purpory diagnose multigraph"),
         (["wrong"], "Usage: purpory diagnose multigraph"),
+        (["multigraph"], "error: --graph is required for artifact diagnostics"),
         (["multigraph", "--graph"], "error: --graph requires a path"),
         (["multigraph", "--max-examples"], "error: --max-examples requires an integer"),
         (["multigraph", "--max-examples", "many"], "error: --max-examples requires an integer"),

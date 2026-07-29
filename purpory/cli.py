@@ -1027,7 +1027,7 @@ def dispatch_command(cmd: str) -> None:
             )
             sys.exit(1)
 
-            graph_path: Path | None = None
+        graph_path: Path | None = None
         max_examples = 5
         directed: bool | None = None
         direction_flag: str | None = None
