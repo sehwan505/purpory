@@ -560,18 +560,25 @@ def emit_html(
 
 
 def write_tree_html(
-    graph_path: Path,
+    graph_path: Path | None,
     output_path: Path,
     *,
+    graph_data: Dict[str, Any] | None = None,
     root: Optional[str] = None,
     max_children: int = DEFAULT_MAX_CHILDREN,
     project_label: Optional[str] = None,
     # kept for CLI compatibility with the older signature; ignored now
     top_k_edges: int = 0,
 ) -> Path:
-    from purpory.security import check_graph_file_size_cap
-    check_graph_file_size_cap(graph_path)
-    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    if graph_data is None:
+        if graph_path is None:
+            raise ValueError("graph_path or graph_data is required")
+        from purpory.security import check_graph_file_size_cap
+
+        check_graph_file_size_cap(graph_path)
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    else:
+        graph = graph_data
     tree = build_tree(graph, root=root, max_children=max_children,
                       project_label=project_label)
     title = f"{tree['name']} — purpory tree viewer"

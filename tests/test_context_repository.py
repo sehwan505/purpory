@@ -665,6 +665,59 @@ def test_code_memory_and_seed_links_share_one_context_graph(tmp_path: Path) -> N
     assert bounded["truncated"] is True
 
 
+def test_structural_graph_roundtrips_complete_snapshot(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    graph = {
+        "directed": True,
+        "built_at_commit": "abc123",
+        "nodes": [
+            {"id": "auth", "label": "Auth", "type": "class"},
+            {"id": "token", "label": "Token", "type": "class"},
+        ],
+        "links": [{"source": "auth", "target": "token", "relation": "calls"}],
+        "hyperedges": [{"id": "auth-flow", "nodes": ["auth", "token"]}],
+    }
+
+    result = repository.replace_structural_graph(graph, project="demo")
+    snapshot = repository.graph_snapshot(project="demo")
+
+    assert result["hyperedges"] == 1
+    assert repository.structural_graph(project="demo") == graph
+    assert snapshot is not None
+    assert snapshot == {
+        "project": "demo",
+        "sourcePath": "",
+        "contentHash": result["contentHash"],
+        "builtAtCommit": "abc123",
+        "nodeCount": 2,
+        "edgeCount": 1,
+        "hyperedgeCount": 1,
+        "importedAt": snapshot["importedAt"],
+    }
+
+
+def test_structural_graph_edge_order_is_stable_across_replacements(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    graph = {
+        "nodes": [{"id": str(index)} for index in range(9)],
+        "links": [
+            {
+                "source": str(index),
+                "target": str((index * 3 + 2) % 9),
+                "relation": chr(97 + index),
+            }
+            for index in range(9)
+        ],
+    }
+
+    repository.replace_structural_graph(graph, project="demo")
+    first = repository.structural_graph(project="demo")
+    assert first is not None
+    repository.replace_structural_graph(first, project="demo")
+
+    assert repository.structural_graph(project="demo") == first
+
+
 def test_delivery_history_is_append_only_in_context_events(tmp_path: Path) -> None:
     repository = ContextGraphRepository(tmp_path / "context.db")
     repository.set_topic("decision.database", value="PostgreSQL", kind="decision")

@@ -491,6 +491,7 @@ def extract_corpus_parallel(
     max_concurrency: int = 4,
     max_retry_depth: int = 3,
     deep_mode: bool = False,
+    cache_root: Path | None = None,
 ) -> dict:
     """Extract a corpus in chunks, merging results.
 
@@ -612,6 +613,7 @@ def extract_corpus_parallel(
                 # authoritative: pass the partial file set so its entry is
                 # stamped ``partial: True`` and re-dispatched next run.
                 partial_source_files=_partial_source_files(result) or None,
+                cache_root=cache_root,
             )
         except Exception as _exc:  # noqa: BLE001 — checkpoint is best-effort
             print(f"[purpory] incremental cache checkpoint failed: {_exc}", file=sys.stderr)

@@ -14,9 +14,9 @@ def _make_purpory_out(tmp_path: Path) -> Path:
         "multigraph": False,
         "graph": {},
         "nodes": [
-            {"id": "api", "label": "ApiClient", "source_file": "src/api.py", "file_type": "code", "community": 0},
+            {"id": "api", "label": "ApiClient", "source_file": "src/api.py", "file_type": "code", "community": 0, "community_name": "SQLite Runtime"},
             {"id": "run", "label": "run()", "source_file": "src/main.py", "file_type": "code", "community": 0},
-            {"id": "export", "label": "write_html()", "source_file": "src/export.py", "file_type": "code", "community": 1},
+            {"id": "export", "label": "write_html()", "source_file": "src/export.py", "file_type": "code", "community": 1, "community_name": "SQLite Export"},
             {"id": "evil", "label": "<script>alert(1)</script>", "source_file": "src/evil.py", "file_type": "code", "community": 1},
         ],
         "links": [
@@ -46,6 +46,9 @@ def _make_purpory_out(tmp_path: Path) -> Path:
         ),
         encoding="utf-8",
     )
+    from purpory.supervise.structural import store_structural_graph
+
+    store_structural_graph(graph, root=tmp_path)
     return out
 
 
@@ -64,6 +67,7 @@ def test_write_callflow_html_creates_file_and_uses_report(tmp_path):
     assert "Graph Report Highlights" in content
     assert "Transformer" in content
     assert "ApiClient" in content
+    assert "SQLite Runtime" in content
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in content
     assert "<script>alert(1)</script>" not in content
 

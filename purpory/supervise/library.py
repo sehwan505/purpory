@@ -54,17 +54,8 @@ class ContextService:
     def _selected_project(self, project: str | None = None) -> str:
         return resolve_project_id(self.root, project) if project else self.project_id
 
-    def _ensure_graph_imported(self, project: str | None = None) -> bool:
-        if not self.graph_path.is_file():
-            return False
-        self.repository.import_graph(
-            self.graph_path,
-            project=self._selected_project(project),
-        )
-        return True
-
     def sync_graph(self) -> dict[str, Any]:
-        """Synchronize the current structural artifact into canonical storage."""
+        """Explicitly import the configured graph artifact into canonical storage."""
         if not self.graph_path.is_file():
             return {
                 "imported": False,
@@ -91,7 +82,6 @@ class ContextService:
         )
 
     def view(self, *, session_id: str | None = None, since: int | None = None) -> dict[str, Any]:
-        self._ensure_graph_imported()
         return {
             "project": self.project_id,
             "topics": self.repository.topic_view(
@@ -105,8 +95,6 @@ class ContextService:
         topic = self.repository.get_topic(key, project=self.project_id)
         if topic is None:
             raise KeyError(f"topic not found: {key}")
-        if topic.get("kind") == "code-area":
-            self._ensure_graph_imported()
         resolved = resolve_topic(
             topic,
             root=self.root,
@@ -389,14 +377,6 @@ class ContextService:
         node_limit: int = 200,
         edge_limit: int = 500,
     ) -> dict[str, Any]:
-        if not self._ensure_graph_imported():
-            return {
-                "nodes": [],
-                "links": [],
-                "totalNodes": 0,
-                "totalLinks": 0,
-                "truncated": False,
-            }
         return self.repository.graph_payload(
             project=self.project_id,
             scope=scope,
@@ -410,7 +390,6 @@ class ContextService:
         session_id: str | None = None,
         project: str | None = None,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported(project)
         return self._provisioner(project).catalog(session_id=current_session_id(session_id))
 
     def search(
@@ -425,7 +404,6 @@ class ContextService:
         limit: int = 12,
         connect: bool = True,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported(project)
         return self._provisioner(project).search(
             query,
             session_id=current_session_id(session_id),
@@ -446,7 +424,6 @@ class ContextService:
         node_limit: int = 100,
         include_experiential: bool = False,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported(project)
         return self._provisioner(project).expand(
             node_ids,
             depth=depth,
@@ -465,7 +442,6 @@ class ContextService:
         relations: Sequence[str] = (),
         include_experiential: bool = False,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported(project)
         return self._provisioner(project).path(
             source_id,
             target_id,
@@ -482,7 +458,6 @@ class ContextService:
         project: str | None = None,
         token_budget: int = 2_000,
     ) -> dict[str, Any]:
-        self._ensure_graph_imported(project)
         return self._provisioner(project).deliver(
             node_ids,
             session_id=current_session_id(session_id),
@@ -508,7 +483,6 @@ class ContextService:
             provider = QwenGateProvider.from_environment()
         session = current_session_id(session_id)
         selected_project = self._selected_project(project)
-        self._ensure_graph_imported(selected_project)
         gateway = GatewayService(
             repository=self.repository,
             root=self.root,

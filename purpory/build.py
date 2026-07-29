@@ -975,12 +975,13 @@ def build_merge(
     graph_path: str | Path | None = None,
     prune_sources: list[str] | None = None,
     *,
+    graph_data: dict | None = None,
     directed: bool = False,
     dedup: bool = True,
     dedup_llm_backend: str | None = None,
     root: str | Path | None = None,
 ) -> nx.Graph:
-    """Load existing graph.json, merge new chunks into it, and save back.
+    """Merge new chunks into an existing structural graph.
 
     Re-extracted files REPLACE their prior contribution: any source_file present
     in new_chunks is dropped from the loaded graph before merging, so a changed
@@ -989,8 +990,19 @@ def build_merge(
     Safe to call repeatedly.
     root: if given, absolute source_file paths in new_chunks are made relative (#932).
     """
-    graph_path = Path(graph_path if graph_path is not None else _default_graph_json())
-    if graph_path.exists():
+    resolved_graph_path = (
+        Path(graph_path if graph_path is not None else _default_graph_json())
+        if graph_data is None
+        else None
+    )
+    if graph_data is not None:
+        data = graph_data
+        links_key = "links" if "links" in data else "edges"
+        existing_nodes = list(data.get("nodes", []))
+        existing_edges = list(data.get(links_key, []))
+        existing_hyperedges = list(data.get("hyperedges", []))
+        had_graph = True
+    elif resolved_graph_path is not None and resolved_graph_path.exists():
         # Read JSON directly instead of going through node_link_graph().
         # The latter rebuilds an undirected nx.Graph and then enumerating
         # edges() yields endpoints based on node insertion order, which
@@ -1000,12 +1012,12 @@ def build_merge(
         # NetworkX round-trip loses direction permanently (#760).
         from purpory.security import check_graph_file_size_cap
 
-        check_graph_file_size_cap(graph_path)
+        check_graph_file_size_cap(resolved_graph_path)
         try:
-            data = json.loads(graph_path.read_text(encoding="utf-8"))
+            data = json.loads(resolved_graph_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             raise RuntimeError(
-                f"Cannot read {graph_path} for incremental merge: {exc}. "
+                f"Cannot read {resolved_graph_path} for incremental merge: {exc}. "
                 "Delete the file and run a full rebuild."
             ) from exc
         links_key = "links" if "links" in data else "edges"
@@ -1026,7 +1038,11 @@ def build_merge(
     # (#1571 — the skill's --update runbook calls build_merge without root, so
     # absolute deleted-file paths never matched the relative node keys and their
     # nodes survived as ghosts).
-    _eff_root = str(Path(root).resolve()) if root is not None else _infer_merge_root(graph_path)
+    _eff_root = (
+        str(Path(root).resolve())
+        if root is not None
+        else _infer_merge_root(resolved_graph_path or Path.cwd())
+    )
 
     # Re-extracted files REPLACE their prior contribution. Every source_file
     # present in new_chunks is dropped from the loaded base before merging, so a
@@ -1141,7 +1157,7 @@ def build_merge(
 
     # Safety check: refuse to shrink the graph silently (#479)
     # Skip when dedup or prune_sources is active — shrinkage is intentional there.
-    if graph_path.exists() and not dedup and not prune_sources:
+    if had_graph and not dedup and not prune_sources:
         existing_n = len(existing_nodes)
         new_n = G.number_of_nodes()
         if new_n < existing_n:

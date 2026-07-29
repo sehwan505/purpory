@@ -40,6 +40,16 @@ def _make_docs_corpus(tmp_path: Path) -> Path:
     return docs
 
 
+def _export_graph(project: Path) -> Path:
+    graph_path = project.parent / f"{project.name}-graph.json"
+    result = _run(
+        ["export", "json", "--output", str(graph_path)],
+        project,
+    )
+    assert result.returncode == 0, result.stderr
+    return graph_path
+
+
 def test_manifest_written_after_extract(tmp_path):
     """After a full extract run, manifest.json must exist (or run fails before writing it)."""
     docs = _make_docs_corpus(tmp_path)
@@ -84,7 +94,7 @@ def test_extract_no_cluster_incremental_noop_preserves_existing_graph(tmp_path):
 
     first = _run(["extract", str(project), "--no-cluster"], tmp_path)
     assert first.returncode == 0, first.stderr
-    graph_path = project / "purpory-out" / "graph.json"
+    graph_path = _export_graph(project)
     before_text = graph_path.read_text(encoding="utf-8")
     before = json.loads(before_text)
     assert before.get("nodes"), "first run should produce a non-empty code graph"
@@ -92,6 +102,7 @@ def test_extract_no_cluster_incremental_noop_preserves_existing_graph(tmp_path):
     second = _run(["extract", str(project), "--no-cluster"], tmp_path)
     assert second.returncode == 0, second.stderr
 
+    graph_path = _export_graph(project)
     after_text = graph_path.read_text(encoding="utf-8")
     after = json.loads(after_text)
     assert after.get("nodes"), "no-op incremental run must not empty the graph"
@@ -116,7 +127,7 @@ def test_update_prunes_a_removed_imports_edge(tmp_path):
     # initial extract -> the import edge a -> b exists
     r1 = _run(["extract", str(proj), "--no-cluster"], tmp_path)
     assert r1.returncode == 0, r1.stderr
-    gj = proj / "purpory-out" / "graph.json"
+    gj = _export_graph(proj)
     before = _edges(gj)
     assert any(e.get("relation") in ("imports", "imports_from") and
                str(e.get("source_file", "")).endswith("a.py") for e in before), \
@@ -126,6 +137,7 @@ def test_update_prunes_a_removed_imports_edge(tmp_path):
     (pkg / "a.py").write_text("def use():\n    return 1\n")
     r2 = _run(["update", str(proj)], tmp_path)
     assert r2.returncode == 0, r2.stderr
+    gj = _export_graph(proj)
     after = _edges(gj)
 
     # the stale import edge owned by a.py must be gone

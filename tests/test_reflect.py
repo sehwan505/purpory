@@ -32,6 +32,13 @@ from purpory.reflect import (
 PYTHON = sys.executable
 FIXTURES = Path(__file__).parent / "fixtures"
 
+
+def _state_out(root: Path) -> Path:
+    from purpory.supervise.structural import project_state_directory
+
+    return project_state_directory(root) / "purpory-out"
+
+
 # Fixed clock so time-decay scoring is byte-stable in tests (reflect/aggregate take `now`).
 _NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
@@ -465,7 +472,7 @@ def test_cli_reflect_end_to_end(tmp_path):
     r2 = _run(["reflect"], cwd)
     assert r2.returncode == 0, r2.stderr
     assert "Reflected 1 memories" in r2.stdout
-    lessons = cwd / "purpory-out" / "reflections" / "LESSONS.md"
+    lessons = _state_out(cwd) / "reflections" / "LESSONS.md"
     assert lessons.exists()
     assert "`AuthMiddleware`" in lessons.read_text(encoding="utf-8")
 
@@ -486,7 +493,7 @@ def test_cli_save_result_reads_answer_from_file(tmp_path):
     r = _run(["save-result", "--question", "how does auth work?",
               "--answer-file", str(ans), "--outcome", "useful"], tmp_path)
     assert r.returncode == 0, r.stderr
-    docs = list((tmp_path / "purpory-out" / "memory").glob("*.md"))
+    docs = list((_state_out(tmp_path) / "memory").glob("*.md"))
     assert docs, "save-result wrote no memory doc"
     body = docs[0].read_text(encoding="utf-8")
     assert "line one" in body and "line two" in body
@@ -504,7 +511,7 @@ def test_cli_reflect_cold_start_writes_empty_lessons(tmp_path):
     r = _run(["reflect"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert "Reflected 0 memories" in r.stdout
-    lessons = tmp_path / "purpory-out" / "reflections" / "LESSONS.md"
+    lessons = _state_out(tmp_path) / "reflections" / "LESSONS.md"
     assert lessons.exists()
     assert "from 0 session memories" in lessons.read_text(encoding="utf-8")
 
@@ -532,7 +539,7 @@ def test_cli_reflect_groups_by_community_when_graph_present(tmp_path):
           "--nodes", node_label, "--outcome", "useful"], tmp_path)
     r = _run(["reflect"], tmp_path)
     assert r.returncode == 0, r.stderr
-    body = (out / "reflections" / "LESSONS.md").read_text(encoding="utf-8")
+    body = (_state_out(tmp_path) / "reflections" / "LESSONS.md").read_text(encoding="utf-8")
     assert "## By topic" in body
     # The label-cited node must land in a real community, not Uncategorized.
     assert "### Uncategorized" not in body
@@ -552,7 +559,7 @@ def test_cli_node_existence_gate_drops_stale_node_end_to_end(tmp_path):
           "--nodes", real, "GhostNode", "--outcome", "useful"], tmp_path)
     r = _run(["reflect"], tmp_path)
     assert r.returncode == 0, r.stderr
-    body = (out / "reflections" / "LESSONS.md").read_text(encoding="utf-8")
+    body = (_state_out(tmp_path) / "reflections" / "LESSONS.md").read_text(encoding="utf-8")
     assert "GhostNode" not in body
     assert f"`{real}`" in body
 
@@ -569,7 +576,8 @@ def _make_graph(tmp_path: Path) -> Path:
     from purpory.build import build_from_json
     from purpory.cluster import cluster, score_all
     from purpory.analyze import god_nodes, surprising_connections
-    from purpory.export import to_json
+    from purpory.export import graph_data, to_json
+    from purpory.supervise.structural import store_structural_graph
 
     G = build_from_json(extraction)
     communities = cluster(G)
@@ -577,13 +585,17 @@ def _make_graph(tmp_path: Path) -> Path:
     gods = god_nodes(G)
     surprises = surprising_connections(G, communities)
     to_json(G, communities, str(out / "graph.json"))
-    (out / ".purpory_analysis.json").write_text(json.dumps({
+    analysis = {
         "communities": {str(k): v for k, v in communities.items()},
         "cohesion": {str(k): v for k, v in cohesion.items()},
         "gods": gods, "surprises": surprises,
-    }))
-    (out / ".purpory_labels.json").write_text(
-        json.dumps({str(cid): f"Community {cid}" for cid in communities})
+    }
+    labels = {cid: f"Community {cid}" for cid in communities}
+    (out / ".purpory_analysis.json").write_text(json.dumps(analysis))
+    (out / ".purpory_labels.json").write_text(json.dumps(labels))
+    store_structural_graph(
+        {**graph_data(G, communities, community_labels=labels), "analysis": analysis},
+        root=tmp_path,
     )
     return out
 
@@ -653,7 +665,7 @@ def test_cli_reflect_if_stale_skips_when_fresh(tmp_path):
           "--nodes", real, "--outcome", "useful"], tmp_path)
     first = _run(["reflect"], tmp_path)
     assert first.returncode == 0
-    lessons = out / "reflections" / "LESSONS.md"
+    lessons = _state_out(tmp_path) / "reflections" / "LESSONS.md"
     body_before = lessons.read_text(encoding="utf-8")
 
     # Second call with --if-stale: nothing changed -> skipped, file untouched.
@@ -682,15 +694,18 @@ def test_cli_reflect_if_stale_reruns_when_labels_newer(tmp_path):
     first = _run(["reflect"], tmp_path)
     assert first.returncode == 0, first.stderr
 
-    lessons = out / "reflections" / "LESSONS.md"
-    labels_path = out / ".purpory_labels.json"
-    labels = json.loads(labels_path.read_text(encoding="utf-8"))
-    labels[community] = "Renamed Topic"
-    labels_path.write_text(json.dumps(labels), encoding="utf-8")
+    lessons = _state_out(tmp_path) / "reflections" / "LESSONS.md"
+    from purpory.supervise.structural import load_structural_graph, store_structural_graph
+
+    stored = load_structural_graph(tmp_path)
+    assert stored is not None
+    for stored_node in stored["nodes"]:
+        if str(stored_node.get("community")) == community:
+            stored_node["community_name"] = "Renamed Topic"
+    store_structural_graph(stored, root=tmp_path)
 
     import os
     os.utime(lessons, (1500, 1500))
-    os.utime(labels_path, (2000, 2000))
     ran = _run(["reflect", "--if-stale"], tmp_path)
     assert ran.returncode == 0, ran.stderr
     assert "up to date" not in (ran.stdout + ran.stderr).lower()

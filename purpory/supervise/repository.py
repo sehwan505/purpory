@@ -1,9 +1,9 @@
 """Canonical SQLite repository for Purpory's unified context graph.
 
 Code structure, human knowledge, and session activity share one node/edge model.
-Indexed operational projections support bounded reads while graph.json remains an
-import/export artifact. The module intentionally depends only on the Python
-standard library.
+Indexed operational projections support bounded reads while graph files remain
+optional import/export artifacts. The module intentionally depends only on the
+Python standard library.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any, Iterator, Sequence
 from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 
 DEFAULT_DB_PATH = Path.home() / ".purpory" / "context.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MEMORY_NAMESPACE = "memory"
 TOPIC_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)*$")
 TOPIC_KINDS = frozenset({"note", "code-area", "doc-ref", "decision", "seeded"})
@@ -174,6 +174,8 @@ class ContextGraphRepository:
                     built_at_commit TEXT,
                     node_count INTEGER NOT NULL,
                     edge_count INTEGER NOT NULL,
+                    hyperedge_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     imported_at INTEGER NOT NULL
                 );
 
@@ -298,6 +300,20 @@ class ContextGraphRepository:
 
                 """
             )
+            graph_snapshot_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(graph_snapshots)").fetchall()
+            }
+            if "hyperedge_count" not in graph_snapshot_columns:
+                connection.execute(
+                    "ALTER TABLE graph_snapshots "
+                    "ADD COLUMN hyperedge_count INTEGER NOT NULL DEFAULT 0"
+                )
+            if "metadata_json" not in graph_snapshot_columns:
+                connection.execute(
+                    "ALTER TABLE graph_snapshots "
+                    "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+                )
             self._initialize_views(connection)
             self._initialize_fts(connection)
             connection.executescript(
@@ -1609,7 +1625,7 @@ class ContextGraphRepository:
         ]
 
     def import_graph(self, graph_path: str | Path, *, project: str) -> dict[str, Any]:
-        """Import a complete graph artifact as the structural graph snapshot."""
+        """Import a complete graph artifact into the canonical structural graph."""
         normalized_project = project.strip()
         if not normalized_project:
             raise ValueError("project cannot be empty")
@@ -1634,21 +1650,71 @@ class ContextGraphRepository:
                 "project": normalized_project,
                 "nodes": int(snapshot["node_count"]),
                 "edges": int(snapshot["edge_count"]),
+                "hyperedges": int(snapshot["hyperedge_count"]),
                 "contentHash": snapshot["content_hash"],
             }
 
         raw_bytes = path.read_bytes()
         digest = hashlib.sha256(raw_bytes).hexdigest()
         value = json.loads(raw_bytes.decode("utf-8"))
-        if not isinstance(value, dict) or not isinstance(value.get("nodes"), list):
-            raise ValueError("graph artifact must contain a nodes list")
-        nodes = [node for node in value["nodes"] if isinstance(node, dict)]
-        links_value = value.get("links", value.get("edges", []))
+        return self.replace_structural_graph(
+            value,
+            project=normalized_project,
+            source_path=path,
+            source_mtime_ns=stat.st_mtime_ns,
+            source_size=stat.st_size,
+            content_hash=digest,
+            event_type="graph.imported",
+        )
+
+    def replace_structural_graph(
+        self,
+        graph: dict[str, Any],
+        *,
+        project: str,
+        source_path: str | Path | None = None,
+        source_mtime_ns: int = 0,
+        source_size: int = 0,
+        content_hash: str | None = None,
+        event_type: str = "graph.replaced",
+    ) -> dict[str, Any]:
+        """Atomically replace a project's canonical structural graph."""
+        normalized_project = project.strip()
+        if not normalized_project:
+            raise ValueError("project cannot be empty")
+        if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+            raise ValueError("graph must contain a nodes list")
+        nodes = [node for node in graph["nodes"] if isinstance(node, dict)]
+        links_value = graph.get("links", graph.get("edges", []))
         links = (
             [link for link in links_value if isinstance(link, dict)]
             if isinstance(links_value, list)
             else []
         )
+        hyperedges_value = graph.get("hyperedges", [])
+        hyperedges = (
+            [hyperedge for hyperedge in hyperedges_value if isinstance(hyperedge, dict)]
+            if isinstance(hyperedges_value, list)
+            else []
+        )
+        metadata = {
+            key: value
+            for key, value in graph.items()
+            if key not in {"nodes", "links", "edges", "hyperedges"}
+        }
+        normalized_source = (
+            str(Path(source_path).expanduser().resolve()) if source_path is not None else ""
+        )
+        digest = content_hash or hashlib.sha256(
+            stable_json(
+                {
+                    **metadata,
+                    "nodes": nodes,
+                    "links": links,
+                    "hyperedges": hyperedges,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
         timestamp = _now()
         node_rows: list[tuple[Any, ...]] = []
         node_ids: dict[str, str] = {}
@@ -1672,7 +1738,7 @@ class ContextGraphRepository:
                     source,
                     stable_json(node),
                     external_id,
-                    str(path),
+                    normalized_source or None,
                     timestamp,
                     timestamp,
                     timestamp,
@@ -1680,7 +1746,8 @@ class ContextGraphRepository:
             )
 
         edge_rows: list[tuple[Any, ...]] = []
-        for position, link in enumerate(links):
+        edge_occurrences: dict[str, int] = {}
+        for link in links:
             source_key = str(link.get("source", ""))
             target_key = str(link.get("target", ""))
             source_id = node_ids.get(source_key)
@@ -1688,12 +1755,12 @@ class ContextGraphRepository:
             if source_id is None or target_id is None:
                 continue
             relation = str(link.get("relation") or "related")
-            edge_identity = stable_json(
-                [normalized_project, source_key, target_key, relation, position, link]
-            )
+            edge_identity = stable_json([normalized_project, source_key, target_key, relation, link])
+            occurrence = edge_occurrences.get(edge_identity, 0)
+            edge_occurrences[edge_identity] = occurrence + 1
             edge_rows.append(
                 (
-                    hashlib.sha256(edge_identity.encode("utf-8")).hexdigest(),
+                    hashlib.sha256(f"{edge_identity}\0{occurrence}".encode("utf-8")).hexdigest(),
                     source_id,
                     target_id,
                     relation,
@@ -1736,8 +1803,8 @@ class ContextGraphRepository:
                 INSERT INTO graph_snapshots(
                     project, source_path, source_mtime_ns, source_size,
                     content_hash, built_at_commit, node_count, edge_count,
-                    imported_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    hyperedge_count, metadata_json, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project) DO UPDATE SET
                     source_path = excluded.source_path,
                     source_mtime_ns = excluded.source_mtime_ns,
@@ -1746,30 +1813,35 @@ class ContextGraphRepository:
                     built_at_commit = excluded.built_at_commit,
                     node_count = excluded.node_count,
                     edge_count = excluded.edge_count,
+                    hyperedge_count = excluded.hyperedge_count,
+                    metadata_json = excluded.metadata_json,
                     imported_at = excluded.imported_at
                 """,
                 (
                     normalized_project,
-                    str(path),
-                    stat.st_mtime_ns,
-                    stat.st_size,
+                    normalized_source,
+                    int(source_mtime_ns),
+                    int(source_size),
                     digest,
-                    value.get("built_at_commit"),
+                    graph.get("built_at_commit"),
                     len(node_rows),
                     len(edge_rows),
+                    len(hyperedges),
+                    stable_json({**metadata, "hyperedges": hyperedges}),
                     timestamp,
                 ),
             )
             self._restore_seed_links(connection, normalized_project, timestamp)
             self._record_event(
                 connection,
-                "graph.imported",
+                event_type,
                 project=normalized_project,
                 payload={
-                    "source": str(path),
+                    "source": normalized_source or None,
                     "contentHash": digest,
                     "nodes": len(node_rows),
                     "edges": len(edge_rows),
+                    "hyperedges": len(hyperedges),
                 },
                 occurred_at=timestamp,
             )
@@ -1779,7 +1851,62 @@ class ContextGraphRepository:
             "project": normalized_project,
             "nodes": len(node_rows),
             "edges": len(edge_rows),
+            "hyperedges": len(hyperedges),
             "contentHash": digest,
+        }
+
+    def structural_graph(self, *, project: str) -> dict[str, Any] | None:
+        normalized_project = project.strip()
+        if not normalized_project:
+            raise ValueError("project cannot be empty")
+        with self.connect() as connection:
+            snapshot = connection.execute(
+                "SELECT metadata_json FROM graph_snapshots WHERE project = ?",
+                (normalized_project,),
+            ).fetchone()
+            if snapshot is None:
+                return None
+            node_rows = connection.execute(
+                """
+                SELECT stable_key, properties_json
+                FROM context_nodes
+                WHERE namespace = 'code' AND project = ?
+                ORDER BY stable_key
+                """,
+                (normalized_project,),
+            ).fetchall()
+            edge_rows = connection.execute(
+                """
+                SELECT edge.properties_json,
+                       source.stable_key AS source_key,
+                       target.stable_key AS target_key
+                FROM context_edges edge
+                JOIN context_nodes source ON source.id = edge.source_id
+                JOIN context_nodes target ON target.id = edge.target_id
+                WHERE edge.origin = 'structural'
+                  AND source.project = ? AND target.project = ?
+                ORDER BY edge.id
+                """,
+                (normalized_project, normalized_project),
+            ).fetchall()
+        stored_metadata = json.loads(snapshot["metadata_json"])
+        hyperedges = stored_metadata.pop("hyperedges", [])
+        nodes: list[dict[str, Any]] = []
+        for row in node_rows:
+            node = json.loads(row["properties_json"])
+            node["id"] = row["stable_key"]
+            nodes.append(node)
+        links: list[dict[str, Any]] = []
+        for row in edge_rows:
+            link = json.loads(row["properties_json"])
+            link["source"] = row["source_key"]
+            link["target"] = row["target_key"]
+            links.append(link)
+        return {
+            **stored_metadata,
+            "nodes": nodes,
+            "links": links,
+            "hyperedges": hyperedges,
         }
 
     def graph_payload(
@@ -2164,6 +2291,7 @@ class ContextGraphRepository:
             "builtAtCommit": row["built_at_commit"],
             "nodeCount": row["node_count"],
             "edgeCount": row["edge_count"],
+            "hyperedgeCount": row["hyperedge_count"],
             "importedAt": row["imported_at"],
         }
 

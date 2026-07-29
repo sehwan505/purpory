@@ -52,6 +52,7 @@ def test_environment_override_is_the_single_default_project_id(tmp_path: Path, m
 def test_explicit_prepare_project_scopes_graph_and_audit_together(tmp_path: Path) -> None:
     _write_graph(tmp_path)
     service = ContextService(db_path=tmp_path / "context.db", root=tmp_path)
+    service.repository.import_graph(service.graph_path, project="alternate/project")
 
     service.prepare(
         "Where is Service?",

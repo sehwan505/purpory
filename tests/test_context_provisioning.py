@@ -54,6 +54,7 @@ def _service_with_graph(tmp_path: Path) -> ContextService:
         encoding="utf-8",
     )
     service = ContextService(db_path=tmp_path / "context.db", root=tmp_path)
+    service.sync_graph()
     service.set_topic(
         "decision.auth.ttl",
         value="Access tokens expire after thirty minutes",
@@ -346,7 +347,7 @@ def test_prepare_includes_ready_context_without_public_primitives(
     assert "continuation" not in result["context"]
 
 
-def test_view_synchronizes_structural_graph_before_reporting_diagnostics(
+def test_view_reports_explicitly_imported_structural_graph(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "purpory-out"
@@ -364,6 +365,7 @@ def test_view_synchronizes_structural_graph_before_reporting_diagnostics(
         encoding="utf-8",
     )
     service = ContextService(db_path=tmp_path / "context.db", root=tmp_path)
+    service.sync_graph()
 
     view = service.view()
 
