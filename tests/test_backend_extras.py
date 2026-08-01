@@ -34,10 +34,12 @@ def test_anthropic_in_all_extra():
     assert any("anthropic" in dep for dep in extras["all"]), "[all] must include anthropic"
 
 
-def test_gate_extra_includes_transformers_runtime_imports():
+def test_gate_extra_only_declares_the_runtime_it_uses_directly():
     extras = _extras()
-    assert any(dep.startswith("requests") for dep in extras["gate"])
-    assert any(dep.startswith("requests") for dep in extras["all"])
+    assert extras["gate"] == ["transformers[serving]>=5.14.1,<6"]
+    assert not {"requests", "torchvision", "pillow"} & {
+        dep.split("[")[0].split(">=")[0] for dep in extras["all"]
+    }
 
 
 def test_backend_pkg_hint_points_at_uv_tool_and_extra():

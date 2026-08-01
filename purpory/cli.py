@@ -313,7 +313,7 @@ def _enforce_graph_size_cap_or_exit(gp: Path) -> None:
     Use this from ``__main__.py`` subcommands that already use the ``print +
     sys.exit(1)`` idiom. Library/MCP/loader callers (``serve._load_graph``,
     ``build``, ``benchmark``, ``tree_html``, ``callflow_html``, ``prs``,
-    ``global_graph``, ``watch``, ``export``) call the security helper directly
+    ``watch``, ``export``) call the security helper directly
     and let the ``ValueError`` propagate.
     """
     from purpory.security import check_graph_file_size_cap
@@ -718,122 +718,6 @@ def dispatch_command(cmd: str) -> None:
                 depth=depth,
             )
         )
-    elif cmd == "save-result":
-        # purpory save-result --question Q --answer A [--type T] [--nodes N1 N2 ...]
-        #                      [--outcome useful|dead_end|corrected] [--correction TEXT]
-        import argparse as _ap
-        from purpory.supervise.structural import project_state_directory
-
-        state_out = project_state_directory(".") / _PURPORY_OUT
-
-        p = _ap.ArgumentParser(prog="purpory save-result")
-        p.add_argument("--question", required=True)
-        p.add_argument("--answer", default=None)
-        p.add_argument("--answer-file", dest="answer_file", default=None)
-        p.add_argument("--type", dest="query_type", default="query")
-        p.add_argument("--nodes", nargs="*", default=[])
-        p.add_argument("--outcome", choices=("useful", "dead_end", "corrected"), default=None)
-        p.add_argument("--correction", default=None)
-        p.add_argument("--memory-dir", default=str(state_out / "memory"))
-        opts = p.parse_args(sys.argv[2:])
-        if opts.answer_file:
-            opts.answer = Path(opts.answer_file).read_text(encoding="utf-8").strip()
-        elif not opts.answer:
-            p.error("--answer or --answer-file is required")
-        from purpory.ingest import save_query_result as _sqr
-
-        out = _sqr(
-            question=opts.question,
-            answer=opts.answer,
-            memory_dir=Path(opts.memory_dir),
-            query_type=opts.query_type,
-            source_nodes=opts.nodes or None,
-            outcome=opts.outcome,
-            correction=opts.correction,
-        )
-        print(f"Saved to {out}")
-    elif cmd == "reflect":
-        import argparse as _ap
-        from purpory.supervise.structural import project_state_directory
-
-        state_out = project_state_directory(".") / _PURPORY_OUT
-
-        p = _ap.ArgumentParser(prog="purpory reflect")
-        p.add_argument("--memory-dir", default=str(state_out / "memory"))
-        p.add_argument(
-            "--out",
-            default=str(state_out / "reflections" / "LESSONS.md"),
-        )
-        p.add_argument("--graph", default=None)
-        p.add_argument("--analysis", default=None)
-        p.add_argument("--labels", default=None)
-        p.add_argument(
-            "--half-life-days",
-            type=float,
-            default=30.0,
-            help="signal weight halves every N days (default 30)",
-        )
-        p.add_argument(
-            "--min-corroboration",
-            type=int,
-            default=2,
-            help="distinct useful results to promote a node to preferred (default 2)",
-        )
-        p.add_argument(
-            "--if-stale",
-            action="store_true",
-            help="skip when LESSONS.md is already newer than every input "
-            "(e.g. the git hook just refreshed it)",
-        )
-        opts = p.parse_args(sys.argv[2:])
-        from purpory.reflect import reflect as _reflect, lessons_fresh as _lessons_fresh
-
-        graph_arg = opts.graph
-        _gp = Path(graph_arg) if graph_arg else None
-        graph_data = None
-        graph_freshness_path = _gp
-        if _gp is None:
-            from purpory.supervise.repository import ContextGraphRepository
-            from purpory.supervise.structural import load_structural_graph
-
-            graph_data = load_structural_graph(".")
-            if graph_data is not None:
-                graph_freshness_path = ContextGraphRepository().path
-        _analysis_path = None
-        _labels_path = None
-        if _gp is not None:
-            _analysis_path = (
-                Path(opts.analysis) if opts.analysis else (_gp.parent / ".purpory_analysis.json")
-            )
-            _labels_path = (
-                Path(opts.labels) if opts.labels else (_gp.parent / ".purpory_labels.json")
-            )
-
-        if opts.if_stale and _lessons_fresh(
-            Path(opts.out),
-            Path(opts.memory_dir),
-            graph_freshness_path,
-            _analysis_path,
-            _labels_path,
-        ):
-            print(f"Lessons already up to date -> {opts.out} (skipped; omit --if-stale to force)")
-        else:
-            out_path, agg = _reflect(
-                memory_dir=Path(opts.memory_dir),
-                out_path=Path(opts.out),
-                graph_path=_gp,
-                analysis_path=_analysis_path,
-                labels_path=_labels_path,
-                graph_data=graph_data,
-                half_life_days=opts.half_life_days,
-                min_corroboration=opts.min_corroboration,
-            )
-            c = agg["counts"]
-            print(
-                f"Reflected {agg['total']} memories "
-                f"({c['useful']} useful, {c['dead_end']} dead ends, "
-                f"{c['corrected']} corrected) -> {out_path}"
-            )
     elif cmd == "path":
         if len(sys.argv) < 4:
             print(
@@ -958,37 +842,6 @@ def dispatch_command(cmd: str) -> None:
         print(f"  Source:    {d.get('source_file', '')} {d.get('source_location', '')}".rstrip())
         print(f"  Type:      {d.get('file_type', '')}")
         print(f"  Community: {d.get('community_name') or d.get('community', '')}")
-        # Work-memory overlay: a derived experiential hint from `purpory reflect`,
-        # merged in display-only from the .purpory_learning.json sidecar next to
-        # graph.json. No line when the node has no overlay entry.
-        try:
-            from purpory.reflect import load_learning_overlay as _llo
-            from purpory.security import sanitize_label as _sl
-
-            _overlay = _llo(_graph_file) if _graph_file is not None else {}
-            _entry = _overlay.get(str(nid))
-            if _entry:
-                _status = _sl(str(_entry.get("status", "")))
-                if _status == "contested":
-                    _line = (
-                        f"  Lesson: contested (useful {_entry.get('uses', 0)} / "
-                        f"dead-end {_entry.get('neg', 0)})"
-                    )
-                elif _status == "preferred":
-                    _line = (
-                        f"  Lesson: preferred source (start here) — "
-                        f"{_entry.get('uses', 0)} useful, score={_entry.get('score', 0)}"
-                    )
-                else:
-                    _line = (
-                        f"  Lesson: {_status or 'tentative'} — "
-                        f"{_entry.get('uses', 0)} useful, score={_entry.get('score', 0)}"
-                    )
-                if _entry.get("stale"):
-                    _line += " [code changed since — re-verify]"
-                print(_line)
-        except Exception:
-            pass
         print(f"  Degree:    {G.degree(nid)}")
         from purpory.build import edge_data
 
@@ -2146,73 +1999,6 @@ def dispatch_command(cmd: str) -> None:
         )
         print_benchmark(result)
 
-    elif cmd == "global":
-        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
-        from purpory.global_graph import (
-            global_add as _global_add,
-            global_remove as _global_remove,
-            global_list as _global_list,
-            global_path as _global_path,
-        )
-
-        if subcmd == "add":
-            # purpory global add <graph.json> [--as <tag>]
-            args = sys.argv[3:]
-            source = None
-            tag = None
-            i = 0
-            while i < len(args):
-                if args[i] == "--as" and i + 1 < len(args):
-                    tag = args[i + 1]
-                    i += 2
-                elif not source:
-                    source = Path(args[i])
-                    i += 1
-                else:
-                    i += 1
-            if not source:
-                print("Usage: purpory global add <graph.json> [--as <repo-tag>]", file=sys.stderr)
-                sys.exit(1)
-            tag = tag or source.parent.parent.name
-            try:
-                result = _global_add(source, tag)
-                if result["skipped"]:
-                    print(f"'{tag}' unchanged since last add - global graph not modified.")
-                else:
-                    print(
-                        f"Added '{tag}' to global graph: +{result['nodes_added']} nodes, "
-                        f"-{result['nodes_removed']} pruned. Global: {_global_path()}"
-                    )
-            except Exception as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                sys.exit(1)
-        elif subcmd == "remove":
-            tag = sys.argv[3] if len(sys.argv) > 3 else ""
-            if not tag:
-                print("Usage: purpory global remove <repo-tag>", file=sys.stderr)
-                sys.exit(1)
-            try:
-                removed = _global_remove(tag)
-                print(f"Removed '{tag}' from global graph ({removed} nodes pruned).")
-            except KeyError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                sys.exit(1)
-        elif subcmd == "list":
-            repos = _global_list()
-            if not repos:
-                print("Global graph is empty. Use 'purpory global add' to add a project.")
-            else:
-                print(f"Global graph: {_global_path()}")
-                for tag, info in repos.items():
-                    print(
-                        f"  {tag}: {info.get('node_count', '?')} nodes, added {info.get('added_at', '?')[:10]}"
-                    )
-        elif subcmd == "path":
-            print(_global_path())
-        else:
-            print("Usage: purpory global [add|remove|list|path]", file=sys.stderr)
-            sys.exit(1)
-
     elif cmd == "extract":
         # Headless full-pipeline extraction for CI / scripts (#698).
         # Runs detect -> AST extraction on code -> semantic LLM extraction on
@@ -2249,9 +2035,7 @@ def dispatch_command(cmd: str) -> None:
         no_cluster = False
         dedup_llm = False
         google_workspace = False
-        global_merge = False
         code_only = False
-        global_repo_tag: str | None = None
         # Performance/tuning knobs (issue #792). None means "use library default".
         cli_max_workers: int | None = None
         cli_token_budget: int | None = None
@@ -2328,12 +2112,6 @@ def dispatch_command(cmd: str) -> None:
             elif a == "--google-workspace":
                 google_workspace = True
                 i += 1
-            elif a == "--global":
-                global_merge = True
-                i += 1
-            elif a == "--as" and i + 1 < len(args):
-                global_repo_tag = args[i + 1]
-                i += 2
             elif a == "--max-workers" and i + 1 < len(args):
                 cli_max_workers = _parse_int("--max-workers", args[i + 1])
                 i += 2
@@ -3103,18 +2881,6 @@ def dispatch_command(cmd: str) -> None:
             from purpory.supervise.structural import store_structural_graph
 
             store_structural_graph(merged, root=target)
-            if global_merge:
-                from purpory.global_graph import global_add_data
-
-                tag = global_repo_tag or target.name
-                result = global_add_data(merged, tag, source=f"sqlite:{target.resolve()}")
-                if result["skipped"]:
-                    print(f"[purpory global] '{tag}' unchanged since last add - skipped.")
-                else:
-                    print(
-                        f"[purpory global] '{tag}' merged into global graph "
-                        f"(+{result['nodes_added']} nodes, -{result['nodes_removed']} pruned)."
-                    )
             stages.mark("write")
             cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
             print(
@@ -3236,18 +3002,6 @@ def dispatch_command(cmd: str) -> None:
 
         snapshot = {**_graph_data(G, communities), "analysis": analysis}
         store_structural_graph(snapshot, root=target)
-        if global_merge:
-            from purpory.global_graph import global_add_data
-
-            tag = global_repo_tag or target.name
-            result = global_add_data(snapshot, tag, source=f"sqlite:{target.resolve()}")
-            if result["skipped"]:
-                print(f"[purpory global] '{tag}' unchanged since last add - skipped.")
-            else:
-                print(
-                    f"[purpory global] '{tag}' merged into global graph "
-                    f"(+{result['nodes_added']} nodes, -{result['nodes_removed']} pruned)."
-                )
         try:
             _save_manifest(
                 _manifest_files,

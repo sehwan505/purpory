@@ -30,8 +30,6 @@ def __getattr__(name):
         "to_svg": ("purpory.export", "to_svg"),
         "to_canvas": ("purpory.export", "to_canvas"),
         "to_wiki": ("purpory.wiki", "to_wiki"),
-        "reflect": ("purpory.reflect", "reflect"),
-        "save_query_result": ("purpory.ingest", "save_query_result"),
     }
     if name in _map:
         import importlib

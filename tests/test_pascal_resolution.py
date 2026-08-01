@@ -87,9 +87,3 @@ def test_cross_file_calls_do_not_cross_unrelated_classes(tmp_path):
     target = node_by_id[edge["target"]]
     assert "BaseGadget.pas" in target.get("source_file", "")
     assert "OtherGadget.pas" not in target.get("source_file", "")
-
-
-def test_pascal_resolver_registered():
-    from purpory.resolver_registry import registered_resolvers
-    names = {r.name for r in registered_resolvers()}
-    assert "pascal_inherited_calls" in names

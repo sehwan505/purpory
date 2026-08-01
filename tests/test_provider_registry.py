@@ -10,7 +10,6 @@ def test_custom_provider_add_list_show_remove(tmp_path, monkeypatch):
 
     from purpory import llm
     monkeypatch.setattr(llm, "_custom_providers_path", lambda global_=True: providers_file if global_ else tmp_path / "local.json")
-    monkeypatch.setattr(llm, "BACKENDS", {**llm.BACKENDS})
 
     providers_file.write_text(json.dumps({
         "nvidia": {
@@ -102,7 +101,6 @@ def test_project_local_providers_loaded_with_optin(tmp_path, monkeypatch):
     from purpory import llm
     monkeypatch.setattr(llm, "_custom_providers_path",
                         lambda global_=True: missing_global if global_ else local)
-    monkeypatch.setattr(llm, "BACKENDS", {**llm.BACKENDS})
     monkeypatch.setenv("PURPORY_ALLOW_LOCAL_PROVIDERS", "1")
 
     loaded = llm._load_custom_providers()
@@ -119,7 +117,6 @@ def test_non_http_provider_base_url_rejected(tmp_path, monkeypatch):
     from purpory import llm
     monkeypatch.setattr(llm, "_custom_providers_path",
                         lambda global_=True: providers_file if global_ else tmp_path / "local.json")
-    monkeypatch.setattr(llm, "BACKENDS", {**llm.BACKENDS})
 
     with pytest.raises(ValueError, match="invalid base_url"):
         llm._load_custom_providers()
@@ -187,8 +184,9 @@ def test_provider_base_url_ok_scheme_and_warnings(capsys):
 def test_detect_backend_custom_provider_after_builtins(monkeypatch):
     """Custom providers appear after all built-ins in detect_backend() priority."""
     from purpory import llm
+    from purpory.llm import helpers
 
-    monkeypatch.setattr(llm, "BACKENDS", {
+    monkeypatch.setattr(helpers, "BACKENDS", {
         **llm.BACKENDS,
         "myprovider": {
             "base_url": "http://example.com/v1",

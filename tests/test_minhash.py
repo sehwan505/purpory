@@ -1,6 +1,5 @@
 """Tests for purpory/_minhash.py — MinHash sketch and band-LSH."""
 from __future__ import annotations
-import numpy as np
 import pytest
 from purpory._minhash import MinHash, MinHashLSH, _optimal_lsh_params
 
@@ -17,28 +16,28 @@ def _minhash_for(text: str, num_perm: int = 128) -> MinHash:
 def test_identical_texts_produce_identical_hashvalues():
     a = _minhash_for("graphextractor")
     b = _minhash_for("graphextractor")
-    assert np.array_equal(a.hashvalues, b.hashvalues)
+    assert a.hashvalues == b.hashvalues
 
 
 def test_similar_texts_share_most_hashvalues():
     a = _minhash_for("authentication manager")
     b = _minhash_for("authentication managers")
-    overlap = np.sum(a.hashvalues == b.hashvalues) / len(a.hashvalues)
+    overlap = sum(x == y for x, y in zip(a.hashvalues, b.hashvalues)) / len(a.hashvalues)
     assert overlap > 0.5
 
 
 def test_unrelated_texts_share_few_hashvalues():
     a = _minhash_for("authentication manager")
     b = _minhash_for("file system watcher")
-    overlap = np.sum(a.hashvalues == b.hashvalues) / len(a.hashvalues)
+    overlap = sum(x == y for x, y in zip(a.hashvalues, b.hashvalues)) / len(a.hashvalues)
     assert overlap < 0.3
 
 
 def test_update_mutates_hashvalues():
     m = MinHash(num_perm=64)
-    before = m.hashvalues.copy()
+    before = m.hashvalues[:]
     m.update(b"hello")
-    assert not np.array_equal(m.hashvalues, before)
+    assert m.hashvalues != before
 
 
 # ── MinHashLSH ────────────────────────────────────────────────────────────────
@@ -92,10 +91,11 @@ def test_optimal_params_cached():
 
 # ── EDR regression: scipy / numpy.testing must not be imported ──────────────────
 
-def test_dedup_import_does_not_pull_scipy_or_numpy_testing():
+def test_dedup_import_does_not_pull_scipy_or_numpy():
     import sys
-    for mod in ("scipy", "numpy.testing"):
+    for mod in ("scipy", "numpy", "numpy.testing"):
         sys.modules.pop(mod, None)
     import purpory.dedup  # noqa: F401
     assert "scipy" not in sys.modules
+    assert "numpy" not in sys.modules
     assert "numpy.testing" not in sys.modules

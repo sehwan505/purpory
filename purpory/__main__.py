@@ -206,33 +206,6 @@ def _run_cli() -> None:
         print("  model <verb>            manage the local Qwen gate runtime")
         print("    install|start|stop     download, warm, or stop the managed model")
         print("    status|logs            inspect runtime health and recent logs")
-        print("  save-result             save a Q&A result for the graph feedback loop")
-        print("    --question Q            the question asked")
-        print("    --answer A              the answer to save")
-        print("    --type T                query type: query|path_query|explain (default: query)")
-        print("    --nodes N1 N2 ...       source node labels cited in the answer")
-        print("    --outcome O             work-memory signal: useful|dead_end|corrected")
-        print(
-            "    --correction TEXT       what the right answer was (pairs with --outcome corrected)"
-        )
-        print("    --memory-dir DIR        memory directory (default: project state)")
-        print(
-            "  reflect                 aggregate saved outcomes into a deterministic lessons doc"
-        )
-        print("    --memory-dir DIR        memory directory (default: project state)")
-        print(
-            "    --out FILE              output path (default: project state reflections)"
-        )
-        print(
-            "    --graph PATH            graph.json, for community grouping + dropping stale nodes (optional)"
-        )
-        print(
-            "    --analysis PATH         .purpory_analysis.json (optional, auto-detected next to --graph)"
-        )
-        print(
-            "    --labels PATH           .purpory_labels.json (optional, auto-detected next to --graph)"
-        )
-        print("    --half-life-days N      signal weight halves every N days (default 30)")
         print("    --min-corroboration N   distinct useful results to prefer a node (default 2)")
         print(
             "  check-update <path>     check needs_update flag and notify if semantic re-extraction is pending (cron-safe)"
@@ -291,15 +264,6 @@ def _run_cli() -> None:
         print("                            maps tables, views, functions + FK relationships;")
         print("                            column-level detail is not represented in the graph")
         print("    --cargo                 extract crate→crate deps from Cargo.toml")
-        print("    --global                also merge the resulting graph into the global graph")
-        print("    --as <tag>              repo tag for --global (default: target directory name)")
-        print(
-            "  global add <graph.json>  add/update a project graph in the global graph (~/.purpory/global-graph.json)"
-        )
-        print("    --as <tag>               repo tag (default: parent directory name)")
-        print("  global remove <tag>      remove a repo's nodes from the global graph")
-        print("  global list              list repos in the global graph")
-        print("  global path              print path to the global graph file")
         print("  benchmark [graph.json]  benchmark SQLite by default or an explicit artifact")
         print("  export callflow-html    emit Mermaid-based architecture/call-flow HTML")
         print(
@@ -320,7 +284,6 @@ def _run_cli() -> None:
         "query",
         "explain",
         "path",
-        "save-result",
         "remember",
         "prepare",
         "dashboard",
