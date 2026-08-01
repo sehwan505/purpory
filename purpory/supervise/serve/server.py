@@ -200,6 +200,8 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
                     since=int(since_raw) if since_raw else None,
                 )
             )
+        elif path == "/api/projects":
+            self._json(service.projects())
         elif path.startswith("/api/topics/") and path.endswith("/versions"):
             key = unquote(path.removeprefix("/api/topics/").removesuffix("/versions"))
             try:
@@ -261,7 +263,32 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_write(self, method: str, path: str, payload: dict[str, Any]) -> None:
         service = self.server.service
-        if method == "POST" and path == "/api/topics":
+        if method == "POST" and path == "/api/projects":
+            result = service.create_project(
+                str(payload.get("name", "")),
+                description=str(payload.get("description", "")),
+            )
+            self.server.events.publish("project", {"id": result["id"], "action": "created"})
+            self._json(result, status=HTTPStatus.CREATED)
+        elif (
+            method == "POST"
+            and path.startswith("/api/projects/")
+            and path.endswith("/resources/git")
+        ):
+            project_id = unquote(
+                path.removeprefix("/api/projects/").removesuffix("/resources/git").strip("/")
+            )
+            result = service.attach_git_resource(
+                project_id,
+                str(payload.get("path", "")),
+                alias=_optional_string(payload, "alias"),
+            )
+            self.server.events.publish(
+                "project",
+                {"id": result["id"], "action": "resource-attached"},
+            )
+            self._json(result)
+        elif method == "POST" and path == "/api/topics":
             result = service.set_topic(
                 str(payload.get("key", "")),
                 value=_optional_string(payload, "value"),

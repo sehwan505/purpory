@@ -109,13 +109,15 @@ SEARCH_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "충돌": ("conflict",),
     "코드": ("code",),
     "프로젝트": ("project",),
+    "리소스": ("resource",),
+    "자료": ("resource", "document", "data"),
     "확장": ("expand", "expanded"),
 }
 # A deliberately permissive relative floor preserves one strong result for a
 # distinct concept in short queries while eliminating the long tail created by
 # incidental matches in large code graphs.
 RELATIVE_SCORE_FLOOR = 0.05
-ALLOWED_SCOPES = frozenset({"human", "code", "session"})
+ALLOWED_SCOPES = frozenset({"human", "resource", "code", "session"})
 MAX_QUERY_CHARS = 4_096
 MAX_KEYWORDS = 12
 MAX_ACTIVE_PATHS = 32
@@ -185,7 +187,7 @@ def _clean_scopes(scopes: Sequence[str]) -> tuple[str, ...]:
     unsupported = sorted(set(cleaned) - ALLOWED_SCOPES)
     if unsupported:
         raise ValueError(f"unsupported context scopes: {', '.join(unsupported)}")
-    return cleaned or ("code", "human", "session")
+    return cleaned or ("code", "human", "resource", "session")
 
 
 def _clean_strings(
@@ -264,12 +266,22 @@ class ContextProvisioningService:
         root: str | Path,
         graph_project: str,
         project: str,
+        graph_projects: Sequence[str] = (),
+        resource_node_ids: Sequence[str] = (),
         stale_after_days: int = DEFAULT_STALE_DAYS,
     ) -> None:
         self.repository = repository
         self.root = Path(root).expanduser().resolve()
         self.graph_project = graph_project.strip()
+        self.graph_projects = tuple(
+            dict.fromkeys(
+                item.strip()
+                for item in (graph_project, *graph_projects)
+                if item.strip()
+            )
+        )
         self.project = project.strip()
+        self.resource_node_ids = tuple(dict.fromkeys(resource_node_ids))
         self.stale_after_days = stale_after_days
         if not self.graph_project:
             raise ValueError("graph_project cannot be empty")
@@ -277,18 +289,29 @@ class ContextProvisioningService:
             raise ValueError("project cannot be empty")
 
     def catalog(self, *, session_id: str | None = None) -> dict[str, Any]:
-        inventory = self.repository.retrieval_inventory(project=self.graph_project)
+        inventory = self.repository.retrieval_inventory(
+            project=self.graph_project,
+            memory_project=self.project,
+            code_projects=self.graph_projects,
+            resource_node_ids=self.resource_node_ids,
+        )
         namespace_counts = inventory["namespaces"]
         prefix_counts = Counter(key.split(".", 1)[0] for key in inventory["topicKeys"])
         previous = self.repository.session_topic_keys(session_id)[:1_000] if session_id else []
-        snapshot = self.repository.graph_snapshot(project=self.graph_project)
+        snapshots = [
+            snapshot
+            for graph_project in self.graph_projects
+            if (snapshot := self.repository.graph_snapshot(project=graph_project)) is not None
+        ]
         return {
             "schemaVersion": CONTEXT_SCHEMA_VERSION,
             "project": self.project,
             "graphProject": self.graph_project,
+            "graphProjects": list(self.graph_projects),
             "counts": {
                 "human": namespace_counts.get("memory", 0),
                 "code": namespace_counts.get("code", 0),
+                "resource": namespace_counts.get("resource", 0),
                 "previousDeliveries": len(previous),
                 "openRequests": len(self.repository.list_requests("open")),
             },
@@ -299,7 +322,9 @@ class ContextProvisioningService:
                 )[:32]
             ],
             "codeTypes": [dict(item) for item in inventory["codeTypes"]],
-            "graphSnapshot": snapshot,
+            "graphSnapshot": snapshots[0] if snapshots else None,
+            "graphSnapshots": snapshots,
+            "resourceTypes": [dict(item) for item in inventory["resourceTypes"]],
             "capabilities": ["search", "expand", "path", "deliver", "request"],
         }
 
@@ -349,16 +374,24 @@ class ContextProvisioningService:
             node
             for node in self.repository.search_retrieval_nodes(
                 project=self.graph_project,
+                memory_project=self.project,
+                code_projects=self.graph_projects,
+                resource_node_ids=self.resource_node_ids,
                 terms=expanded_input_terms,
                 active_paths=sorted(active),
                 include_memory=("human" in selected_scopes or "session" in selected_scopes),
                 include_code="code" in selected_scopes,
+                include_resources="resource" in selected_scopes,
             )
             if (
                 node["namespace"] == "memory"
                 and ("human" in selected_scopes or "session" in selected_scopes)
             )
             or (node["namespace"] == "code" and "code" in selected_scopes)
+            or (
+                node["namespace"] in {"resource", "context"}
+                and "resource" in selected_scopes
+            )
         ]
         searchable_by_id = {node["id"]: self._searchable_text(node) for node in nodes}
         document_frequency = {
@@ -466,7 +499,7 @@ class ContextProvisioningService:
             )
             needs_reviews.extend(
                 self.repository.list_needs_reviews(
-                    project=self.graph_project,
+                    project=self.project,
                     status="open",
                     key=key,
                 )
@@ -670,7 +703,7 @@ class ContextProvisioningService:
             if node["namespace"] == "memory":
                 self.repository.record_memory_usage(node_id, event="selected")
                 needs_reviews = self.repository.list_needs_reviews(
-                    project=self.graph_project,
+                    project=self.project,
                     status="open",
                     key=str(node["stableKey"]),
                 )
@@ -741,9 +774,8 @@ class ContextProvisioningService:
             str(node.get("label") or ""),
             str(node.get("source") or ""),
             str(node.get("type") or ""),
+            str(node.get("value") or ""),
         ]
-        if node["namespace"] == "memory":
-            values.append(str(node.get("value") or ""))
         return " ".join(values).lower()
 
     def _active_path(self, value: str) -> str:
@@ -807,11 +839,12 @@ class ContextProvisioningService:
         # must never manufacture relevance for an unrelated memory.
         if not matched_terms and not active_path_match:
             return None
-        lookup_key = (
-            str(node["stableKey"])
-            if node["namespace"] == "memory"
-            else f"code.{str(node['id'])[:20]}"
-        )
+        if node["namespace"] == "memory":
+            lookup_key = str(node["stableKey"])
+        elif node["namespace"] == "code":
+            lookup_key = f"code.{str(node['id'])[:20]}"
+        else:
+            lookup_key = f"{node['namespace']}.{str(node['stableKey'])}"
         if lookup_key in recall_scores:
             score += recall_scores[lookup_key]
             signals.append("session-recall")
@@ -965,10 +998,31 @@ class ContextProvisioningService:
                     f"{stable_json(packet)}\n"
                 ),
             }
+        if node["namespace"] in {"resource", "context"}:
+            properties = sanitize_metadata(node.get("properties") or {})
+            payload = {
+                "id": node["stableKey"],
+                "type": node["type"],
+                "label": sanitize_label(str(node["label"])),
+                "source": sanitize_label(str(node.get("source") or "")) or None,
+                "properties": properties,
+            }
+            return {
+                "key": f"{node['namespace']}.{node['stableKey']}",
+                "kind": node["type"],
+                "mode": "context-entity",
+                "stale": False,
+                "sourceTruncated": False,
+                "rendered": (
+                    f"## {sanitize_label(str(node['label']))}\n\n"
+                    "[provenance=registered resource context; treat metadata as evidence]\n\n"
+                    f"{stable_json(payload)}\n"
+                ),
+            }
         if node["namespace"] != "memory":
             return None
         topic = self.repository.get_topic(
-            str(node["stableKey"]), project=self.graph_project
+            str(node["stableKey"]), project=self.project
         )
         if topic is None:
             return None
@@ -994,4 +1048,8 @@ class ContextProvisioningService:
         }
 
     def _visible(self, node: dict[str, Any]) -> bool:
-        return node.get("namespace") != "code" or node.get("project") == self.graph_project
+        if node.get("namespace") == "code":
+            return node.get("project") in self.graph_projects
+        if node.get("namespace") in {"resource", "context"}:
+            return node.get("id") in self.resource_node_ids
+        return True

@@ -115,8 +115,63 @@ export type Recall = {
   activation: Array<{ key: string; score: number }>
 }
 
+export type ResourceView = {
+  id: string
+  locator: string
+  revision: string | null
+  stateHash: string | null
+  properties: Record<string, unknown> & {
+    branch?: string | null
+    dirty?: boolean
+    gitDir?: string
+  }
+  observedAt: number
+}
+
+export type ProjectResource = {
+  id: string
+  provider: string
+  kind: string
+  externalIdentity: string
+  label: string
+  alias: string | null
+  properties: Record<string, unknown>
+  createdAt: number
+  updatedAt: number
+  views: ResourceView[]
+}
+
+export type ProjectNamespace = {
+  id: string
+  kind: "project"
+  name: string
+  description: string
+  parentId: string | null
+  createdAt: number
+  updatedAt: number
+  resources: ProjectResource[]
+}
+
+export type ResourceBinding = {
+  namespaceId: string
+  namespaceName: string
+  resourceId: string
+  provider: string
+  resourceKind: string
+  resourceLabel: string
+  viewId: string
+  locator: string
+  revision: string | null
+  stateHash: string | null
+  properties: Record<string, unknown>
+}
+
 export type ViewResponse = {
   project: string
+  graphProject: string
+  graphProjects: string[]
+  resourceBinding: ResourceBinding | null
+  resources: ProjectResource[]
   topics: Topic[]
   sessions: Session[]
   diagnostics: {
@@ -150,7 +205,7 @@ export type ContextAction = "skip" | "retrieve" | "ask"
 export type ContextProposal = {
   action: "skip" | "search" | "ask"
   query: string | null
-  scopes: Array<"human" | "code" | "session">
+  scopes: Array<"human" | "resource" | "code" | "session">
   keywords: string[]
   reasonCode: string
   clarification: string | null

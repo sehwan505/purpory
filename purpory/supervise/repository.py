@@ -14,16 +14,21 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
+from purpory.supervise.identity import resolve_project_id
 
 DEFAULT_DB_PATH = Path.home() / ".purpory" / "context.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MEMORY_NAMESPACE = "memory"
+RESOURCE_NAMESPACE = "resource"
+CONTEXT_NAMESPACE = "context"
 TOPIC_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)*$")
+RESOURCE_FIELD_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 TOPIC_KINDS = frozenset({"note", "code-area", "doc-ref", "decision", "seeded"})
 TOPIC_ORIGINS = frozenset({"human", "graph-seed"})
 REQUEST_STATUSES = frozenset({"open", "resolved"})
@@ -75,6 +80,39 @@ def memory_category(kind: str) -> str | None:
     return MEMORY_CATEGORY_BY_KIND.get(kind)
 
 
+def _registry_text(value: str, *, field: str, maximum: int, required: bool = True) -> str:
+    normalized = value.strip()
+    if required and not normalized:
+        raise ValueError(f"{field} cannot be empty")
+    if len(normalized) > maximum:
+        raise ValueError(f"{field} exceeds {maximum} characters")
+    return normalized
+
+
+def _registry_kind(value: str, *, field: str) -> str:
+    normalized = value.strip().lower()
+    if not RESOURCE_FIELD_RE.fullmatch(normalized):
+        raise ValueError(f"{field} must use lowercase letters, numbers, or dashes")
+    return normalized
+
+
+def _registry_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _context_projects(primary: str, additional: Sequence[str]) -> tuple[str, ...]:
+    projects = tuple(
+        dict.fromkeys(
+            item.strip()
+            for item in (primary, *additional)
+            if isinstance(item, str) and item.strip()
+        )
+    )
+    if not projects:
+        raise ValueError("at least one context project is required")
+    return projects
+
+
 def _now(timestamp: int | None = None) -> int:
     return int(time.time()) if timestamp is None else int(timestamp)
 
@@ -116,6 +154,55 @@ class ContextGraphRepository:
                 CREATE TABLE IF NOT EXISTS context_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS context_namespaces (
+                    id TEXT PRIMARY KEY,
+                    namespace_kind TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    parent_id TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    CHECK (namespace_kind IN ('project')),
+                    FOREIGN KEY(parent_id) REFERENCES context_namespaces(id) ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS context_resources (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    resource_kind TEXT NOT NULL,
+                    external_identity TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE(provider, external_identity)
+                );
+
+                CREATE TABLE IF NOT EXISTS context_namespace_resources (
+                    namespace_id TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    alias TEXT,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(namespace_id, resource_id),
+                    FOREIGN KEY(namespace_id)
+                        REFERENCES context_namespaces(id) ON DELETE CASCADE,
+                    FOREIGN KEY(resource_id)
+                        REFERENCES context_resources(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS context_resource_views (
+                    id TEXT PRIMARY KEY,
+                    resource_id TEXT NOT NULL,
+                    locator TEXT NOT NULL,
+                    revision TEXT,
+                    state_hash TEXT,
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    observed_at INTEGER NOT NULL,
+                    UNIQUE(resource_id, locator),
+                    FOREIGN KEY(resource_id)
+                        REFERENCES context_resources(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS context_nodes (
@@ -314,12 +401,19 @@ class ContextGraphRepository:
                     "ALTER TABLE graph_snapshots "
                     "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            self._migrate_namespace_resource_bindings(connection)
             self._initialize_views(connection)
             self._initialize_fts(connection)
             connection.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_context_nodes_lookup
                     ON context_nodes(namespace, project, stable_key);
+                CREATE INDEX IF NOT EXISTS idx_context_namespaces_kind
+                    ON context_namespaces(namespace_kind, name);
+                CREATE INDEX IF NOT EXISTS idx_context_resources_provider
+                    ON context_resources(provider, resource_kind);
+                CREATE INDEX IF NOT EXISTS idx_context_resource_views_locator
+                    ON context_resource_views(locator);
                 CREATE INDEX IF NOT EXISTS idx_context_nodes_type
                     ON context_nodes(project, node_type, origin);
                 CREATE INDEX IF NOT EXISTS idx_context_nodes_source
@@ -350,6 +444,7 @@ class ContextGraphRepository:
                     ON global_memory_requests(status, created_at DESC);
                 """
             )
+            self._sync_registry_context_graph(connection)
             versioned = {
                 (str(row["project"]), str(row["key"]))
                 for row in connection.execute(
@@ -393,6 +488,40 @@ class ContextGraphRepository:
                 (str(SCHEMA_VERSION),),
             )
             connection.commit()
+
+    @staticmethod
+    def _migrate_namespace_resource_bindings(connection: sqlite3.Connection) -> None:
+        """Remove the v3 one-project-per-resource constraint."""
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'context_namespace_resources'"
+        ).fetchone()
+        definition = str(row["sql"] or "") if row is not None else ""
+        if not re.search(r"resource_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE", definition, re.I):
+            return
+        connection.executescript(
+            """
+            ALTER TABLE context_namespace_resources
+                RENAME TO context_namespace_resources_v3;
+            CREATE TABLE context_namespace_resources (
+                namespace_id TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                alias TEXT,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(namespace_id, resource_id),
+                FOREIGN KEY(namespace_id)
+                    REFERENCES context_namespaces(id) ON DELETE CASCADE,
+                FOREIGN KEY(resource_id)
+                    REFERENCES context_resources(id) ON DELETE CASCADE
+            );
+            INSERT INTO context_namespace_resources(
+                namespace_id, resource_id, alias, created_at
+            )
+            SELECT namespace_id, resource_id, alias, created_at
+            FROM context_namespace_resources_v3;
+            DROP TABLE context_namespace_resources_v3;
+            """
+        )
 
     @staticmethod
     def _initialize_fts(connection: sqlite3.Connection) -> None:
@@ -474,6 +603,682 @@ class ContextGraphRepository:
             """
         )
 
+    @staticmethod
+    def _upsert_registry_node(
+        connection: sqlite3.Connection,
+        *,
+        namespace: str,
+        project: str,
+        stable_key: str,
+        node_type: str,
+        label: str,
+        value: str | None,
+        source: str | None,
+        origin: str,
+        properties: dict[str, Any],
+        timestamp: int,
+    ) -> str:
+        node_id = _stable_id(namespace, project, stable_key)
+        connection.execute(
+            """
+            INSERT INTO context_nodes(
+                id, namespace, project, stable_key, node_type, label,
+                value, source, origin, properties_json, set_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(namespace, project, stable_key) DO UPDATE SET
+                node_type = excluded.node_type,
+                label = excluded.label,
+                value = excluded.value,
+                source = excluded.source,
+                origin = excluded.origin,
+                properties_json = excluded.properties_json,
+                set_at = excluded.set_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                node_id,
+                namespace,
+                project,
+                stable_key,
+                node_type,
+                label,
+                value,
+                source,
+                origin,
+                stable_json(properties),
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        )
+        return node_id
+
+    @classmethod
+    def _sync_registry_context_graph(cls, connection: sqlite3.Connection) -> None:
+        """Project registry tables are projections of canonical context entities."""
+        projects = connection.execute(
+            """
+            SELECT id, name, description, parent_id, created_at, updated_at
+            FROM context_namespaces
+            WHERE namespace_kind = 'project'
+            ORDER BY id
+            """
+        ).fetchall()
+        project_ids: dict[str, str] = {}
+        for project in projects:
+            project_id = str(project["id"])
+            timestamp = int(project["updated_at"])
+            project_ids[project_id] = cls._upsert_registry_node(
+                connection,
+                namespace=CONTEXT_NAMESPACE,
+                project=project_id,
+                stable_key=project_id,
+                node_type="project",
+                label=str(project["name"]),
+                value=str(project["description"]) or None,
+                source=None,
+                origin="human",
+                properties={
+                    "description": str(project["description"]),
+                    "parentId": project["parent_id"],
+                },
+                timestamp=timestamp,
+            )
+
+        resources = connection.execute(
+            """
+            SELECT id, provider, resource_kind, external_identity, label,
+                   properties_json, updated_at
+            FROM context_resources
+            ORDER BY id
+            """
+        ).fetchall()
+        resource_ids: dict[str, str] = {}
+        for resource in resources:
+            resource_id = str(resource["id"])
+            properties = _json_object(resource["properties_json"])
+            aliases = [
+                str(row["alias"])
+                for row in connection.execute(
+                    """
+                    SELECT alias FROM context_namespace_resources
+                    WHERE resource_id = ? AND alias IS NOT NULL
+                    ORDER BY alias
+                    """,
+                    (resource_id,),
+                ).fetchall()
+            ]
+            properties.update(
+                {
+                    "provider": resource["provider"],
+                    "resourceKind": resource["resource_kind"],
+                    "externalIdentity": resource["external_identity"],
+                    "aliases": aliases,
+                }
+            )
+            resource_ids[resource_id] = cls._upsert_registry_node(
+                connection,
+                namespace=RESOURCE_NAMESPACE,
+                project="",
+                stable_key=resource_id,
+                node_type=f"resource.{resource['resource_kind']}",
+                label=str(resource["label"]),
+                value=stable_json(properties),
+                source=str(resource["external_identity"]),
+                origin="registered",
+                properties=properties,
+                timestamp=int(resource["updated_at"]),
+            )
+
+        bindings = connection.execute(
+            """
+            SELECT namespace_id, resource_id, alias, created_at
+            FROM context_namespace_resources
+            ORDER BY namespace_id, resource_id
+            """
+        ).fetchall()
+        for binding in bindings:
+            project_node_id = project_ids.get(str(binding["namespace_id"]))
+            resource_node_id = resource_ids.get(str(binding["resource_id"]))
+            if project_node_id is None or resource_node_id is None:
+                continue
+            cls._upsert_edge(
+                connection,
+                source_id=project_node_id,
+                target_id=resource_node_id,
+                relation="contains",
+                origin="registered",
+                properties={"alias": binding["alias"]},
+                timestamp=int(binding["created_at"]),
+            )
+
+        views = connection.execute(
+            """
+            SELECT id, resource_id, locator, revision, state_hash,
+                   properties_json, observed_at
+            FROM context_resource_views
+            ORDER BY id
+            """
+        ).fetchall()
+        for view in views:
+            resource_node_id = resource_ids.get(str(view["resource_id"]))
+            if resource_node_id is None:
+                continue
+            properties = _json_object(view["properties_json"])
+            properties.update(
+                {
+                    "resourceId": view["resource_id"],
+                    "locator": view["locator"],
+                    "revision": view["revision"],
+                    "stateHash": view["state_hash"],
+                }
+            )
+            label = str(properties.get("branch") or Path(str(view["locator"])).name)
+            view_node_id = cls._upsert_registry_node(
+                connection,
+                namespace=RESOURCE_NAMESPACE,
+                project="",
+                stable_key=str(view["id"]),
+                node_type="resource-view",
+                label=label,
+                value=stable_json(properties),
+                source=str(view["locator"]),
+                origin="observed",
+                properties=properties,
+                timestamp=int(view["observed_at"]),
+            )
+            cls._upsert_edge(
+                connection,
+                source_id=resource_node_id,
+                target_id=view_node_id,
+                relation="has-view",
+                origin="observed",
+                properties={"revision": view["revision"], "stateHash": view["state_hash"]},
+                timestamp=int(view["observed_at"]),
+            )
+            code_nodes = connection.execute(
+                """
+                SELECT id FROM context_nodes
+                WHERE namespace = 'code' AND project = ?
+                ORDER BY stable_key
+                """,
+                (resolve_project_id(str(view["locator"])),),
+            ).fetchall()
+            for code_node in code_nodes:
+                cls._upsert_edge(
+                    connection,
+                    source_id=view_node_id,
+                    target_id=str(code_node["id"]),
+                    relation="contains",
+                    origin="derived",
+                    properties={"graphProject": resolve_project_id(str(view["locator"]))},
+                    timestamp=int(view["observed_at"]),
+                )
+
+        for project_id, project_node_id in project_ids.items():
+            memory_nodes = connection.execute(
+                """
+                SELECT id FROM context_nodes
+                WHERE namespace = ? AND project = ?
+                ORDER BY stable_key
+                """,
+                (MEMORY_NAMESPACE, project_id),
+            ).fetchall()
+            for memory in memory_nodes:
+                cls._upsert_edge(
+                    connection,
+                    source_id=project_node_id,
+                    target_id=str(memory["id"]),
+                    relation="contains",
+                    origin="human",
+                    timestamp=_now(),
+                )
+
+    def create_project_namespace(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        created_at: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_name = _registry_text(name, field="project name", maximum=120)
+        normalized_description = _registry_text(
+            description,
+            field="project description",
+            maximum=4_096,
+            required=False,
+        )
+        timestamp = _now(created_at)
+        namespace_id = _registry_id("project")
+        with self.connect() as connection:
+            duplicate = connection.execute(
+                "SELECT 1 FROM context_namespaces WHERE lower(name) = lower(?)",
+                (normalized_name,),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(f"project already exists: {normalized_name}")
+            connection.execute(
+                """
+                INSERT INTO context_namespaces(
+                    id, namespace_kind, name, description, parent_id,
+                    created_at, updated_at
+                ) VALUES (?, 'project', ?, ?, NULL, ?, ?)
+                """,
+                (
+                    namespace_id,
+                    normalized_name,
+                    normalized_description,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            self._record_event(
+                connection,
+                "project.created",
+                project=namespace_id,
+                payload={"name": normalized_name, "description": normalized_description},
+                occurred_at=timestamp,
+            )
+            self._sync_registry_context_graph(connection)
+            connection.commit()
+        project = self.get_project_namespace(namespace_id)
+        if project is None:
+            raise RuntimeError("created project namespace could not be loaded")
+        return project
+
+    def get_project_namespace(self, namespace_id: str) -> dict[str, Any] | None:
+        normalized_id = _registry_text(
+            namespace_id,
+            field="project id",
+            maximum=255,
+        )
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, namespace_kind, name, description, parent_id,
+                       created_at, updated_at
+                FROM context_namespaces
+                WHERE id = ? AND namespace_kind = 'project'
+                """,
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._project_namespace(connection, row)
+
+    def list_project_namespaces(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, namespace_kind, name, description, parent_id,
+                       created_at, updated_at
+                FROM context_namespaces
+                WHERE namespace_kind = 'project'
+                ORDER BY lower(name), id
+                """
+            ).fetchall()
+            return [self._project_namespace(connection, row) for row in rows]
+
+    @staticmethod
+    def _project_namespace(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> dict[str, Any]:
+        resource_rows = connection.execute(
+            """
+            SELECT resource.id, resource.provider, resource.resource_kind,
+                   resource.external_identity, resource.label,
+                   resource.properties_json, resource.created_at,
+                   resource.updated_at, binding.alias
+            FROM context_namespace_resources binding
+            JOIN context_resources resource ON resource.id = binding.resource_id
+            WHERE binding.namespace_id = ?
+            ORDER BY lower(COALESCE(binding.alias, resource.label)), resource.id
+            """,
+            (row["id"],),
+        ).fetchall()
+        resources: list[dict[str, Any]] = []
+        for resource in resource_rows:
+            view_rows = connection.execute(
+                """
+                SELECT id, locator, revision, state_hash, properties_json, observed_at
+                FROM context_resource_views
+                WHERE resource_id = ?
+                ORDER BY locator
+                """,
+                (resource["id"],),
+            ).fetchall()
+            resources.append(
+                {
+                    "id": resource["id"],
+                    "provider": resource["provider"],
+                    "kind": resource["resource_kind"],
+                    "externalIdentity": resource["external_identity"],
+                    "label": resource["label"],
+                    "alias": resource["alias"],
+                    "properties": json.loads(resource["properties_json"]),
+                    "createdAt": resource["created_at"],
+                    "updatedAt": resource["updated_at"],
+                    "views": [
+                        {
+                            "id": view["id"],
+                            "locator": view["locator"],
+                            "revision": view["revision"],
+                            "stateHash": view["state_hash"],
+                            "properties": json.loads(view["properties_json"]),
+                            "observedAt": view["observed_at"],
+                        }
+                        for view in view_rows
+                    ],
+                }
+            )
+        return {
+            "id": row["id"],
+            "kind": row["namespace_kind"],
+            "name": row["name"],
+            "description": row["description"],
+            "parentId": row["parent_id"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+            "resources": resources,
+        }
+
+    def attach_resource(
+        self,
+        namespace_id: str,
+        *,
+        provider: str,
+        resource_kind: str,
+        external_identity: str,
+        label: str,
+        properties: dict[str, Any] | None = None,
+        views: Sequence[dict[str, Any]] = (),
+        alias: str | None = None,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_namespace = _registry_text(
+            namespace_id,
+            field="project id",
+            maximum=255,
+        )
+        normalized_provider = _registry_kind(provider, field="resource provider")
+        normalized_kind = _registry_kind(resource_kind, field="resource kind")
+        normalized_identity = _registry_text(
+            external_identity,
+            field="resource identity",
+            maximum=4_096,
+        )
+        normalized_label = _registry_text(label, field="resource label", maximum=255)
+        normalized_alias = (
+            _registry_text(alias, field="resource alias", maximum=255) if alias else None
+        )
+        if len(views) > 64:
+            raise ValueError("resource cannot contain more than 64 views")
+        timestamp = _now(observed_at)
+        with self.connect() as connection:
+            if (
+                connection.execute(
+                    """
+                    SELECT 1 FROM context_namespaces
+                    WHERE id = ? AND namespace_kind = 'project'
+                    """,
+                    (normalized_namespace,),
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(f"project namespace not found: {normalized_namespace}")
+            existing = connection.execute(
+                """
+                SELECT id FROM context_resources
+                WHERE provider = ? AND external_identity = ?
+                """,
+                (normalized_provider, normalized_identity),
+            ).fetchone()
+            resource_id = str(existing["id"]) if existing is not None else _registry_id("resource")
+            connection.execute(
+                """
+                INSERT INTO context_resources(
+                    id, provider, resource_kind, external_identity, label,
+                    properties_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, external_identity) DO UPDATE SET
+                    resource_kind = excluded.resource_kind,
+                    label = excluded.label,
+                    properties_json = excluded.properties_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    resource_id,
+                    normalized_provider,
+                    normalized_kind,
+                    normalized_identity,
+                    normalized_label,
+                    stable_json(properties or {}),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO context_namespace_resources(
+                    namespace_id, resource_id, alias, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(namespace_id, resource_id) DO UPDATE SET
+                    alias = COALESCE(
+                        excluded.alias,
+                        context_namespace_resources.alias
+                    )
+                """,
+                (normalized_namespace, resource_id, normalized_alias, timestamp),
+            )
+            for raw_view in views:
+                if not isinstance(raw_view, dict):
+                    raise ValueError("resource views must be objects")
+                locator = _registry_text(
+                    str(raw_view.get("locator", "")),
+                    field="resource view locator",
+                    maximum=4_096,
+                )
+                revision_value = raw_view.get("revision")
+                revision = (
+                    _registry_text(
+                        str(revision_value),
+                        field="resource view revision",
+                        maximum=512,
+                    )
+                    if revision_value is not None
+                    else None
+                )
+                state_hash_value = raw_view.get("stateHash")
+                state_hash = (
+                    _registry_text(
+                        str(state_hash_value),
+                        field="resource view state hash",
+                        maximum=512,
+                    )
+                    if state_hash_value is not None
+                    else None
+                )
+                view_properties = raw_view.get("properties")
+                if view_properties is not None and not isinstance(view_properties, dict):
+                    raise ValueError("resource view properties must be an object")
+                view = connection.execute(
+                    """
+                    SELECT id FROM context_resource_views
+                    WHERE resource_id = ? AND locator = ?
+                    """,
+                    (resource_id, locator),
+                ).fetchone()
+                view_id = str(view["id"]) if view is not None else _registry_id("view")
+                connection.execute(
+                    """
+                    INSERT INTO context_resource_views(
+                        id, resource_id, locator, revision, state_hash,
+                        properties_json, observed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(resource_id, locator) DO UPDATE SET
+                        revision = excluded.revision,
+                        state_hash = excluded.state_hash,
+                        properties_json = excluded.properties_json,
+                        observed_at = excluded.observed_at
+                    """,
+                    (
+                        view_id,
+                        resource_id,
+                        locator,
+                        revision,
+                        state_hash,
+                        stable_json(view_properties or {}),
+                        timestamp,
+                    ),
+                )
+            connection.execute(
+                "UPDATE context_namespaces SET updated_at = ? WHERE id = ?",
+                (timestamp, normalized_namespace),
+            )
+            self._record_event(
+                connection,
+                "resource.attached",
+                project=normalized_namespace,
+                payload={
+                    "resourceId": resource_id,
+                    "provider": normalized_provider,
+                    "kind": normalized_kind,
+                },
+                occurred_at=timestamp,
+            )
+            self._sync_registry_context_graph(connection)
+            connection.commit()
+        project = self.get_project_namespace(normalized_namespace)
+        if project is None:
+            raise RuntimeError("updated project namespace could not be loaded")
+        return project
+
+    def resource_by_identity(
+        self,
+        *,
+        provider: str,
+        external_identity: str,
+    ) -> dict[str, Any] | None:
+        normalized_provider = _registry_kind(provider, field="resource provider")
+        normalized_identity = _registry_text(
+            external_identity,
+            field="resource identity",
+            maximum=4_096,
+        )
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT resource.id, binding.namespace_id
+                FROM context_resources resource
+                JOIN context_namespace_resources binding
+                  ON binding.resource_id = resource.id
+                WHERE resource.provider = ? AND resource.external_identity = ?
+                """,
+                (normalized_provider, normalized_identity),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"resourceId": row["id"], "namespaceId": row["namespace_id"]}
+
+    def resolve_resource_view(self, location: str | Path) -> dict[str, Any] | None:
+        requested = Path(location).expanduser().resolve()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT namespace.id AS namespace_id, namespace.name AS namespace_name,
+                       resource.id AS resource_id, resource.provider,
+                       resource.resource_kind, resource.label AS resource_label,
+                       view.id AS view_id, view.locator, view.revision,
+                       view.state_hash, view.properties_json
+                FROM context_resource_views view
+                JOIN context_resources resource ON resource.id = view.resource_id
+                JOIN context_namespace_resources binding
+                  ON binding.resource_id = resource.id
+                JOIN context_namespaces namespace ON namespace.id = binding.namespace_id
+                ORDER BY length(view.locator) DESC, view.locator
+                """
+            ).fetchall()
+        for row in rows:
+            locator = Path(str(row["locator"])).expanduser()
+            try:
+                requested.relative_to(locator.resolve())
+            except (OSError, ValueError):
+                continue
+            return {
+                "namespaceId": row["namespace_id"],
+                "namespaceName": row["namespace_name"],
+                "resourceId": row["resource_id"],
+                "provider": row["provider"],
+                "resourceKind": row["resource_kind"],
+                "resourceLabel": row["resource_label"],
+                "viewId": row["view_id"],
+                "locator": str(locator.resolve()),
+                "revision": row["revision"],
+                "stateHash": row["state_hash"],
+                "properties": json.loads(row["properties_json"]),
+            }
+        return None
+
+    def project_resource_selection(
+        self,
+        namespace_id: str,
+        *,
+        active_view_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Select one deterministic view per resource for an effective context."""
+        project = self.get_project_namespace(namespace_id)
+        if project is None:
+            return {"projectNodeId": None, "resources": [], "viewIds": [], "nodeIds": []}
+        selected_resources: list[dict[str, Any]] = []
+        node_ids = [_stable_id(CONTEXT_NAMESPACE, namespace_id, namespace_id)]
+        view_ids: list[str] = []
+        for resource in project["resources"]:
+            resource_node_id = _stable_id(RESOURCE_NAMESPACE, "", str(resource["id"]))
+            node_ids.append(resource_node_id)
+            views = list(resource["views"])
+            selected_view = None
+            if views:
+                selected_view = min(
+                    views,
+                    key=lambda view: (
+                        0 if view["id"] == active_view_id else 1,
+                        0
+                        if str(view.get("properties", {}).get("branch") or "")
+                        in {"main", "master"}
+                        else 1,
+                        str(view["locator"]),
+                    ),
+                )
+                view_ids.append(str(selected_view["id"]))
+                node_ids.append(
+                    _stable_id(RESOURCE_NAMESPACE, "", str(selected_view["id"]))
+                )
+            selected_resources.append(
+                {
+                    **resource,
+                    "nodeId": resource_node_id,
+                    "selectedView": (
+                        {
+                            **selected_view,
+                            "nodeId": _stable_id(
+                                RESOURCE_NAMESPACE,
+                                "",
+                                str(selected_view["id"]),
+                            ),
+                        }
+                        if selected_view is not None
+                        else None
+                    ),
+                }
+            )
+        return {
+            "projectNodeId": node_ids[0],
+            "resources": selected_resources,
+            "viewIds": view_ids,
+            "nodeIds": list(dict.fromkeys(node_ids)),
+        }
+
     def set_topic(
         self,
         key: str,
@@ -549,6 +1354,7 @@ class ContextGraphRepository:
             )
             if origin == "graph-seed" and seed_node_id:
                 self._link_seed(connection, key, seed_node_id, seed_graph, timestamp)
+            self._sync_registry_context_graph(connection)
             connection.commit()
             return action
 
@@ -800,6 +1606,7 @@ class ContextGraphRepository:
                         payload={"changes": event_changes},
                         occurred_at=timestamp,
                     )
+                self._sync_registry_context_graph(connection)
                 connection.commit()
             return {"applied": apply, "project": normalized_project, "changes": results}
 
@@ -1789,6 +2596,25 @@ class ContextGraphRepository:
                 """,
                 node_rows,
             )
+            matching_views = [
+                view
+                for view in connection.execute(
+                    "SELECT id, locator FROM context_resource_views ORDER BY id"
+                ).fetchall()
+                if resolve_project_id(str(view["locator"])) == normalized_project
+            ]
+            for view in matching_views:
+                view_node_id = _stable_id(RESOURCE_NAMESPACE, "", str(view["id"]))
+                for code_node_id in node_ids.values():
+                    self._upsert_edge(
+                        connection,
+                        source_id=view_node_id,
+                        target_id=code_node_id,
+                        relation="contains",
+                        origin="derived",
+                        properties={"graphProject": normalized_project},
+                        timestamp=timestamp,
+                    )
             connection.executemany(
                 """
                 INSERT INTO context_edges(
@@ -1995,67 +2821,128 @@ class ContextGraphRepository:
             "truncated": len(nodes) < len(eligible_nodes) or len(links) < len(eligible_edges),
         }
 
-    def list_retrieval_nodes(self, *, project: str) -> list[dict[str, Any]]:
+    def list_retrieval_nodes(
+        self,
+        *,
+        project: str,
+        memory_project: str | None = None,
+        code_projects: Sequence[str] = (),
+        resource_node_ids: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
         """Return human memory and structural nodes visible to one project."""
         normalized_project = project.strip()
+        normalized_memory_project = (memory_project or project).strip()
         if not normalized_project:
             raise ValueError("project cannot be empty")
+        if not normalized_memory_project:
+            raise ValueError("memory_project cannot be empty")
+        selected_code_projects = _context_projects(normalized_project, code_projects)
+        selected_resource_ids = tuple(dict.fromkeys(resource_node_ids))
+        code_placeholders = ",".join("?" for _ in selected_code_projects)
+        resource_clause = ""
+        parameters: list[Any] = [MEMORY_NAMESPACE, normalized_memory_project]
+        parameters.extend(selected_code_projects)
+        if selected_resource_ids:
+            resource_placeholders = ",".join("?" for _ in selected_resource_ids)
+            resource_clause = f" OR id IN ({resource_placeholders})"
+            parameters.extend(selected_resource_ids)
         with self.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, namespace, project, stable_key, node_type, label,
                        value, source, origin, properties_json, external_id,
                        source_graph, set_at, created_at, updated_at
                 FROM context_nodes
                 WHERE (namespace = ? AND project IN ('', ?))
-                   OR (namespace = 'code' AND project = ?)
+                   OR (namespace = 'code' AND project IN ({code_placeholders}))
+                   {resource_clause}
                 ORDER BY namespace, stable_key
-                """,
-                (MEMORY_NAMESPACE, normalized_project, normalized_project),
+                """,  # nosec B608
+                parameters,
             ).fetchall()
         nodes = [_context_node(row) for row in rows]
-        return _prefer_project_memory(nodes, normalized_project)
+        return _prefer_project_memory(nodes, normalized_memory_project)
 
-    def retrieval_inventory(self, *, project: str) -> dict[str, Any]:
+    def retrieval_inventory(
+        self,
+        *,
+        project: str,
+        memory_project: str | None = None,
+        code_projects: Sequence[str] = (),
+        resource_node_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
         """Aggregate a compact catalog without loading node content."""
         normalized_project = project.strip()
+        normalized_memory_project = (memory_project or project).strip()
         if not normalized_project:
             raise ValueError("project cannot be empty")
-        visible_topics = self.list_topics(project=normalized_project)
+        if not normalized_memory_project:
+            raise ValueError("memory_project cannot be empty")
+        selected_code_projects = _context_projects(normalized_project, code_projects)
+        selected_resource_ids = tuple(dict.fromkeys(resource_node_ids))
+        code_placeholders = ",".join("?" for _ in selected_code_projects)
+        visible_topics = self.list_topics(project=normalized_memory_project)
         with self.connect() as connection:
             code_count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM context_nodes WHERE namespace = 'code' AND project = ?",
-                    (normalized_project,),
+                    f"SELECT COUNT(*) FROM context_nodes "
+                    f"WHERE namespace = 'code' AND project IN ({code_placeholders})",  # nosec B608
+                    selected_code_projects,
                 ).fetchone()[0]
             )
             type_rows = connection.execute(
-                """
+                f"""
                 SELECT node_type, COUNT(*) AS count
                 FROM context_nodes
-                WHERE namespace = 'code' AND project = ?
+                WHERE namespace = 'code' AND project IN ({code_placeholders})
                 GROUP BY node_type
                 ORDER BY count DESC, node_type ASC
                 LIMIT 16
-                """,
-                (normalized_project,),
+                """,  # nosec B608
+                selected_code_projects,
             ).fetchall()
             topic_rows = connection.execute(
                 """
                 SELECT stable_key FROM context_nodes
                 WHERE namespace = ? AND project IN ('', ?) ORDER BY stable_key
                 """,
-                (MEMORY_NAMESPACE, normalized_project),
+                (MEMORY_NAMESPACE, normalized_memory_project),
             ).fetchall()
+            resource_count = 0
+            resource_type_rows: list[sqlite3.Row] = []
+            if selected_resource_ids:
+                placeholders = ",".join("?" for _ in selected_resource_ids)
+                resource_count = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM context_nodes WHERE id IN ({placeholders})",  # nosec B608
+                        selected_resource_ids,
+                    ).fetchone()[0]
+                )
+                resource_type_rows = connection.execute(
+                    f"""
+                    SELECT node_type, COUNT(*) AS count
+                    FROM context_nodes
+                    WHERE id IN ({placeholders})
+                    GROUP BY node_type
+                    ORDER BY count DESC, node_type
+                    """,  # nosec B608
+                    selected_resource_ids,
+                ).fetchall()
         namespaces: dict[str, int] = {}
         if visible_topics:
             namespaces[MEMORY_NAMESPACE] = len(visible_topics)
         if code_count:
             namespaces["code"] = code_count
+        if resource_count:
+            namespaces[RESOURCE_NAMESPACE] = resource_count
         return {
             "namespaces": namespaces,
             "codeTypes": [
                 {"name": row["node_type"], "count": int(row["count"])} for row in type_rows
+            ],
+            "resourceTypes": [
+                {"name": row["node_type"], "count": int(row["count"])}
+                for row in resource_type_rows
             ],
             "topicKeys": list(dict.fromkeys(str(row["stable_key"]) for row in topic_rows)),
         }
@@ -2068,12 +2955,21 @@ class ContextGraphRepository:
         active_paths: Sequence[str] = (),
         include_memory: bool = True,
         include_code: bool = True,
+        include_resources: bool = True,
+        memory_project: str | None = None,
+        code_projects: Sequence[str] = (),
+        resource_node_ids: Sequence[str] = (),
         limit: int = 2_000,
     ) -> list[dict[str, Any]]:
         """Generate a bounded FTS/path candidate pool for precise ranking."""
         normalized_project = project.strip()
+        normalized_memory_project = (memory_project or project).strip()
         if not normalized_project:
             raise ValueError("project cannot be empty")
+        if not normalized_memory_project:
+            raise ValueError("memory_project cannot be empty")
+        selected_code_projects = _context_projects(normalized_project, code_projects)
+        selected_resource_ids = tuple(dict.fromkeys(resource_node_ids))
         normalized_terms = list(
             dict.fromkeys(term.strip().lower() for term in terms if term.strip())
         )
@@ -2083,7 +2979,7 @@ class ContextGraphRepository:
         parsed_limit = int(limit)
         if parsed_limit < 1 or parsed_limit > 10_000:
             raise ValueError("retrieval candidate limit must be between 1 and 10000")
-        if not include_memory and not include_code:
+        if not include_memory and not include_code and not include_resources:
             return []
         select = """
             SELECT node.id, node.namespace, node.project, node.stable_key,
@@ -2104,27 +3000,35 @@ class ContextGraphRepository:
             def add_fts_candidates(namespace: str, maximum: int) -> None:
                 if maximum <= 0:
                     return
+                if namespace == MEMORY_NAMESPACE:
+                    visibility = "node.project IN ('', ?)"
+                    visibility_parameters: tuple[Any, ...] = (normalized_memory_project,)
+                elif namespace == "code":
+                    placeholders = ",".join("?" for _ in selected_code_projects)
+                    visibility = f"node.project IN ({placeholders})"
+                    visibility_parameters = selected_code_projects
+                else:
+                    if not selected_resource_ids:
+                        return
+                    placeholders = ",".join("?" for _ in selected_resource_ids)
+                    visibility = f"node.id IN ({placeholders})"
+                    visibility_parameters = selected_resource_ids
                 try:
                     rows = connection.execute(
                         select
-                        + """
+                        + f"""
                         FROM context_nodes_fts search
                         JOIN context_nodes node ON node.id = search.id
                         WHERE context_nodes_fts MATCH ?
                           AND node.namespace = ?
-                          AND (
-                              (node.namespace = ? AND node.project IN ('', ?))
-                              OR (node.namespace = 'code' AND node.project = ?)
-                          )
+                          AND {visibility}
                         ORDER BY bm25(context_nodes_fts), node.stable_key
                         LIMIT ?
-                        """,
+                        """,  # nosec B608
                         (
                             fts_query,
                             namespace,
-                            MEMORY_NAMESPACE,
-                            normalized_project,
-                            normalized_project,
+                            *visibility_parameters,
                             maximum,
                         ),
                     ).fetchall()
@@ -2139,6 +3043,16 @@ class ContextGraphRepository:
                 memory_limit = parsed_limit if not include_code else max(1, parsed_limit // 4)
                 add_fts_candidates(MEMORY_NAMESPACE, memory_limit)
 
+            if can_use_fts and include_resources:
+                add_fts_candidates(
+                    RESOURCE_NAMESPACE,
+                    min(max(1, parsed_limit // 4), parsed_limit - len(by_id)),
+                )
+                add_fts_candidates(
+                    CONTEXT_NAMESPACE,
+                    min(max(1, parsed_limit // 8), parsed_limit - len(by_id)),
+                )
+
             path_budget = (
                 max(1, parsed_limit // 4) if normalized_paths and normalized_terms else parsed_limit
             )
@@ -2149,14 +3063,15 @@ class ContextGraphRepository:
                     break
                 rows = connection.execute(
                     select
-                    + """
+                    + f"""
                     FROM context_nodes node
-                    WHERE node.namespace = 'code' AND node.project = ?
+                    WHERE node.namespace = 'code'
+                      AND node.project IN ({','.join('?' for _ in selected_code_projects)})
                       AND instr(lower(COALESCE(node.source, '')), ?) > 0
                     ORDER BY node.stable_key
                     LIMIT ?
-                    """,
-                    (normalized_project, path, remaining),
+                    """,  # nosec B608
+                    (*selected_code_projects, path, remaining),
                 ).fetchall()
                 before = len(by_id)
                 by_id.update((str(row["id"]), _context_node(row)) for row in rows)
@@ -2165,27 +3080,37 @@ class ContextGraphRepository:
             if can_use_fts and include_code:
                 add_fts_candidates("code", parsed_limit - len(by_id))
             if not by_id:
+                code_placeholders = ",".join("?" for _ in selected_code_projects)
+                resource_clause = ""
+                resource_parameters: tuple[str, ...] = ()
+                if include_resources and selected_resource_ids:
+                    placeholders = ",".join("?" for _ in selected_resource_ids)
+                    resource_clause = f" OR node.id IN ({placeholders})"
+                    resource_parameters = selected_resource_ids
                 rows = connection.execute(
                     select
-                    + """
+                    + f"""
                     FROM context_nodes node
                     WHERE (? = 1 AND node.namespace = ? AND node.project IN ('', ?))
-                       OR (? = 1 AND node.namespace = 'code' AND node.project = ?)
+                       OR (? = 1 AND node.namespace = 'code'
+                           AND node.project IN ({code_placeholders}))
+                       {resource_clause}
                     ORDER BY node.namespace, node.stable_key
                     LIMIT ?
-                    """,
+                    """,  # nosec B608
                     (
                         int(include_memory),
                         MEMORY_NAMESPACE,
-                        normalized_project,
+                        normalized_memory_project,
                         int(include_code),
-                        normalized_project,
+                        *selected_code_projects,
+                        *resource_parameters,
                         parsed_limit,
                     ),
                 ).fetchall()
                 by_id.update((str(row["id"]), _context_node(row)) for row in rows)
         return _prefer_project_memory(
-            [by_id[node_id] for node_id in sorted(by_id)], normalized_project
+            [by_id[node_id] for node_id in sorted(by_id)], normalized_memory_project
         )
 
     def get_context_nodes(self, node_ids: Sequence[str]) -> list[dict[str, Any]]:
@@ -2300,13 +3225,32 @@ class ContextGraphRepository:
         with self.connect() as connection:
             node_row = connection.execute(
                 """
-                SELECT stable_key, label, source, node_type, properties_json
+                SELECT stable_key, label, source, node_type, project, properties_json
                 FROM context_nodes WHERE id = ? AND namespace = 'code'
                 """,
                 (node_id,),
             ).fetchone()
             if node_row is None:
                 return None
+            view_rows = connection.execute(
+                """
+                SELECT view.id AS view_id, view.locator, view.revision,
+                       view.properties_json AS view_properties,
+                       resource.id AS resource_id, resource.label AS resource_label,
+                       resource.provider, resource.external_identity
+                FROM context_resource_views view
+                JOIN context_resources resource ON resource.id = view.resource_id
+                ORDER BY view.id
+                """,
+            ).fetchall()
+            view_row = next(
+                (
+                    row
+                    for row in view_rows
+                    if resolve_project_id(str(row["locator"])) == node_row["project"]
+                ),
+                None,
+            )
             edge_rows = connection.execute(
                 """
                 SELECT e.relation, e.confidence, e.weight, e.source_id, e.target_id,
@@ -2324,6 +3268,20 @@ class ContextGraphRepository:
             ).fetchall()
         node = json.loads(node_row["properties_json"])
         node["id"] = node_row["stable_key"]
+        resource_context = (
+            {
+                "resourceId": view_row["resource_id"],
+                "resourceLabel": view_row["resource_label"],
+                "provider": view_row["provider"],
+                "externalIdentity": view_row["external_identity"],
+                "viewId": view_row["view_id"],
+                "locator": view_row["locator"],
+                "revision": view_row["revision"],
+                "view": _json_object(view_row["view_properties"]),
+            }
+            if view_row is not None
+            else None
+        )
         relationships = [
             {
                 "direction": "out" if row["source_id"] == node_id else "in",
@@ -2337,6 +3295,7 @@ class ContextGraphRepository:
         ]
         return {
             "node": node,
+            "resource": resource_context,
             "relationships": relationships,
             "truncated": max(0, len(edge_rows) - edge_limit),
         }
@@ -3181,6 +4140,15 @@ class ContextGraphRepository:
         with self.connect() as connection:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             counts = {
+                "projects": int(
+                    connection.execute("SELECT COUNT(*) FROM context_namespaces").fetchone()[0]
+                ),
+                "resources": int(
+                    connection.execute("SELECT COUNT(*) FROM context_resources").fetchone()[0]
+                ),
+                "resourceViews": int(
+                    connection.execute("SELECT COUNT(*) FROM context_resource_views").fetchone()[0]
+                ),
                 "nodes": int(
                     connection.execute("SELECT COUNT(*) FROM context_nodes").fetchone()[0]
                 ),

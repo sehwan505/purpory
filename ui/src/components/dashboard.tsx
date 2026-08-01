@@ -7,6 +7,7 @@ import {
   CircleDot,
   Clock3,
   Database,
+  FolderKanban,
   GitFork,
   Globe2,
   History,
@@ -40,6 +41,8 @@ import {
 import { Input, Textarea } from "@/components/ui/input"
 import {
   confirmTopic,
+  attachGitResource,
+  createProject,
   createTopic,
   decideGlobalMemoryRequest,
   deleteTopic,
@@ -51,6 +54,7 @@ import {
   getMemoryVersions,
   getModelStatus,
   getNeedsReviews,
+  getProjects,
   getRecall,
   getRequests,
   getView,
@@ -72,6 +76,7 @@ import type {
   MemoryVersion,
   ModelStatus,
   NeedsReview,
+  ProjectNamespace,
   Recall,
   Session,
   Topic,
@@ -79,13 +84,26 @@ import type {
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-type Page = "overview" | "delivery" | "context" | "memory" | "sessions" | "requests" | "graph"
+type Page =
+  | "overview"
+  | "projects"
+  | "delivery"
+  | "context"
+  | "memory"
+  | "sessions"
+  | "requests"
+  | "graph"
 
 const pageMeta: Record<Page, { eyebrow: string; title: string; description: string }> = {
   overview: {
     eyebrow: "System pulse",
     title: "Overview",
     description: "The context plane at a glance—what exists, what moved, and what still needs you.",
+  },
+  projects: {
+    eyebrow: "Work context",
+    title: "Projects",
+    description: "Group intent, knowledge, and resources under a durable work context.",
   },
   delivery: {
     eyebrow: "Routing intelligence",
@@ -121,6 +139,10 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
 
 const emptyView: ViewResponse = {
   project: "",
+  graphProject: "",
+  graphProjects: [],
+  resourceBinding: null,
+  resources: [],
   topics: [],
   sessions: [],
   diagnostics: { database: "", integrity: "unknown", schemaVersion: 0, counts: {} },
@@ -1558,6 +1580,248 @@ function MemoryGovernancePanel({
   )
 }
 
+function GitResourceForm({
+  project,
+  onRefresh,
+}: {
+  project: ProjectNamespace
+  onRefresh: () => Promise<void>
+}) {
+  const [path, setPath] = useState("")
+  const [alias, setAlias] = useState("")
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState("")
+
+  async function attach(event: FormEvent) {
+    event.preventDefault()
+    setPending(true)
+    setError("")
+    try {
+      await attachGitResource(project.id, {
+        path,
+        ...(alias.trim() ? { alias } : {}),
+      })
+      setPath("")
+      setAlias("")
+      await onRefresh()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not attach Git resource")
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <form onSubmit={attach} className="mt-4 rounded-[12px] border border-line bg-canvas/60 p-4">
+      <div className="flex items-center gap-2">
+        <GitFork className="size-4 text-signal" />
+        <p className="text-xs font-semibold text-ink">Attach Git resource</p>
+        <Badge variant="neutral">Provider</Badge>
+      </div>
+      <p className="mt-1.5 text-[11px] leading-5 text-muted">
+        Enter a Git remote URL or a local checkout path. Remote URLs register the Resource; local checkouts also discover its worktree Views.
+      </p>
+      <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_12rem_auto]">
+        <Input
+          value={path}
+          onChange={(event) => setPath(event.target.value)}
+          placeholder="https://github.com/org/repo or /path/to/checkout"
+          aria-label={`Git checkout path for ${project.name}`}
+          required
+        />
+        <Input
+          value={alias}
+          onChange={(event) => setAlias(event.target.value)}
+          placeholder="Alias (optional)"
+          aria-label={`Resource alias for ${project.name}`}
+        />
+        <Button type="submit" disabled={pending || !path.trim()}>
+          {pending ? <RefreshCw className="animate-spin" /> : <Plus />}
+          Attach
+        </Button>
+      </div>
+      {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+    </form>
+  )
+}
+
+function ProjectPanel({
+  projects,
+  activeProject,
+  activeView,
+  onRefresh,
+}: {
+  projects: ProjectNamespace[]
+  activeProject: string
+  activeView: string
+  onRefresh: () => Promise<void>
+}) {
+  const [name, setName] = useState("")
+  const [description, setDescription] = useState("")
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState("")
+
+  async function create(event: FormEvent) {
+    event.preventDefault()
+    setPending(true)
+    setError("")
+    try {
+      await createProject({ name, description })
+      setName("")
+      setDescription("")
+      await onRefresh()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create project")
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>Create a project context</CardTitle>
+            <CardDescription>
+              A project is a durable namespace for intent and knowledge. Resources provide the changing
+              material an agent works with.
+            </CardDescription>
+          </div>
+          <FolderKanban className="size-5 text-signal" />
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={create} className="grid gap-3 lg:grid-cols-[18rem_minmax(0,1fr)_auto]">
+            <Input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Project name"
+              aria-label="Project name"
+              required
+            />
+            <Input
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="What work belongs in this context?"
+              aria-label="Project description"
+            />
+            <Button type="submit" disabled={pending || !name.trim()}>
+              {pending ? <RefreshCw className="animate-spin" /> : <Plus />}
+              Create project
+            </Button>
+          </form>
+          {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+        </CardContent>
+      </Card>
+
+      {projects.map((project) => {
+        const resourceCount = project.resources.length
+        const viewCount = project.resources.reduce((sum, resource) => sum + resource.views.length, 0)
+        return (
+          <Card key={project.id} className={cn(project.id === activeProject && "border-signal/35")}>
+            <CardHeader>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <CardTitle>{project.name}</CardTitle>
+                  {project.id === activeProject && <Badge variant="success">Active context</Badge>}
+                  <Badge variant="neutral">{resourceCount} resources</Badge>
+                  <Badge variant="neutral">{viewCount} views</Badge>
+                </div>
+                <CardDescription>
+                  {project.description || "No description yet."}
+                </CardDescription>
+                <p className="mt-2 truncate font-mono text-[10px] text-dim">{project.id}</p>
+              </div>
+              <FolderKanban className="size-5 text-signal" />
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {project.resources.map((resource) => (
+                  <article key={resource.id} className="surface-row rounded-[14px] p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <GitFork className="size-4 text-signal" />
+                          <span className="text-sm font-semibold text-ink">
+                            {resource.alias || resource.label}
+                          </span>
+                          <Badge variant="blue">{resource.provider}</Badge>
+                          <Badge variant="neutral">{resource.kind}</Badge>
+                        </div>
+                        <p className="mt-2 break-all font-mono text-[10px] text-dim">
+                          {resource.externalIdentity}
+                        </p>
+                      </div>
+                      <span className="text-[10px] text-dim">{relativeTime(resource.updatedAt)}</span>
+                    </div>
+                    <div className="mt-4 grid gap-2 xl:grid-cols-2">
+                      {resource.views.map((view) => {
+                        const branch =
+                          typeof view.properties.branch === "string"
+                            ? view.properties.branch
+                            : "detached"
+                        const dirty = view.properties.dirty === true
+                        return (
+                          <div
+                            key={view.id}
+                            className={cn(
+                              "rounded-[11px] border border-line bg-panel px-4 py-3",
+                              view.id === activeView && "border-signal/35 bg-signal-soft/40",
+                            )}
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-[11px] font-semibold text-ink">
+                                {branch}
+                              </span>
+                              {dirty && <Badge variant="warning">Dirty</Badge>}
+                              {view.id === activeView && <Badge variant="success">Active view</Badge>}
+                              {view.revision && (
+                                <span className="font-mono text-[10px] text-dim">
+                                  {view.revision.slice(0, 10)}
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-2 break-all font-mono text-[10px] leading-5 text-muted">
+                              {view.locator}
+                            </p>
+                          </div>
+                        )
+                      })}
+                      {!resource.views.length && (
+                        <div className="rounded-[11px] border border-dashed border-line bg-panel px-4 py-3 text-[11px] leading-5 text-muted">
+                          Remote Resource registered. Attach a local checkout with the same origin URL when structural or file context is needed.
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                ))}
+                {!project.resources.length && (
+                  <EmptyState
+                    icon={<GitFork />}
+                    title="No resources attached"
+                    detail="The project namespace already exists. Attach material only when it should inform this work context."
+                  />
+                )}
+              </div>
+              <GitResourceForm project={project} onRefresh={onRefresh} />
+            </CardContent>
+          </Card>
+        )
+      })}
+
+      {!projects.length && (
+        <Card>
+          <EmptyState
+            icon={<FolderKanban />}
+            title="No project contexts"
+            detail="Create one to give intent, knowledge, and changing resources a shared boundary."
+          />
+        </Card>
+      )}
+    </div>
+  )
+}
+
 function EmptyState({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) {
   return (
     <div className="flex flex-col items-center px-5 py-12 text-center text-dim">
@@ -1571,6 +1835,7 @@ function EmptyState({ icon, title, detail }: { icon: ReactNode; title: string; d
 export function Dashboard() {
   const [page, setPage] = useState<Page>("overview")
   const [view, setView] = useState(emptyView)
+  const [projects, setProjects] = useState<ProjectNamespace[]>([])
   const [recall, setRecall] = useState(emptyRecall)
   const [requests, setRequests] = useState<ContextRequest[]>([])
   const [needsReviews, setNeedsReviews] = useState<NeedsReview[]>([])
@@ -1585,6 +1850,7 @@ export function Dashboard() {
     try {
       const [
         nextView,
+        nextProjects,
         nextRecall,
         nextRequests,
         nextNeedsReviews,
@@ -1594,6 +1860,7 @@ export function Dashboard() {
         nextModelStatus,
       ] = await Promise.all([
         getView(),
+        getProjects(),
         getRecall(),
         getRequests(),
         getNeedsReviews(),
@@ -1603,6 +1870,7 @@ export function Dashboard() {
         getModelStatus(),
       ])
       setView(nextView)
+      setProjects(nextProjects)
       setRecall(nextRecall)
       setRequests(nextRequests)
       setNeedsReviews(nextNeedsReviews)
@@ -1630,6 +1898,7 @@ export function Dashboard() {
 
   const navigation: Array<{ id: Page; label: string; icon: ReactNode; count?: number }> = [
     { id: "overview", label: "Overview", icon: <LayoutDashboard /> },
+    { id: "projects", label: "Projects", icon: <FolderKanban />, count: projects.length },
     { id: "delivery", label: "Delivery", icon: <Route />, count: contextDecisions.length },
     { id: "context", label: "Context", icon: <Database />, count: view.topics.length },
     {
@@ -1810,6 +2079,14 @@ export function Dashboard() {
                   </div>
                 </section>
               </div>
+            )}
+            {page === "projects" && (
+              <ProjectPanel
+                projects={projects}
+                activeProject={view.project}
+                activeView={view.graphProject}
+                onRefresh={refresh}
+              />
             )}
             {page === "delivery" && (
               <PreparationPanel

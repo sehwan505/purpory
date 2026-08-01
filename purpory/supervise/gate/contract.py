@@ -10,7 +10,7 @@ PROMPT_VERSION = "purpory-gate-v3"
 
 MODEL_ACTIONS = frozenset({"skip", "search", "ask"})
 FINAL_ACTIONS = frozenset({"skip", "retrieve", "ask"})
-GATE_SCOPES = frozenset({"human", "code", "session"})
+GATE_SCOPES = frozenset({"human", "resource", "code", "session"})
 REASON_CODES = frozenset(
     {
         "SELF_CONTAINED",
