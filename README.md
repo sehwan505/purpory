@@ -50,6 +50,16 @@ purpory prepare "<request>" [--path <active-path>] [--budget 2000] [--no-retain-
 purpory dashboard [--port <port>]
 ```
 
+The dashboard can also create explicit Project contexts and attach Resources to them. Projects,
+intent, knowledge, Resources, and Resource Views are first-class nodes in the same context graph;
+provider registry tables remain operational projections. Git is the first resource provider: a
+remote URL identifies one repository Resource, while each local checkout or worktree is a separate
+Resource View with its own revision and code graph. One Project may select Views from several
+Resources, and one Resource may participate in several Projects. This lets agents combine durable
+project decisions with multiple current materials without allowing one worktree's structural
+snapshot to overwrite another. The model is provider-neutral and can also represent document
+collections, datasets, or other non-code material.
+
 `prepare` returns ready-to-inject context. If an agent needs more information, it calls `prepare`
 again with the new need and the same session ID. The delivery history suppresses unchanged context
 that session has already received, so the protocol does not require public catalog, search, expand,

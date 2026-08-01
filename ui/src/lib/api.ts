@@ -9,6 +9,7 @@ import type {
   MemoryVersion,
   ModelStatus,
   NeedsReview,
+  ProjectNamespace,
   Recall,
   ViewResponse,
 } from "@/lib/types"
@@ -59,6 +60,10 @@ async function parse<T>(response: Response): Promise<T> {
 
 export async function getView() {
   return parse<ViewResponse>(await fetch(readUrl("/api/view"), { cache: "no-store" }))
+}
+
+export async function getProjects() {
+  return parse<ProjectNamespace[]>(await fetch(readUrl("/api/projects"), { cache: "no-store" }))
 }
 
 export async function getRecall() {
@@ -124,6 +129,18 @@ export function createTopic(input: {
   kind: string
 }) {
   return mutate<{ key: string; action: string }>("/api/topics", "POST", input)
+}
+
+export function createProject(input: { name: string; description?: string }) {
+  return mutate<ProjectNamespace>("/api/projects", "POST", input)
+}
+
+export function attachGitResource(projectId: string, input: { path: string; alias?: string }) {
+  return mutate<ProjectNamespace>(
+    `/api/projects/${encodeURIComponent(projectId)}/resources/git`,
+    "POST",
+    input,
+  )
 }
 
 export function confirmTopic(key: string) {
@@ -198,7 +215,7 @@ export function submitContextFeedback(
 
 export function subscribeToEvents(onEvent: () => void) {
   const source = new EventSource(readUrl("/api/stream"))
-  for (const event of ["topic", "seed", "request", "context", "memory", "global-memory"]) {
+  for (const event of ["topic", "seed", "request", "context", "memory", "global-memory", "project"]) {
     source.addEventListener(event, onEvent)
   }
   return () => source.close()

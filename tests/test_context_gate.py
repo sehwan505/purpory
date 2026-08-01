@@ -394,7 +394,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
 
     assert result.proposal.action == "search"
     assert result.proposal.query == "전에 정한 인증 정책"
-    assert result.proposal.scopes == ("code", "human", "session")
+    assert result.proposal.scopes == ("code", "human", "resource", "session")
     assert result.proposal.reason_code == "CONTEXT_SEARCH_REQUIRED"
     assert "response_format" not in captured["body"]
     assert "temperature" not in captured["body"]

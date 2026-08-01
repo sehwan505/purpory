@@ -29,7 +29,7 @@ MAX_RESPONSE_BYTES = 65_536
 
 SYSTEM_PROMPT = """You are Purpory's memory gate classifier. Decide only whether the current request:
 - skip: general conversation, direct questions, or requests answered without durable project memory;
-- search: should search durable human decisions, code context, or prior session history;
+- search: should search durable human decisions, registered resources, code context, or prior session history;
 - ask: ONLY when a specific modification/action lacks essential target specifications. Purpory will still search memory before asking the user.
 
 Never classify general questions, conversation, or inquiries about purpory as ASK.
@@ -293,7 +293,7 @@ def _proposal_for_action(action: str, request: GateRequest) -> GateProposal:
         payload = {
             "action": "search",
             "query": request.message,
-            "scopes": ["human", "code", "session"],
+            "scopes": ["human", "resource", "code", "session"],
             "keywords": [],
             "reasonCode": "CONTEXT_SEARCH_REQUIRED",
             "clarification": None,

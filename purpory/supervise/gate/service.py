@@ -48,7 +48,7 @@ def _fallback_proposal(request: GateRequest) -> GateProposal:
         {
             "action": "search",
             "query": request.message,
-            "scopes": ["human", "code", "session"],
+            "scopes": ["human", "resource", "code", "session"],
             "keywords": [],
             "reasonCode": "GATE_UNAVAILABLE",
             "clarification": None,
@@ -64,10 +64,14 @@ class GatewayService:
         root: str | Path,
         provider: GateProvider | None,
         graph_project: str | None = None,
+        graph_projects: Sequence[str] = (),
+        resource_node_ids: Sequence[str] = (),
     ) -> None:
         self.repository = repository
         self.root = Path(root).expanduser().resolve()
         self.graph_project = graph_project
+        self.graph_projects = tuple(graph_projects)
+        self.resource_node_ids = tuple(resource_node_ids)
         self.provider = provider
 
     def prepare(
@@ -85,7 +89,9 @@ class GatewayService:
             repository=self.repository,
             root=self.root,
             graph_project=self.graph_project or project,
+            graph_projects=self.graph_projects,
             project=project,
+            resource_node_ids=self.resource_node_ids,
         )
         previous = self.repository.session_topic_keys(session_id)[:1_000]
         catalog = provisioner.catalog(session_id=session_id)
@@ -144,7 +150,7 @@ class GatewayService:
             search_scopes = (
                 proposal.scopes
                 if proposal.action == "search"
-                else ("human", "code", "session")
+                else ("human", "resource", "code", "session")
             )
             search_result = provisioner.search(
                 proposal.query or message,

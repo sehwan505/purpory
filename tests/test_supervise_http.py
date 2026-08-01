@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
@@ -45,6 +46,65 @@ def test_read_api_accepts_query_token(context_server: ContextHTTPServer) -> None
     status, body = _request(context_server, "GET", "/api/view?t=read-secret")
     assert status == 200
     assert body["topics"][0]["key"] == "decision.database"
+
+
+def test_project_api_creates_namespace_and_attaches_git_resource(
+    context_server: ContextHTTPServer,
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "-C", str(repository), "init", "-b", "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "X-Purpory-Token": "write-secret",
+    }
+
+    status, project = _request(
+        context_server,
+        "POST",
+        "/api/projects",
+        body=json.dumps({"name": "Agent work", "description": "Shared work context"}),
+        headers=headers,
+    )
+    assert status == 201
+
+    status, attached = _request(
+        context_server,
+        "POST",
+        f"/api/projects/{project['id']}/resources/git",
+        body=json.dumps({"path": str(repository), "alias": "Main repository"}),
+        headers=headers,
+    )
+    assert status == 200
+    assert attached["resources"][0]["alias"] == "Main repository"
+    assert attached["resources"][0]["views"][0]["locator"] == str(repository.resolve())
+
+    status, remote = _request(
+        context_server,
+        "POST",
+        f"/api/projects/{project['id']}/resources/git",
+        body=json.dumps({"path": "https://github.com/acme/remote.git"}),
+        headers=headers,
+    )
+    assert status == 200
+    remote_resource = next(
+        item for item in remote["resources"] if item["externalIdentity"] == "github.com/acme/remote"
+    )
+    assert remote_resource["views"] == []
+
+    status, projects = _request(
+        context_server,
+        "GET",
+        "/api/projects?t=read-secret",
+    )
+    assert status == 200
+    assert [item["name"] for item in projects] == ["Agent work"]
 
 
 def test_model_status_api_reports_managed_runtime_state(

@@ -10,6 +10,7 @@ from purpory.supervise.bridge import seed_from_graph
 from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 from purpory.supervise.identity import resolve_project_id, resolve_project_root
 from purpory.supervise.repository import ContextGraphRepository, memory_category, value_hash
+from purpory.supervise.resources import discover_git_resource, discover_git_worktree
 from purpory.supervise.recall import cue, recall_summary
 from purpory.supervise.resolve import resolve_topic
 
@@ -42,8 +43,10 @@ class ContextService:
     ) -> None:
         self.repository = ContextGraphRepository(db_path)
         self.root = resolve_project_root(root or Path.cwd())
-        self.project_id = resolve_project_id(self.root)
+        self._default_project_id = resolve_project_id(self.root)
         output_directory = os.environ.get("PURPORY_OUT", "purpory-out")
+        self.output_directory = output_directory
+        self._graph_path_explicit = graph_path is not None
         default_graph = self.root / output_directory / "graph.json"
         self.graph_path = (
             Path(graph_path).expanduser().resolve() if graph_path is not None else default_graph
@@ -51,39 +54,208 @@ class ContextService:
         self.stale_after_days = stale_after_days
         self.gate_provider = gate_provider
 
+    @property
+    def project_id(self) -> str:
+        return str(self._context_selection()["project"])
+
     def _selected_project(self, project: str | None = None) -> str:
-        return resolve_project_id(self.root, project) if project else self.project_id
+        return project.strip() if project and project.strip() else self.project_id
+
+    def _context_selection(
+        self,
+        *,
+        project: str | None = None,
+        working_directory: str | Path | None = None,
+        refresh_git: bool = False,
+    ) -> dict[str, Any]:
+        directory = Path(working_directory or self.root).expanduser().resolve()
+        binding = self.repository.resolve_resource_view(directory)
+        if binding is None and refresh_git:
+            try:
+                discovered = discover_git_worktree(directory)
+            except ValueError:
+                discovered = None
+            if discovered is not None:
+                resource = self.repository.resource_by_identity(
+                    provider="git",
+                    external_identity=str(discovered["externalIdentity"]),
+                )
+                if resource is not None:
+                    self.repository.attach_resource(
+                        str(resource["namespaceId"]),
+                        provider="git",
+                        resource_kind=str(discovered["resourceKind"]),
+                        external_identity=str(discovered["externalIdentity"]),
+                        label=str(discovered["resourceLabel"]),
+                        properties=discovered["resourceProperties"],
+                        views=[discovered["view"]],
+                    )
+                    binding = self.repository.resolve_resource_view(directory)
+        selected_project = project.strip() if project and project.strip() else None
+        active_binding = (
+            binding
+            if binding is not None
+            and (selected_project is None or selected_project == binding["namespaceId"])
+            else None
+        )
+        fallback = (
+            str(active_binding["namespaceId"])
+            if active_binding is not None
+            else selected_project or self._default_project_id
+        )
+        resources = self.repository.project_resource_selection(
+            fallback,
+            active_view_id=(str(active_binding["viewId"]) if active_binding else None),
+        )
+        graph_projects = list(
+            dict.fromkeys(
+                resolve_project_id(str(view["locator"]))
+                for resource in resources["resources"]
+                if isinstance((view := resource.get("selectedView")), dict)
+            )
+        )
+        if not graph_projects:
+            graph_projects = [fallback]
+        primary_graph = (
+            resolve_project_id(str(active_binding["locator"]))
+            if active_binding is not None
+            else str(graph_projects[0])
+        )
+        return {
+            "project": fallback,
+            "graphProject": primary_graph,
+            "graphProjects": graph_projects,
+            "resourceNodeIds": list(resources["nodeIds"]),
+            "resources": list(resources["resources"]),
+            "root": (
+                Path(str(active_binding["locator"])).resolve()
+                if active_binding is not None
+                else self.root
+            ),
+            "binding": active_binding,
+        }
+
+    def _selection_graph_path(self, selection: dict[str, Any]) -> Path:
+        if self._graph_path_explicit:
+            return self.graph_path
+        return Path(selection["root"]) / self.output_directory / "graph.json"
+
+    def _selection_graph_paths(self, selection: dict[str, Any]) -> list[tuple[str, Path]]:
+        if self._graph_path_explicit:
+            return [(str(selection["graphProject"]), self.graph_path)]
+        paths: list[tuple[str, Path]] = []
+        for resource in selection.get("resources", []):
+            view = resource.get("selectedView")
+            if not isinstance(view, dict):
+                continue
+            paths.append(
+                (
+                    resolve_project_id(str(view["locator"])),
+                    Path(str(view["locator"])) / self.output_directory / "graph.json",
+                )
+            )
+        if not paths:
+            paths.append(
+                (str(selection["graphProject"]), self._selection_graph_path(selection))
+            )
+        return paths
 
     def sync_graph(self) -> dict[str, Any]:
-        """Explicitly import the configured graph artifact into canonical storage."""
-        if not self.graph_path.is_file():
+        """Explicitly import selected graph artifacts into canonical storage."""
+        selection = self._context_selection(refresh_git=True)
+        graph_paths = self._selection_graph_paths(selection)
+        available = [(view_id, path) for view_id, path in graph_paths if path.is_file()]
+        if not available:
             return {
                 "imported": False,
                 "missing": True,
-                "project": self.project_id,
+                "project": selection["project"],
+                "graphProject": selection["graphProject"],
+                "graphProjects": selection["graphProjects"],
                 "nodes": 0,
                 "edges": 0,
             }
+        results = [
+            self.repository.import_graph(path, project=view_id)
+            for view_id, path in available
+        ]
+        primary = next(
+            (
+                result
+                for result in results
+                if result["project"] == str(selection["graphProject"])
+            ),
+            results[0],
+        )
         return {
-            **self.repository.import_graph(self.graph_path, project=self.project_id),
+            **primary,
+            "namespace": selection["project"],
+            "graphProjects": list(selection["graphProjects"]),
+            "graphs": results,
             "missing": False,
         }
 
-    def _provisioner(self, project: str | None = None) -> "ContextProvisioningService":
+    def _provisioner(
+        self,
+        project: str | None = None,
+        *,
+        working_directory: str | Path | None = None,
+    ) -> "ContextProvisioningService":
         from purpory.supervise.provisioning import ContextProvisioningService
 
-        selected_project = self._selected_project(project)
+        selection = self._context_selection(
+            project=project,
+            working_directory=working_directory,
+            refresh_git=True,
+        )
         return ContextProvisioningService(
             repository=self.repository,
-            root=self.root,
-            graph_project=selected_project,
-            project=selected_project,
+            root=selection["root"],
+            graph_project=str(selection["graphProject"]),
+            graph_projects=selection["graphProjects"],
+            project=str(selection["project"]),
+            resource_node_ids=selection["resourceNodeIds"],
             stale_after_days=self.stale_after_days,
         )
 
+    def projects(self) -> list[dict[str, Any]]:
+        return self.repository.list_project_namespaces()
+
+    def create_project(
+        self,
+        name: str,
+        *,
+        description: str = "",
+    ) -> dict[str, Any]:
+        return self.repository.create_project_namespace(name, description=description)
+
+    def attach_git_resource(
+        self,
+        project_id: str,
+        path: str | Path,
+        *,
+        alias: str | None = None,
+    ) -> dict[str, Any]:
+        discovered = discover_git_resource(path)
+        return self.repository.attach_resource(
+            project_id,
+            provider=str(discovered["provider"]),
+            resource_kind=str(discovered["resourceKind"]),
+            external_identity=str(discovered["externalIdentity"]),
+            label=str(discovered["resourceLabel"]),
+            properties=discovered["resourceProperties"],
+            views=discovered["views"],
+            alias=alias,
+        )
+
     def view(self, *, session_id: str | None = None, since: int | None = None) -> dict[str, Any]:
+        selection = self._context_selection()
         return {
-            "project": self.project_id,
+            "project": selection["project"],
+            "graphProject": selection["graphProject"],
+            "graphProjects": selection["graphProjects"],
+            "resourceBinding": selection["binding"],
+            "resources": selection["resources"],
             "topics": self.repository.topic_view(
                 project=self.project_id, stale_after_days=self.stale_after_days
             ),
@@ -92,14 +264,16 @@ class ContextService:
         }
 
     def topic(self, key: str) -> dict[str, Any]:
-        topic = self.repository.get_topic(key, project=self.project_id)
+        selection = self._context_selection(refresh_git=True)
+        memory_project = str(selection["project"])
+        topic = self.repository.get_topic(key, project=memory_project)
         if topic is None:
             raise KeyError(f"topic not found: {key}")
         resolved = resolve_topic(
             topic,
-            root=self.root,
+            root=selection["root"],
             repository=self.repository,
-            project=self.project_id,
+            project=str(selection["graphProject"]),
         )
         return {
             **topic,
@@ -110,7 +284,7 @@ class ContextService:
                 project=str(topic["project"]),
             ),
             "needsReviews": self.repository.list_needs_reviews(
-                project=self.project_id,
+                project=memory_project,
                 key=key,
             ),
             **resolved,
@@ -377,8 +551,9 @@ class ContextService:
         node_limit: int = 200,
         edge_limit: int = 500,
     ) -> dict[str, Any]:
+        selection = self._context_selection(refresh_git=True)
         return self.repository.graph_payload(
-            project=self.project_id,
+            project=str(selection["graphProject"]),
             scope=scope,
             node_limit=node_limit,
             edge_limit=edge_limit,
@@ -482,18 +657,27 @@ class ContextService:
         if provider is None and os.environ.get("PURPORY_GATE_URL", "").strip():
             provider = QwenGateProvider.from_environment()
         session = current_session_id(session_id)
-        selected_project = self._selected_project(project)
+        selection = self._context_selection(
+            project=project,
+            working_directory=working_directory,
+            refresh_git=True,
+        )
+        selected_project = str(selection["project"])
+        graph_project = str(selection["graphProject"])
+        selected_root = Path(selection["root"])
         gateway = GatewayService(
             repository=self.repository,
-            root=self.root,
-            graph_project=selected_project,
+            root=selected_root,
+            graph_project=graph_project,
+            graph_projects=selection["graphProjects"],
+            resource_node_ids=selection["resourceNodeIds"],
             provider=provider,
         )
         return gateway.prepare(
             message=message,
             session_id=session,
             project=selected_project,
-            working_directory=working_directory or self.root,
+            working_directory=working_directory or selected_root,
             active_paths=active_paths,
             token_budget=token_budget,
             retain_input=retain_input,
