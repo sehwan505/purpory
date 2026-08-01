@@ -46,14 +46,6 @@ def _load_graph(graph_path: str) -> nx.Graph:
             G = json_graph.node_link_graph(data, edges="links")
         except TypeError:
             G = json_graph.node_link_graph(data)
-        # Attach the work-memory overlay (derived sidecar next to graph.json) so
-        # the query/MCP read surface can annotate NODE lines display-only. Empty
-        # when no sidecar exists, leaving un-annotated output byte-identical.
-        try:
-            from purpory.reflect import load_learning_overlay as _llo
-            G.graph["_learning_overlay"] = _llo(resolved)
-        except Exception:
-            G.graph["_learning_overlay"] = {}
         return G
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -801,9 +793,6 @@ def _subgraph_to_text(G: nx.Graph, nodes: set[str], edges: list[tuple], token_bu
     """
     char_budget = token_budget * 3
     lines = []
-    # Work-memory overlay (derived sidecar) stashed on the graph at load time.
-    # Empty when no sidecar exists, so un-annotated output stays byte-identical.
-    overlay = getattr(G, "graph", {}).get("_learning_overlay", {}) or {}
     seed_set = set(seeds or [])
     ordered = [n for n in (seeds or []) if n in nodes] + \
               sorted(nodes - seed_set, key=lambda n: G.degree(n), reverse=True)
@@ -814,20 +803,11 @@ def _subgraph_to_text(G: nx.Graph, nodes: set[str], edges: list[tuple], token_bu
         # corpus document can otherwise inject ANSI escapes, fake purpory-out
         # log lines, or prompt-injection markup into the model's context via
         # source_file / source_location / community.
-        # The learning= suffix is appended INSIDE the bracket and BEFORE the
-        # budget check below, so it counts in char_budget accounting.
-        entry = overlay.get(str(nid))
-        learning_suffix = ""
-        if entry:
-            status = sanitize_label(str(entry.get("status", "")))
-            if status:
-                learning_suffix = f" learning={status}{':stale' if entry.get('stale') else ''}"
         line = (
             f"NODE {sanitize_label(d.get('label', nid))} "
             f"[src={sanitize_label(str(d.get('source_file', '')))} "
             f"loc={sanitize_label(str(d.get('source_location', '')))} "
-            f"community={sanitize_label(str(d.get('community_name') or d.get('community', '')))}"
-            f"{learning_suffix}]"
+            f"community={sanitize_label(str(d.get('community_name') or d.get('community', '')))}]"
         )
         lines.append(line)
     for u, v in edges:

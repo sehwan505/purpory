@@ -1211,10 +1211,3 @@ def distinct_repo_tags(graph_paths: "list[Path]") -> "list[str]":
         seen[t] = seen.get(t, 0) + 1
         unique.append(t if seen[t] == 1 else f"{t}-{seen[t]}")
     return unique
-
-
-def prune_repo_from_graph(G: nx.Graph, repo_tag: str) -> int:
-    """Remove all nodes tagged with repo_tag from G in-place. Returns count removed."""
-    to_remove = [n for n, d in G.nodes(data=True) if d.get("repo") == repo_tag]
-    G.remove_nodes_from(to_remove)
-    return len(to_remove)

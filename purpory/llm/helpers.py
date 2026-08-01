@@ -30,11 +30,9 @@ from purpory.file_slice import (
     unit_path,
 )
 
-from purpory.config import settings
-
-_FILE_CHAR_CAP = settings.file_char_cap
-_PER_FILE_OVERHEAD_CHARS = settings.per_file_overhead_chars
-_CHARS_PER_TOKEN = settings.chars_per_token
+_FILE_CHAR_CAP = int(os.environ.get("PURPORY_FILE_CHAR_CAP", 20000))
+_PER_FILE_OVERHEAD_CHARS = int(os.environ.get("PURPORY_PER_FILE_OVERHEAD_CHARS", 160))
+_CHARS_PER_TOKEN = int(os.environ.get("PURPORY_CHARS_PER_TOKEN", 4))
 
 def _get_tokenizer():
     """Return a tiktoken encoder for accurate token counts, or None if tiktoken
@@ -54,7 +52,7 @@ def _get_tokenizer():
 
 _TOKENIZER = _get_tokenizer()
 
-_BACKENDS_RAW: dict[str, dict] = {
+BACKENDS: dict[str, dict] = {
     "claude": {
         # ANTHROPIC_BASE_URL points the backend at any Anthropic-compatible
         # server (LiteLLM proxy, gateways, ...); ANTHROPIC_MODEL overrides the
@@ -173,51 +171,6 @@ _BACKENDS_RAW: dict[str, dict] = {
         "vision": True,
     },
 }
-
-def _get_backends():
-    import sys
-    llm_mod = sys.modules.get("purpory.llm")
-    if llm_mod:
-        if getattr(llm_mod, "_in_backends_lookup", False):
-            return globals().get("_BACKENDS_RAW", {})
-        setattr(llm_mod, "_in_backends_lookup", True)
-        try:
-            if hasattr(llm_mod, "BACKENDS"):
-                if llm_mod.BACKENDS.__class__.__name__ != "_DynamicBackendsProxy":
-                    return llm_mod.BACKENDS
-        except Exception:
-            pass
-        finally:
-            setattr(llm_mod, "_in_backends_lookup", False)
-    return globals().get("_BACKENDS_RAW", {})
-
-class _DynamicBackendsProxy(dict):
-    def __getitem__(self, key):
-        return _get_backends()[key]
-    def __setitem__(self, key, value):
-        _get_backends()[key] = value
-    def __delitem__(self, key):
-        del _get_backends()[key]
-    def __contains__(self, key):
-        return key in _get_backends()
-    def __iter__(self):
-        return iter(_get_backends())
-    def __len__(self):
-        return len(_get_backends())
-    def get(self, key, default=None):
-        return _get_backends().get(key, default)
-    def update(self, *args, **kwargs):
-        _get_backends().update(*args, **kwargs)
-    def keys(self):
-        return _get_backends().keys()
-    def values(self):
-        return _get_backends().values()
-    def items(self):
-        return _get_backends().items()
-    def copy(self):
-        return _get_backends().copy()
-
-BACKENDS = _DynamicBackendsProxy()
 
 def _custom_providers_path(global_: bool = True) -> Path:
     import sys

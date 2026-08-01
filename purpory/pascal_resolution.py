@@ -11,9 +11,8 @@ in a separate unit (``Th5Xxx``) -- so a call from the manual descendant to a
 method it inherits from the generated base falls outside any one file's own
 scope. The per-file pass reports these as ``raw_calls`` instead of guessing.
 
-This resolver runs after all files are extracted (registered in
-``purpory.resolver_registry``), with the full merged node/edge corpus
-available, so it can walk an ``inherits`` chain across file boundaries. It
+This resolver runs after all files are extracted, with the full merged
+node/edge corpus available, so it can walk an ``inherits`` chain across file boundaries. It
 intentionally does NOT fall back to a global by-name match the way the
 per-file pass's final tier does -- an unqualified call resolving to a
 specific ancestor mirrors Delphi's actual method-lookup semantics (nearest

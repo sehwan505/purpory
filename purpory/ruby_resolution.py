@@ -13,8 +13,8 @@ target is certain (single owning class, single owned method) — bail otherwise:
   * ``Processor.new``          -> a ``calls`` edge to the ``Processor`` class
   * ``p.run`` where ``p`` is a ``Processor`` -> a ``calls`` edge to ``Processor#run``
 
-Registered into purpory.resolver_registry and run by extract() after id
-disambiguation, so node ids and raw_call caller_nids are final.
+Run by extract() after id disambiguation, so node ids and raw_call caller_nids
+are final.
 """
 
 from __future__ import annotations

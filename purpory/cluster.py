@@ -4,6 +4,7 @@ import contextlib
 import inspect
 import io
 import json
+import os
 import sys
 import networkx as nx
 
@@ -95,12 +96,10 @@ def _partition(
     return {node: cid for cid, nodes in enumerate(communities) for node in nodes}
 
 
-from purpory.config import settings
-
-_MAX_COMMUNITY_FRACTION = settings.max_community_fraction
-_MIN_SPLIT_SIZE = settings.min_split_size
-_COHESION_SPLIT_THRESHOLD = settings.cohesion_split_threshold
-_COHESION_SPLIT_MIN_SIZE = settings.cohesion_split_min_size
+_MAX_COMMUNITY_FRACTION = float(os.environ.get("PURPORY_MAX_COMMUNITY_FRACTION", 0.25))
+_MIN_SPLIT_SIZE = int(os.environ.get("PURPORY_MIN_SPLIT_SIZE", 10))
+_COHESION_SPLIT_THRESHOLD = float(os.environ.get("PURPORY_COHESION_SPLIT_THRESHOLD", 0.05))
+_COHESION_SPLIT_MIN_SIZE = int(os.environ.get("PURPORY_COHESION_SPLIT_MIN_SIZE", 50))
 
 
 def label_communities_by_hub(

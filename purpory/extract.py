@@ -16,11 +16,6 @@ from typing import Any, Callable
 from .cache import load_cached, save_cached
 from .mcp_ingest import extract_mcp_config, is_mcp_config_path
 from .manifest_ingest import extract_package_manifest, is_package_manifest_path
-from .resolver_registry import (
-    LanguageResolver,
-    register as register_language_resolver,
-    run_language_resolvers,
-)
 from .ruby_resolution import resolve_ruby_member_calls
 from .pascal_resolution import resolve_pascal_inherited_calls
 
@@ -3233,65 +3228,28 @@ def _resolve_objc_member_calls(
         )
 
 
-# Register the cross-file, language-specific member-call resolvers into the shared
-# registry (framework lives in purpory.resolver_registry). A new language plugs in
-# by adding one register() call below — no edits to extract()'s body. Order
-# preserved from the prior inlined wiring: Swift (#1356) before Python (#1446).
-register_language_resolver(
-    LanguageResolver("swift_member_calls", frozenset({".swift"}), _resolve_swift_member_calls)
-)
-register_language_resolver(
-    LanguageResolver("python_member_calls", frozenset({".py"}), _resolve_python_member_calls)
-)
-# Ruby type-aware member-call resolution (Class.new + typed var.method). Lives in
-# purpory.ruby_resolution; registered here as a second consumer of the framework.
-register_language_resolver(
-    LanguageResolver("ruby_member_calls", frozenset({".rb", ".rake"}), resolve_ruby_member_calls)
-)
-register_language_resolver(
-    LanguageResolver(
+_LANGUAGE_RESOLVERS = (
+    ("swift_member_calls", frozenset({".swift"}), _resolve_swift_member_calls),
+    ("python_member_calls", frozenset({".py"}), _resolve_python_member_calls),
+    ("ruby_member_calls", frozenset({".rb", ".rake"}), resolve_ruby_member_calls),
+    (
         "typescript_member_calls",
         frozenset({".ts", ".tsx", ".mts", ".cts", ".js", ".jsx"}),
         _resolve_typescript_member_calls,
-    )
-)
-# C++ (#1547) and ObjC (#1556) receiver-typed member-call resolution. `.h` is in
-# both suffix sets because it routes to extract_cpp or extract_objc by content; the
-# resolvers each claim only their own raw_calls via the extractor-stamped `lang`.
-register_language_resolver(
-    LanguageResolver(
+    ),
+    (
         "cpp_member_calls",
         frozenset({".cpp", ".cc", ".cxx", ".hpp", ".cu", ".cuh", ".metal", ".h"}),
         _resolve_cpp_member_calls,
-    )
-)
-register_language_resolver(
-    LanguageResolver(
-        "objc_member_calls",
-        frozenset({".m", ".mm", ".h"}),
-        _resolve_objc_member_calls,
-    )
-)
-# C# receiver-typed member-call resolution (#1609): `field/param/local.Method()`
-# bound to the receiver's declared type instead of a bare same-named match.
-register_language_resolver(
-    LanguageResolver("csharp_member_calls", frozenset({".cs"}), _resolve_csharp_member_calls)
-)
-register_language_resolver(
-    LanguageResolver("java_member_calls", frozenset({".java"}), _resolve_java_member_calls)
-)
-# Pascal/Delphi cross-file inherited-method-call resolution: a call from a
-# manual descendant class to a method it inherits from an ancestor declared
-# in a DIFFERENT file (the common generated-base/manual-descendant split,
-# e.g. Sistec's Th0Xxx/Th5Xxx) falls outside the per-file extractor's own
-# scope. Lives in purpory.pascal_resolution; registered here as a consumer
-# of the framework, same as the Ruby resolver above.
-register_language_resolver(
-    LanguageResolver(
+    ),
+    ("objc_member_calls", frozenset({".m", ".mm", ".h"}), _resolve_objc_member_calls),
+    ("csharp_member_calls", frozenset({".cs"}), _resolve_csharp_member_calls),
+    ("java_member_calls", frozenset({".java"}), _resolve_java_member_calls),
+    (
         "pascal_inherited_calls",
         frozenset({".pas", ".pp", ".dpr", ".dpk", ".inc"}),
         resolve_pascal_inherited_calls,
-    )
+    ),
 )
 
 
@@ -4880,9 +4838,7 @@ def _extract_sequential(
         print(f"  AST extraction: {_done}/{_done} uncached files (100%)", flush=True)
 
 
-from purpory.config import settings
-
-_PARALLEL_THRESHOLD = settings.parallel_threshold
+_PARALLEL_THRESHOLD = int(os.environ.get("PURPORY_PARALLEL_THRESHOLD", 20))
 
 
 def extract(
@@ -5586,12 +5542,16 @@ def extract(
                 }
             )
 
-    # Cross-file, language-specific member-call resolution. Runs after the shared
-    # call pass so node ids/caller_nids are final; each pass is additive (only the
-    # receiver-typed/qualified calls the shared pass skipped) with its own
-    # single-definition god-node guard. Registered in purpory.resolver_registry so
-    # a new language plugs in without editing this body (#1356 Swift, #1446 Python).
-    run_language_resolvers(paths, per_file, all_nodes, all_edges)
+    suffixes_present = {path.suffix for path in paths}
+    for name, suffixes, resolver in _LANGUAGE_RESOLVERS:
+        if not suffixes & suffixes_present:
+            continue
+        try:
+            resolver(per_file, all_nodes, all_edges)
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning("%s resolution failed, skipping: %s", name, exc)
 
     # Relativize source_file fields so paths are portable across machines (#555).
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash

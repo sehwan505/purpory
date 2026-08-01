@@ -1,4 +1,4 @@
-"""MinHash + band-LSH — datasketch-compatible drop-in (no scipy).
+"""MinHash + band-LSH using only the standard library.
 
 datasketch.lsh has `from scipy.integrate import quad` at module level.
 scipy's array_api_compat layer then lazily loads numpy.testing, which calls
@@ -11,24 +11,22 @@ Hash family (Mersenne-prime permutations) and LSH band structure are
 equivalent to datasketch so dedup quality is unchanged.
 """
 from __future__ import annotations
+from array import array
 import hashlib
+import random
 import struct
 
-import numpy as np
+_MP = (1 << 61) - 1
+_MH = 0xFFFF_FFFF
+
+_MH_COEFFS: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {}
 
 
-_MP = np.uint64((1 << 61) - 1)  # Mersenne prime for the hash family
-_MH = np.uint64(0xFFFF_FFFF)    # mask to 32-bit values
-
-# One (a, b) coefficient array per num_perm, shared across all instances.
-_MH_COEFFS: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-
-
-def _mh_coeffs(num_perm: int) -> tuple[np.ndarray, np.ndarray]:
+def _mh_coeffs(num_perm: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if num_perm not in _MH_COEFFS:
-        rng = np.random.RandomState(1)
-        a = rng.randint(1, int(_MP), num_perm, dtype=np.uint64)
-        b = rng.randint(0, int(_MP), num_perm, dtype=np.uint64)
+        rng = random.Random(1)
+        a = tuple(rng.randrange(1, _MP) for _ in range(num_perm))
+        b = tuple(rng.randrange(_MP) for _ in range(num_perm))
         _MH_COEFFS[num_perm] = (a, b)
     return _MH_COEFFS[num_perm]
 
@@ -40,13 +38,17 @@ class MinHash:
 
     def __init__(self, num_perm: int = 128) -> None:
         self.num_perm = num_perm
-        self.hashvalues = np.full(num_perm, int(_MH), dtype=np.uint64)
+        self.hashvalues = array("I", [_MH]) * num_perm
         self._a, self._b = _mh_coeffs(num_perm)
 
     def update(self, v: bytes) -> None:
-        hv = np.uint64(struct.unpack("<I", hashlib.sha1(v).digest()[:4])[0])
-        phv = np.bitwise_and((self._a * hv + self._b) % _MP, _MH)
-        self.hashvalues = np.minimum(self.hashvalues, phv)
+        hv = struct.unpack(
+            "<I", hashlib.sha1(v, usedforsecurity=False).digest()[:4]
+        )[0]
+        for index, (a, b) in enumerate(zip(self._a, self._b)):
+            value = ((a * hv + b) % _MP) & _MH
+            if value < self.hashvalues[index]:
+                self.hashvalues[index] = value
 
 
 def _lsh_integrate(f, lo: float, hi: float, n: int = 128) -> float:
