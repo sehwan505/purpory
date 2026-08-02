@@ -135,13 +135,11 @@ BACKENDS: dict[str, dict] = {
         "max_tokens": 16384,
     },
     "azure": {
-        # Azure OpenAI Service — uses AzureOpenAI SDK client, not the standard
-        # OpenAI client, so it has its own call path (_call_azure).
+        # Azure OpenAI Service uses AzureOpenAI rather than the standard client.
         # Required env vars: AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT.
         # Optional: AZURE_OPENAI_API_VERSION (defaults to 2024-12-01-preview),
         #           AZURE_OPENAI_DEPLOYMENT or PURPORY_AZURE_MODEL (deployment name).
-        # base_url is intentionally absent — prevents accidental routing through
-        # _call_openai_compat, which requires it and uses the wrong SDK client class.
+        # base_url is intentionally absent because Azure uses an endpoint.
         "default_model": os.environ.get("AZURE_OPENAI_DEPLOYMENT", os.environ.get("PURPORY_AZURE_MODEL", "gpt-4o")),
         "env_key": "AZURE_OPENAI_API_KEY",
         "model_env_key": "PURPORY_AZURE_MODEL",
@@ -167,118 +165,10 @@ BACKENDS: dict[str, dict] = {
         "temperature": 0,
         "max_tokens": 16384,
         # Claude Code is multimodal; images are passed by path and read with the
-        # CLI's Read tool rather than as inline base64 (see `_call_claude_cli`).
+        # CLI's Read tool rather than as inline base64.
         "vision": True,
     },
 }
-
-def _custom_providers_path(global_: bool = True) -> Path:
-    import sys
-    llm_mod = sys.modules.get("purpory.llm")
-    if llm_mod:
-        if getattr(llm_mod, "_in_custom_path_lookup", False):
-            if global_:
-                return Path.home() / ".purpory" / "providers.json"
-            return Path(".purpory") / "providers.json"
-        setattr(llm_mod, "_in_custom_path_lookup", True)
-        try:
-            if hasattr(llm_mod, "_custom_providers_path"):
-                if llm_mod._custom_providers_path is not _custom_providers_path:
-                    return llm_mod._custom_providers_path(global_)
-        except Exception:
-            pass
-        finally:
-            setattr(llm_mod, "_in_custom_path_lookup", False)
-    if global_:
-        return Path.home() / ".purpory" / "providers.json"
-    return Path(".purpory") / "providers.json"
-
-def _read_custom_providers_file(path: Path) -> dict[str, dict]:
-    """Read one provider registry without treating corruption as an empty registry."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"could not load custom providers from {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"custom providers file must contain a JSON object: {path}")
-    for name, cfg in data.items():
-        if not isinstance(name, str) or not isinstance(cfg, dict):
-            raise ValueError(
-                f"custom provider entries must map string names to objects: {path}"
-            )
-    return data
-
-def provider_base_url_ok(base_url: str, name: str, *, warn: bool = True) -> bool:
-    """Structural safety check for a custom-provider base_url.
-
-    A custom provider receives the full corpus plus the user's API key, so its
-    base_url is an exfiltration channel. We deliberately do NOT run the ingest
-    SSRF guard here: that blocks private/internal IPs, which would wrongly reject
-    legitimate on-prem corporate LLM gateways. Instead we reject non-http(s)
-    schemes outright and warn loudly when the corpus would leave over plaintext
-    http to a non-loopback host. The primary control against trusting injected
-    config is the PURPORY_ALLOW_LOCAL_PROVIDERS gate on project-local files.
-    """
-    from urllib.parse import urlparse
-    try:
-        parsed = urlparse(base_url)
-    except Exception:
-        if warn:
-            print(f"[purpory] WARNING: provider {name!r} has an unparseable base_url; ignoring.", file=sys.stderr)
-        return False
-    if parsed.scheme not in ("http", "https"):
-        if warn:
-            print(
-                f"[purpory] WARNING: provider {name!r} base_url scheme {parsed.scheme!r} is not "
-                "http/https; ignoring.",
-                file=sys.stderr,
-            )
-        return False
-    host = (parsed.hostname or "").lower()
-    is_loopback = host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
-    if warn and parsed.scheme == "http" and not is_loopback:
-        print(
-            f"[purpory] WARNING: provider {name!r} sends your corpus to {host!r} over plaintext "
-            "http. Use https unless this is a trusted local endpoint.",
-            file=sys.stderr,
-        )
-    return True
-
-def _load_custom_providers() -> dict[str, dict]:
-    # A project-local ./.purpory/providers.json travels with a cloned or shared
-    # repo and defines where the corpus + API key are sent, so loading it
-    # silently is a corpus/key exfiltration vector. Require an explicit opt-in;
-    # the user's own global ~/.purpory/providers.json stays trusted.
-    local_path = _custom_providers_path(global_=False)
-    global_path = _custom_providers_path(global_=True)
-    allow_local = os.environ.get("PURPORY_ALLOW_LOCAL_PROVIDERS", "").strip().lower() in ("1", "true", "yes")
-    if local_path.is_file() and not allow_local:
-        print(
-            f"[purpory] WARNING: ignoring project-local {local_path} (custom providers control "
-            "where your corpus and API key are sent). Set PURPORY_ALLOW_LOCAL_PROVIDERS=1 to load it.",
-            file=sys.stderr,
-        )
-
-    providers: dict[str, dict] = {}
-    paths = [local_path, global_path] if allow_local else [global_path]
-    for path in paths:
-        if path.is_file():
-            data = _read_custom_providers_file(path)
-            for name, cfg in data.items():
-                if name in BACKENDS or name in providers:
-                    continue
-                if not provider_base_url_ok(
-                    str(cfg.get("base_url", "")), name, warn=False
-                ):
-                    raise ValueError(
-                        f"custom provider {name!r} has an invalid base_url in {path}"
-                    )
-                if "pricing" not in cfg:
-                    cfg = dict(cfg, pricing={"input": 0.0, "output": 0.0})
-                providers[name] = cfg
-    return providers
-
-BACKENDS.update(_load_custom_providers())
 
 def _resolve_max_tokens(default: int) -> int:
     """Honour PURPORY_MAX_OUTPUT_TOKENS env var override, else use backend default."""

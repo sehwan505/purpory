@@ -99,6 +99,14 @@ def _make_envelope(result_obj: dict) -> str:
     })
 
 
+def _call_claude_cli(message: str) -> dict:
+    from purpory.llm.providers import get_provider
+
+    return get_provider("claude-cli").call_direct(
+        None, "claude-cli", message, 8192, None
+    )
+
+
 @patch("shutil.which", return_value="/usr/local/bin/claude")
 @patch("subprocess.run")
 def test_instructions_ride_in_user_turn_not_system_prompt(mock_run, _which):
@@ -115,7 +123,7 @@ def test_instructions_ride_in_user_turn_not_system_prompt(mock_run, _which):
     mock_run.return_value.returncode = 0
     mock_run.return_value.stdout = _make_envelope({"nodes": [], "edges": [], "hyperedges": []})
     mock_run.return_value.stderr = ""
-    llm._call_claude_cli("payload")
+    _call_claude_cli("payload")
     argv = mock_run.call_args.args[0]
     assert "--system-prompt" not in argv, (
         f"--system-prompt is ignored by Claude Code >= 2.1; argv: {argv}"
@@ -135,7 +143,7 @@ def test_model_env_var_adds_model_flag(mock_run, _which, monkeypatch):
     mock_run.return_value.returncode = 0
     mock_run.return_value.stdout = _make_envelope({"nodes": [], "edges": [], "hyperedges": []})
     mock_run.return_value.stderr = ""
-    llm._call_claude_cli("payload")
+    _call_claude_cli("payload")
     argv = mock_run.call_args.args[0]
     assert "--model" in argv
     assert argv[argv.index("--model") + 1] == "haiku"
@@ -150,6 +158,6 @@ def test_no_model_flag_when_env_var_unset(mock_run, _which, monkeypatch):
     mock_run.return_value.returncode = 0
     mock_run.return_value.stdout = _make_envelope({"nodes": [], "edges": [], "hyperedges": []})
     mock_run.return_value.stderr = ""
-    llm._call_claude_cli("payload")
+    _call_claude_cli("payload")
     argv = mock_run.call_args.args[0]
     assert "--model" not in argv

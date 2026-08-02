@@ -42,14 +42,6 @@ from purpory.llm.helpers import (
 
     _ImageRef,
 
-    _custom_providers_path,
-
-    _read_custom_providers_file,
-
-    provider_base_url_ok,
-
-    _load_custom_providers,
-
     _resolve_max_tokens,
 
     _model_requires_default_temperature,
@@ -207,33 +199,24 @@ def extract_files_direct(
     image_refs = _build_image_refs(image_files, root, read_bytes=read_bytes) if image_files else []
     if image_refs and not vision:
         image_refs = _strip_pixels(image_refs)
-    max_out = _resolve_max_tokens(cfg.get("max_tokens", 8192))
+    from purpory.llm.providers import get_provider
 
-    if backend == "claude":
-        result = _call_claude(key, mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
-    elif backend == "claude-cli":
-        result = _call_claude_cli(user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
-    elif backend == "bedrock":
-        result = _call_bedrock(mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
-    elif backend == "azure":
-        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
-        result = _call_azure(key, endpoint, mdl, user_msg, temperature=_resolve_temperature(cfg.get("temperature", 0), mdl), max_tokens=max_out, deep_mode=deep_mode)
-    else:
-        result = _call_openai_compat(
-            cfg["base_url"],
-            key,
-            mdl,
-            user_msg,
-            temperature=_resolve_temperature(cfg.get("temperature", 0), mdl),
-            reasoning_effort=cfg.get("reasoning_effort"),
-            max_completion_tokens=_resolve_max_tokens(
-                cfg.get("max_completion_tokens") or cfg.get("max_tokens", 8192)
-            ),
-            backend=backend,
-            deep_mode=deep_mode,
-            images=image_refs,
-            extra_body=cfg.get("extra_body"),
-        )
+    result = get_provider(backend).call_direct(
+        api_key=key,
+        model=mdl,
+        user_message=user_msg,
+        max_tokens=_resolve_max_tokens(
+            cfg.get("max_completion_tokens") or cfg.get("max_tokens", 8192)
+        ),
+        temperature=_resolve_temperature(cfg.get("temperature", 0), mdl),
+        deep_mode=deep_mode,
+        images=image_refs,
+        cfg={
+            **cfg,
+            "name": backend,
+            "endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip(),
+        },
+    )
 
     if isinstance(result, dict):
         try:
@@ -317,7 +300,7 @@ def _extract_with_adaptive_retry(
 
     - hollow successful responses — the model returned HTTP 200 with empty,
       null, or unparseable content (typical of a local Ollama under load).
-      `_call_openai_compat` re-labels these as `finish_reason="length"` so they
+      the provider re-labels these as `finish_reason="length"` so they
       take the same recovery path; without that the chunk would be silently
       dropped from the corpus.
 
@@ -933,119 +916,6 @@ def generate_community_labels(
                 file=sys.stderr,
             )
         return _placeholder_community_labels(communities), "placeholder"
-
-
-# Legacy unit test compatibility wrappers
-
-def _call_openai_compat(
-    base_url: str,
-    api_key: str,
-    model: str,
-    user_message: str,
-    temperature: float | None = 0,
-    reasoning_effort: str | None = None,
-    max_completion_tokens: int = 8192,
-    *,
-    backend: str = "",
-    deep_mode: bool = False,
-    images: list | None = None,
-    extra_body: dict | None = None,
-) -> dict:
-    from purpory.llm.providers.openai import OpenAICompatProvider
-    provider = OpenAICompatProvider()
-    cfg = {"base_url": base_url, "name": backend, "reasoning_effort": reasoning_effort, "extra_body": extra_body}
-    return provider.call_direct(
-        api_key=api_key,
-        model=model,
-        user_message=user_message,
-        max_tokens=max_completion_tokens,
-        temperature=temperature,
-        deep_mode=deep_mode,
-        images=images,
-        cfg=cfg,
-    )
-
-def _call_claude(
-    api_key: str,
-    model: str,
-    user_message: str,
-    max_tokens: int = 8192,
-    *,
-    deep_mode: bool = False,
-    images: list | None = None,
-) -> dict:
-    from purpory.llm.providers.anthropic import AnthropicProvider
-    provider = AnthropicProvider()
-    return provider.call_direct(
-        api_key=api_key,
-        model=model,
-        user_message=user_message,
-        max_tokens=max_tokens,
-        temperature=None,
-        deep_mode=deep_mode,
-        images=images,
-    )
-
-def _call_claude_cli(
-    user_message: str,
-    max_tokens: int = 8192,
-    *,
-    deep_mode: bool = False,
-    images: list | None = None,
-) -> dict:
-    from purpory.llm.providers.claude_cli import ClaudeCLIProvider
-    provider = ClaudeCLIProvider()
-    return provider.call_direct(
-        api_key=None,
-        model="claude-code-plan",
-        user_message=user_message,
-        max_tokens=max_tokens,
-        temperature=0,
-        deep_mode=deep_mode,
-        images=images,
-    )
-
-def _call_azure(
-    api_key: str,
-    endpoint: str,
-    model: str,
-    user_message: str,
-    temperature: float | None = 0,
-    max_tokens: int = 8192,
-    *,
-    deep_mode: bool = False,
-) -> dict:
-    from purpory.llm.providers.azure import AzureProvider
-    provider = AzureProvider()
-    return provider.call_direct(
-        api_key=api_key,
-        model=model,
-        user_message=user_message,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        deep_mode=deep_mode,
-        cfg={"endpoint": endpoint},
-    )
-
-def _call_bedrock(
-    model: str,
-    user_message: str,
-    max_tokens: int = 8192,
-    *,
-    deep_mode: bool = False,
-    images: list | None = None,
-) -> dict:
-    from purpory.llm.providers.bedrock import BedrockProvider
-    provider = BedrockProvider()
-    return provider.call_direct(
-        api_key=None,
-        model=model,
-        user_message=user_message,
-        max_tokens=max_tokens,
-        temperature=0,
-        deep_mode=deep_mode,
-        images=images,
-    )
 
 
 def _placeholder_community_labels(communities) -> dict[int, str]:

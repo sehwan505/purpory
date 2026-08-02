@@ -1,7 +1,7 @@
 """Tests for OPENAI_BASE_URL / OPENAI_MODEL overrides on the openai backend.
 
 These env vars point `--backend openai` at any OpenAI-compatible server
-(llama.cpp, vLLM, LM Studio, ...) without a providers.json entry.
+(llama.cpp, vLLM, LM Studio, ...) through environment variables.
 """
 
 import importlib

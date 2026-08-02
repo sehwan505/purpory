@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from purpory import llm
+from purpory.llm.providers import get_provider
 
 # A 1x1 PNG is unnecessary — the renderers never decode pixels, they only base64
 # the bytes — so any non-empty byte string stands in for image content.
@@ -28,6 +29,12 @@ _NODE_JSON = json.dumps({
     "edges": [],
     "hyperedges": [],
 })
+
+
+def _call_direct(backend, api_key, model, message, *, images=None):
+    return get_provider(backend).call_direct(
+        api_key, model, message, 8192, None, images=images
+    )
 
 
 def _make_corpus(tmp_path):
@@ -156,7 +163,7 @@ def test_claude_cli_passes_oversized_image_by_path(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "_response_is_hollow", lambda r, p: False)
     with patch("shutil.which", return_value="/fake/claude"), \
          patch("subprocess.run", side_effect=fake_run):
-        llm._call_claude_cli("CORPUS", images=refs)
+        _call_direct("claude-cli", None, "claude-cli", "CORPUS", images=refs)
     assert str(refs[0].path) in seen["input"]
 
 
@@ -297,7 +304,7 @@ def test_call_claude_sends_image_block(tmp_path, monkeypatch):
     refs = llm._build_image_refs([img], tmp_path)
     captured: dict = {}
     _fake_anthropic(monkeypatch, captured)
-    llm._call_claude("k", "claude-sonnet-4-6", "CORPUS", images=refs)
+    _call_direct("claude", "k", "claude-sonnet-4-6", "CORPUS", images=refs)
     content = captured["messages"][0]["content"]
     assert any(b.get("type") == "image" for b in content)
 
@@ -307,7 +314,10 @@ def test_call_openai_compat_sends_image_url(tmp_path, monkeypatch):
     refs = llm._build_image_refs([img], tmp_path)
     captured: dict = {}
     _fake_openai(monkeypatch, captured)
-    llm._call_openai_compat("http://x", "k", "gpt", "CORPUS", images=refs)
+    get_provider("openai").call_direct(
+        "k", "gpt", "CORPUS", 8192, None, images=refs,
+        cfg={"name": "openai", "base_url": "http://x"},
+    )
     content = captured["messages"][1]["content"]
     assert any(p.get("type") == "image_url" for p in content)
 
@@ -315,7 +325,10 @@ def test_call_openai_compat_sends_image_url(tmp_path, monkeypatch):
 def test_call_openai_compat_text_only_without_images(monkeypatch):
     captured: dict = {}
     _fake_openai(monkeypatch, captured)
-    llm._call_openai_compat("http://x", "k", "gpt", "CORPUS", images=[])
+    get_provider("openai").call_direct(
+        "k", "gpt", "CORPUS", 8192, None, images=[],
+        cfg={"name": "openai", "base_url": "http://x"},
+    )
     assert captured["messages"][1]["content"] == "CORPUS"
 
 
@@ -324,7 +337,7 @@ def test_call_bedrock_sends_raw_image_bytes(tmp_path, monkeypatch):
     refs = llm._build_image_refs([img], tmp_path)
     captured: dict = {}
     _fake_boto3(monkeypatch, captured)
-    llm._call_bedrock("model", "CORPUS", images=refs)
+    _call_direct("bedrock", None, "model", "CORPUS", images=refs)
     content = captured["messages"][0]["content"]
     img_block = next(b for b in content if "image" in b)
     assert img_block["image"]["source"]["bytes"] == _PNG_BYTES
@@ -348,7 +361,7 @@ def test_claude_cli_adds_dir_and_read_instruction(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "_response_is_hollow", lambda raw, parsed: False)
     with patch("shutil.which", return_value="/fake/claude"), \
          patch("subprocess.run", side_effect=fake_run):
-        llm._call_claude_cli("CORPUS", images=refs)
+        _call_direct("claude-cli", None, "claude-cli", "CORPUS", images=refs)
 
     assert "--add-dir" in seen["args"]
     assert str(refs[0].path.parent) in seen["args"]
