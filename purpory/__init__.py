@@ -26,9 +26,6 @@ def __getattr__(name):
         "suggest_questions": ("purpory.analyze", "suggest_questions"),
         "generate": ("purpory.report", "generate"),
         "to_json": ("purpory.export", "to_json"),
-        "to_html": ("purpory.export", "to_html"),
-        "to_svg": ("purpory.export", "to_svg"),
-        "to_canvas": ("purpory.export", "to_canvas"),
         "to_wiki": ("purpory.wiki", "to_wiki"),
     }
     if name in _map:
