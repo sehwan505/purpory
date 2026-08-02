@@ -69,6 +69,8 @@ class OllamaEmbeddingProvider:
     def embed(self, texts: Sequence[str], *, model: str, dimensions: int) -> list[list[float]]:
         _, base_url = ollama_urls()
         parsed = urlsplit(base_url)
+        if parsed.hostname is None:
+            raise RuntimeError("embedding server URL is missing a host")
         connection = HTTPConnection(parsed.hostname, parsed.port, timeout=self.timeout_seconds)
         body = json.dumps(
             {"model": model, "input": list(texts), "dimensions": dimensions},
@@ -94,18 +96,128 @@ class OllamaEmbeddingProvider:
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
             raise RuntimeError("embedding response is missing data")
-        ordered = sorted(data, key=lambda item: item.get("index", -1) if isinstance(item, dict) else -1)
+        ordered = sorted(
+            data, key=lambda item: item.get("index", -1) if isinstance(item, dict) else -1
+        )
         vectors = [item.get("embedding") for item in ordered if isinstance(item, dict)]
         if len(vectors) != len(texts):
             raise RuntimeError("embedding response count does not match input count")
         if any(
             not isinstance(vector, list)
             or len(vector) != dimensions
-            or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector)
+            or any(
+                not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector
+            )
             for vector in vectors
         ):
             raise RuntimeError("embedding response contains an invalid vector")
-        return [[float(value) for value in vector] for vector in vectors]
+        return [
+            [float(value) for value in vector] for vector in vectors if isinstance(vector, list)
+        ]
+
+
+def search_embeddings(
+    repository: ContextGraphRepository,
+    query: str,
+    *,
+    memory_project: str,
+    code_projects: Sequence[str],
+    resource_node_ids: Sequence[str],
+    include_memory: bool,
+    include_code: bool,
+    include_resources: bool,
+    limit: int,
+    provider: EmbeddingProvider | None = None,
+) -> list[dict[str, Any]]:
+    """Return cosine-ranked visible nodes from the active embedding profile."""
+    if limit < 1 or limit > 200:
+        raise ValueError("semantic search limit must be between 1 and 200")
+    selected_code_projects = set(code_projects)
+    selected_resource_ids = set(resource_node_ids)
+    with repository.connect() as connection:
+        profile = connection.execute(
+            """
+            SELECT profile_id, provider, model, dimensions, vector_format
+            FROM embedding_profiles WHERE active = 1
+            ORDER BY created_at DESC, profile_id LIMIT 1
+            """
+        ).fetchone()
+        if profile is None:
+            return []
+        rows = connection.execute(
+            """
+            SELECT embedding.node_id, embedding.vector, node.namespace,
+                   node.project, node.stable_key
+            FROM node_embeddings embedding
+            JOIN context_nodes node ON node.id = embedding.node_id
+            WHERE embedding.profile_id = ? AND embedding.vector IS NOT NULL
+            """,
+            (profile["profile_id"],),
+        ).fetchall()
+    local_memory_keys = {
+        str(row["stable_key"])
+        for row in rows
+        if row["namespace"] == "memory" and row["project"] == memory_project
+    }
+    visible = [
+        row
+        for row in rows
+        if (
+            include_memory
+            and row["namespace"] == "memory"
+            and row["project"] in {"", memory_project}
+            and not (row["project"] == "" and str(row["stable_key"]) in local_memory_keys)
+        )
+        or (
+            include_code and row["namespace"] == "code" and row["project"] in selected_code_projects
+        )
+        or (
+            include_resources
+            and row["namespace"] in {"resource", "context"}
+            and row["node_id"] in selected_resource_ids
+        )
+    ]
+    if not visible:
+        return []
+    if profile["vector_format"] != "f32":
+        raise RuntimeError(f"unsupported embedding vector format: {profile['vector_format']}")
+    selected_provider = provider or OllamaEmbeddingProvider()
+    if selected_provider.name != profile["provider"]:
+        raise RuntimeError(f"active embedding provider is unavailable: {profile['provider']}")
+    dimensions = int(profile["dimensions"])
+    query_vectors = selected_provider.embed(
+        [query], model=str(profile["model"]), dimensions=dimensions
+    )
+    if (
+        len(query_vectors) != 1
+        or len(query_vectors[0]) != dimensions
+        or any(not math.isfinite(float(value)) for value in query_vectors[0])
+    ):
+        raise RuntimeError("embedding provider returned an invalid query vector")
+    query_vector = query_vectors[0]
+    query_norm = math.sqrt(sum(value * value for value in query_vector))
+    if not query_norm:
+        return []
+
+    # ponytail: exact scan is bounded by the embedding byte budget; add a
+    # vector index only when measured retrieval latency warrants one.
+    ranked: list[dict[str, Any]] = []
+    expected_bytes = dimensions * 4
+    for row in visible:
+        raw = bytes(row["vector"])
+        if len(raw) != expected_bytes:
+            continue
+        vector = struct.unpack(f"<{dimensions}f", raw)
+        vector_norm = math.sqrt(sum(value * value for value in vector))
+        if not vector_norm:
+            continue
+        similarity = sum(
+            query_value * value for query_value, value in zip(query_vector, vector, strict=True)
+        ) / (query_norm * vector_norm)
+        if math.isfinite(similarity) and similarity > 0:
+            ranked.append({"nodeId": str(row["node_id"]), "similarity": similarity})
+    ranked.sort(key=lambda item: (-item["similarity"], item["nodeId"]))
+    return ranked[:limit]
 
 
 class EmbeddingService:
@@ -121,10 +233,14 @@ class EmbeddingService:
         self.repository = repository
         self.provider = provider or OllamaEmbeddingProvider()
         self.policy = policy or UsedNodePolicy()
-        self.model = os.environ.get("PURPORY_EMBEDDING_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        self.model = (
+            os.environ.get("PURPORY_EMBEDDING_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        )
         self.dimensions = self._positive_int("PURPORY_EMBEDDING_DIMENSIONS", DEFAULT_DIMENSIONS)
         self.max_bytes = self._positive_int("PURPORY_EMBEDDING_MAX_BYTES", DEFAULT_MAX_BYTES)
-        identity = f"{self.provider.name}\0{self.model}\0{self.dimensions}\0f32\0{self.policy.version}"
+        identity = (
+            f"{self.provider.name}\0{self.model}\0{self.dimensions}\0f32\0{self.policy.version}"
+        )
         self.profile_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         self._initialize()
 
@@ -189,10 +305,12 @@ class EmbeddingService:
         if orphan_ids:
             with self.repository.connect() as connection:
                 connection.executemany(
-                    "DELETE FROM embedding_targets WHERE node_id = ?", ((node_id,) for node_id in orphan_ids)
+                    "DELETE FROM embedding_targets WHERE node_id = ?",
+                    ((node_id,) for node_id in orphan_ids),
                 )
                 connection.executemany(
-                    "DELETE FROM node_embeddings WHERE node_id = ?", ((node_id,) for node_id in orphan_ids)
+                    "DELETE FROM node_embeddings WHERE node_id = ?",
+                    ((node_id,) for node_id in orphan_ids),
                 )
                 connection.commit()
         pending: list[EmbeddingDocument] = []
@@ -250,7 +368,9 @@ class EmbeddingService:
             "evicted": evicted,
         }
 
-    def _store(self, documents: Sequence[EmbeddingDocument], vectors: Sequence[Sequence[float]]) -> None:
+    def _store(
+        self, documents: Sequence[EmbeddingDocument], vectors: Sequence[Sequence[float]]
+    ) -> None:
         now = int(time.time())
         rows = [
             (
@@ -284,7 +404,13 @@ class EmbeddingService:
 
     def _record_failure(self, documents: Sequence[EmbeddingDocument], error: str) -> None:
         rows = [
-            (self.profile_id, item.node_id, item.content_hash, item.source_updated_at, error[:1_024])
+            (
+                self.profile_id,
+                item.node_id,
+                item.content_hash,
+                item.source_updated_at,
+                error[:1_024],
+            )
             for item in documents
         ]
         with self.repository.connect() as connection:
