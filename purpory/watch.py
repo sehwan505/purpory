@@ -484,7 +484,7 @@ def _reconcile_existing_graph(
                     hyperedge_evicted_source_identities.add(identity)
         if excluded_alive_files:
             print(
-                f"[purpory watch] fail-closed: kept {excluded_alive_nodes} node(s) "
+                f"[purpory update] fail-closed: kept {excluded_alive_nodes} node(s) "
                 f"from {len(excluded_alive_files)} file(s) that left the scan corpus "
                 "but still exist on disk (ignore rules or filters changed?). "
                 "Run a full re-extraction to purge them if the exclusion is intentional."
@@ -571,7 +571,7 @@ def _node_community_map(graph_data: dict) -> dict[str, int]:
             out[str(node_id)] = int(cid)
         except (TypeError, ValueError):
             print(
-                f"[purpory watch] Skipping node with invalid community id: "
+                f"[purpory update] Skipping node with invalid community id: "
                 f"node_id={node_id!r} community={cid!r}",
                 file=sys.stderr,
             )
@@ -744,7 +744,7 @@ def _stabilize_rebuild_cwd(watch_path: Path) -> bool:
         return True
     except FileNotFoundError:
         print(
-            "[purpory watch] Rebuild failed: current working directory "
+            "[purpory update] Rebuild failed: current working directory "
             "no longer exists and PURPORY_REPO_ROOT is not set."
         )
         return False
@@ -799,7 +799,7 @@ def _rebuild_code(
             _queue_pending(out, list(changed_paths))
         with _rebuild_lock(out, blocking=block_on_lock) as got:
             if not got:
-                print("[purpory watch] Rebuild already in progress for "
+                print("[purpory update] Rebuild already in progress for "
                       f"{watch_path.resolve()} - changes queued.")
                 return False
             # Lock acquired. Drain anything queued by earlier contenders
@@ -869,7 +869,7 @@ def _rebuild_code(
 
         existing_graph_data = load_structural_graph(watch_root) or {}
         if not code_files and not existing_graph_data:
-            print("[purpory watch] No code files found - nothing to rebuild.")
+            print("[purpory update] No code files found - nothing to rebuild.")
             return False
 
         # #1915: a document that already carries SEMANTIC (LLM) nodes in the
@@ -982,7 +982,7 @@ def _rebuild_code(
                     # Evict preserved nodes that still claim this source path.
                     _add_deleted_source(deleted_in_root)
             if not wanted and not deleted_paths:
-                print("[purpory watch] No tracked code files in change set - skipping rebuild.")
+                print("[purpory update] No tracked code files in change set - skipping rebuild.")
                 return True
             extract_targets = wanted
         else:
@@ -1094,14 +1094,14 @@ def _rebuild_code(
                 flag.unlink()
 
             if same_graph:
-                print("[purpory watch] No code-graph changes detected (--no-cluster).")
+                print("[purpory update] No code-graph changes detected (--no-cluster).")
             else:
                 print(
-                    "[purpory watch] Rebuilt (no clustering): "
+                    "[purpory update] Rebuilt (no clustering): "
                     f"{len(candidate_graph_data.get('nodes', []))} nodes, "
                     f"{len(candidate_graph_data.get('links', []))} edges"
                 )
-                print("[purpory watch] SQLite graph updated.")
+                print("[purpory update] SQLite graph updated.")
             return True
 
         detection = {
@@ -1136,7 +1136,7 @@ def _rebuild_code(
                 flag = out / "needs_update"
                 if flag.exists():
                     flag.unlink()
-                print("[purpory watch] No code-graph topology changes detected.")
+                print("[purpory update] No code-graph topology changes detected.")
                 return True
 
         communities = cluster(G)
@@ -1179,7 +1179,7 @@ def _rebuild_code(
             )
         )
         if no_change:
-            print("[purpory watch] No code-graph changes detected.")
+            print("[purpory update] No code-graph changes detected.")
         else:
             if not _check_shrink(
                 force, existing_graph_data, candidate_graph_data,
@@ -1221,13 +1221,13 @@ def _rebuild_code(
             flag.unlink()
 
         if not no_change:
-            print(f"[purpory watch] Rebuilt: {G.number_of_nodes()} nodes, "
+            print(f"[purpory update] Rebuilt: {G.number_of_nodes()} nodes, "
                   f"{G.number_of_edges()} edges, {len(communities)} communities")
-            print("[purpory watch] SQLite graph updated.")
+            print("[purpory update] SQLite graph updated.")
         return True
 
     except Exception as exc:
-        print(f"[purpory watch] Rebuild failed: {exc}")
+        print(f"[purpory update] Rebuild failed: {exc}")
         return False
 
 
@@ -1255,111 +1255,7 @@ def _notify_only(watch_path: Path) -> None:
     flag = project_state_directory(watch_path) / _PURPORY_OUT / "needs_update"
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.write_text("1", encoding="utf-8")
-    print(f"\n[purpory watch] New or changed files detected in {watch_path}")
-    print("[purpory watch] Non-code files changed - semantic re-extraction requires LLM.")
-    print("[purpory watch] Run `/purpory --update` in your AI assistant to update the graph.")
-    print(f"[purpory watch] Flag written to {flag}")
-
-
-def _has_non_code(changed_paths: list[Path]) -> bool:
-    return any(p.suffix.lower() not in _CODE_EXTENSIONS for p in changed_paths)
-
-
-def watch(watch_path: Path, debounce: float = 3.0) -> None:
-    """
-    Watch watch_path for new or modified files and auto-update the graph.
-
-    For code-only changes: re-runs AST extraction + rebuild immediately (no LLM).
-    For doc/paper/image changes: writes a needs_update flag and notifies the user
-    to run /purpory --update (LLM extraction required).
-
-    debounce: seconds to wait after the last change before triggering (avoids
-    running on every keystroke when many files are saved at once).
-    """
-    try:
-        from watchdog.observers import Observer
-        from watchdog.observers.polling import PollingObserver
-        from watchdog.events import FileSystemEventHandler
-    except ImportError as e:
-        raise ImportError("watchdog not installed. Run: pip install watchdog") from e
-
-    last_trigger: float = 0.0
-    pending: bool = False
-    changed: set[Path] = set()
-
-    # Load .purporyignore patterns ONCE at startup so the handler does not
-    # re-parse the file on every filesystem event. Watchdog's handler runs on
-    # the observer thread and is invoked for every event the OS delivers
-    # (Time Machine writes, Docker/Colima VM I/O, Spotlight indexing, …) —
-    # without this short-circuit a busy volume can saturate a CPU core
-    # discarding events one extension at a time. (gh-928)
-    watch_root_for_ignore = watch_path.resolve()
-    ignore_patterns = _load_purporyignore(watch_root_for_ignore)
-
-    class Handler(FileSystemEventHandler):
-        def on_any_event(self, event):
-            nonlocal last_trigger, pending
-            if event.is_directory:
-                return
-            path = Path(os.fsdecode(event.src_path))
-            # Check .purporyignore BEFORE the extension/dotfile/out filters so
-            # the cheapest short-circuit for users with broad ignore patterns
-            # (node_modules/, .venv/, build/, …) fires first. _is_ignored
-            # tolerates absolute paths outside watch_root via its internal
-            # relative_to guard, so a stray symlinked event won't raise.
-            if ignore_patterns and _is_ignored(path, watch_root_for_ignore, ignore_patterns):
-                return
-            if path.suffix.lower() not in _WATCHED_EXTENSIONS:
-                return
-            try:
-                filter_parts = path.relative_to(watch_root_for_ignore).parts
-            except ValueError:
-                filter_parts = path.parts
-            if any(part.startswith(".") for part in filter_parts):
-                return
-            if _PURPORY_OUT in filter_parts:
-                return
-            last_trigger = time.monotonic()
-            pending = True
-            changed.add(path)
-
-    handler = Handler()
-    # Use polling observer on macOS — FSEvents can miss rapid saves in some editors
-    observer = PollingObserver() if sys.platform == "darwin" else Observer()
-    observer.schedule(handler, str(watch_path), recursive=True)
-    observer.start()
-
-    print(f"[purpory watch] Watching {watch_path.resolve()} - press Ctrl+C to stop")
-    print(f"[purpory watch] Code changes rebuild graph automatically. "
-          f"Doc/image changes require /purpory --update.")
-    print(f"[purpory watch] Debounce: {debounce}s")
-
-    try:
-        while True:
-            time.sleep(0.5)
-            if pending and (time.monotonic() - last_trigger) >= debounce:
-                pending = False
-                batch = list(changed)
-                changed.clear()
-                print(f"\n[purpory watch] {len(batch)} file(s) changed")
-                has_non_code = _has_non_code(batch)
-                has_code = any(p.suffix.lower() in _CODE_EXTENSIONS for p in batch)
-                if has_code and not _rebuild_code(watch_path):
-                    raise RuntimeError("Purpory watch rebuild failed")
-                if has_non_code:
-                    _notify_only(watch_path)
-    except KeyboardInterrupt:
-        print("\n[purpory watch] Stopped.")
-    finally:
-        observer.stop()
-        observer.join()
-
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Watch a folder and auto-update the purpory graph")
-    parser.add_argument("path", nargs="?", default=".", help="Folder to watch (default: .)")
-    parser.add_argument("--debounce", type=float, default=3.0,
-                        help="Seconds to wait after last change before updating (default: 3)")
-    args = parser.parse_args()
-    watch(Path(args.path), debounce=args.debounce)
+    print(f"\n[purpory update] New or changed files detected in {watch_path}")
+    print("[purpory update] Non-code files changed - semantic re-extraction requires LLM.")
+    print("[purpory update] Run `/purpory --update` in your AI assistant to update the graph.")
+    print(f"[purpory update] Flag written to {flag}")

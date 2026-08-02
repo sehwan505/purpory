@@ -108,12 +108,6 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         split = urlsplit(self.path)
-        if split.path.startswith("/api/viz/"):
-            if not self._authorized_read(split.query):
-                self._error(HTTPStatus.UNAUTHORIZED, "invalid read token", head_only=True)
-                return
-            self._serve_viz(split.path, head_only=True)
-            return
         if split.path.startswith("/api/"):
             self._error(HTTPStatus.NOT_FOUND, "API endpoint not found", head_only=True)
             return
@@ -256,8 +250,6 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             self._json({"ok": True, **service.repository.diagnostics()})
         elif path == "/api/stream":
             self._stream_events()
-        elif path.startswith("/api/viz/"):
-            self._serve_viz(path)
         else:
             self._error(HTTPStatus.NOT_FOUND, "API endpoint not found")
 
@@ -543,52 +535,6 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
-        )
-        self.end_headers()
-        if not head_only:
-            self.wfile.write(content)
-
-    def _serve_viz(self, path: str, *, head_only: bool = False) -> None:
-        from purpory.paths import out_path
-
-        filename = path.removeprefix("/api/viz/")
-        pure = PurePosixPath(filename)
-        if pure.is_absolute() or ".." in pure.parts or pure.suffix.lower() != ".html":
-            self._error(HTTPStatus.NOT_FOUND, "not found", head_only=head_only)
-            return
-        candidate = (out_path() / Path(*pure.parts)).resolve()
-        try:
-            candidate.relative_to(out_path().resolve())
-        except ValueError:
-            self._error(HTTPStatus.NOT_FOUND, "not found", head_only=head_only)
-            return
-        if not candidate.is_file():
-            self._error(
-                HTTPStatus.NOT_FOUND,
-                f"{filename} is not generated yet",
-                head_only=head_only,
-            )
-            return
-        try:
-            content = b"" if head_only else candidate.read_bytes()
-            content_length = candidate.stat().st_size if head_only else len(content)
-        except OSError as exc:
-            self._error(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                f"read error: {exc}",
-                head_only=head_only,
-            )
-            return
-
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(content_length))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net https://d3js.org; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com",
         )
         self.end_headers()
         if not head_only:

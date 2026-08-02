@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from purpory import llm
+from purpory.llm.providers import get_provider
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -52,6 +53,12 @@ _ENVELOPE = {
 }
 
 
+def _call_claude_cli(message, *, max_tokens=8192):
+    return get_provider("claude-cli").call_direct(
+        None, "claude-cli", message, max_tokens, None
+    )
+
+
 # ── Test A: subprocess encoding ───────────────────────────────────────────────
 
 class TestSubprocessEncoding:
@@ -70,7 +77,7 @@ class TestSubprocessEncoding:
         monkeypatch.setattr(llm, "_response_is_hollow", lambda raw, parsed: False)
         with patch("shutil.which", return_value="/fake/bin/claude"), \
              patch("subprocess.run", return_value=completed) as mock_run:
-            llm._call_claude_cli(_UNICODE_CONTENT, max_tokens=8192)
+            _call_claude_cli(_UNICODE_CONTENT, max_tokens=8192)
         _args, kwargs = mock_run.call_args
         assert kwargs.get("encoding") == "utf-8", (
             "subprocess.run must be called with encoding='utf-8'; "
@@ -87,7 +94,7 @@ class TestSubprocessEncoding:
         monkeypatch.setattr(llm, "_response_is_hollow", lambda raw, parsed: False)
         with patch("shutil.which", return_value="/fake/bin/claude"), \
              patch("subprocess.run", return_value=completed) as mock_run:
-            llm._call_claude_cli(_UNICODE_CONTENT, max_tokens=8192)
+            _call_claude_cli(_UNICODE_CONTENT, max_tokens=8192)
         _args, kwargs = mock_run.call_args
         # If text=True is present, encoding must also be set to 'utf-8'.
         if kwargs.get("text") is True:

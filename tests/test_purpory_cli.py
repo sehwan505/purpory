@@ -14,12 +14,12 @@ def test_root_help_is_purpory_only(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["purpory", "--help"])
     main()
     output = capsys.readouterr().out
-    assert output.startswith("Usage: purpory")
-    assert "remember <key>" in output
-    assert 'prepare "<request>"' in output
+    assert output.startswith("usage: purpory")
+    assert "remember" in output
+    assert "prepare" in output
     assert "dashboard" in output
     assert "purpory context" not in output
-    assert output.count("Usage: purpory") == 1
+    assert output.count("usage: purpory") == 1
 
 
 def test_version_uses_purpory_distribution(monkeypatch, capsys) -> None:
@@ -34,8 +34,8 @@ def test_removed_context_command_is_rejected(monkeypatch, capsys) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main()
 
-    assert exit_info.value.code == 1
-    assert "unknown command 'context'" in capsys.readouterr().err
+    assert exit_info.value.code == 2
+    assert "invalid choice: 'context'" in capsys.readouterr().err
 
 
 def test_prepare_emits_machine_readable_context_result(monkeypatch, capsys, tmp_path) -> None:

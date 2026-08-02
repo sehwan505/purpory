@@ -1,7 +1,7 @@
 """Tests for ANTHROPIC_BASE_URL / ANTHROPIC_MODEL overrides on the claude backend.
 
 These env vars point `--backend claude` at any Anthropic-compatible endpoint
-(LiteLLM proxy, gateways, ...) without a providers.json entry — mirroring the
+(LiteLLM proxy, gateways, ...) through environment variables — mirroring the
 OPENAI_BASE_URL / OPENAI_MODEL pattern.
 """
 

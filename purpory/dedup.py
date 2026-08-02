@@ -274,8 +274,7 @@ def _report_id_collision(nid: str, survivor: dict, losers: list[dict]) -> None:
                 f"keeping '{keep_label}' from '{keep_file}', dropping '{lose_label}' "
                 f"from '{lose_file}'. An ID is derived from the source path plus the "
                 f"entity name, so this one does not identify a single entity and the "
-                f"dropped node is lost. To keep them distinct, run 'purpory extract' "
-                f"per subfolder and merge with 'purpory merge-graphs'.",
+                f"dropped node is lost. Give the entities distinct source-derived IDs.",
                 file=sys.stderr,
             )
 

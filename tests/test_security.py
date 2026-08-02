@@ -201,7 +201,7 @@ def test_validate_graph_path_default_base_honours_purpory_out_override(tmp_path,
 
 def test_sanitize_label_passthrough_html_chars():
     # sanitize_label does NOT HTML-escape — callers that inject into HTML must
-    # wrap with html.escape() themselves (e.g. the title in to_html())
+    # wrap with html.escape() themselves.
     assert sanitize_label("<script>") == "<script>"
     assert sanitize_label("foo & bar") == "foo & bar"
 

@@ -90,7 +90,6 @@ def test_label_cli_passes_model_override(tmp_path, monkeypatch):
         return {0: "Orders"}, "llm"
 
     monkeypatch.setattr("purpory.llm.generate_community_labels", fake_generate)
-    monkeypatch.setattr("purpory.export.to_html", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -108,7 +107,6 @@ def test_label_cli_passes_model_override(tmp_path, monkeypatch):
             "8",
             "--batch-size",
             "50",
-            "--no-viz",
         ],
     )
 
@@ -156,7 +154,6 @@ def test_label_cli_missing_only_preserves_existing_labels(tmp_path, monkeypatch)
         return {1: "Payment Flow"}, "llm"
 
     monkeypatch.setattr("purpory.llm.generate_community_labels", fake_generate)
-    monkeypatch.setattr("purpory.export.to_html", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -169,7 +166,6 @@ def test_label_cli_missing_only_preserves_existing_labels(tmp_path, monkeypatch)
             "--missing-only",
             "--backend",
             "gemini",
-            "--no-viz",
         ],
     )
 

@@ -1,173 +1,97 @@
-"""graphdb — moved verbatim from purpory/export.py."""
+"""Push the canonical graph to supported external graph databases."""
+
 from __future__ import annotations
 
-from purpory.analyze import _node_community_map
-import networkx as nx
 import re
+from urllib.parse import urlparse
+
+import networkx as nx
+
+from purpory.analyze import _node_community_map
+
+
+def _safe_identifier(value: str, fallback: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", value.replace(" ", "_").replace("-", "_"))
+    return sanitized or fallback
+
+
+def _properties(data: dict) -> dict:
+    return {
+        key: value
+        for key, value in data.items()
+        if isinstance(value, (str, int, float, bool)) and not key.startswith("_")
+    }
+
+
+def _push_graph(graph: nx.Graph, communities: dict[int, list[str]] | None, execute) -> None:
+    node_community = _node_community_map(communities) if communities else {}
+    for node_id, data in graph.nodes(data=True):
+        properties = {**_properties(data), "id": node_id}
+        community = node_community.get(node_id)
+        if community is not None:
+            properties["community"] = community
+        label = _safe_identifier(str(data.get("file_type", "Entity")).capitalize(), "Entity")
+        execute(
+            f"MERGE (n:{label} {{id: $id}}) SET n += $props",
+            {"id": node_id, "props": properties},
+        )
+
+    for source, target, data in graph.edges(data=True):
+        relation = _safe_identifier(
+            str(data.get("relation", "RELATED_TO")).upper(), "RELATED_TO"
+        )
+        execute(
+            f"MATCH (a {{id: $src}}), (b {{id: $tgt}}) "
+            f"MERGE (a)-[r:{relation}]->(b) SET r += $props",
+            {"src": source, "tgt": target, "props": _properties(data)},
+        )
 
 
 def push_to_neo4j(
-    G: nx.Graph,
+    graph: nx.Graph,
     uri: str,
     user: str,
     password: str,
     communities: dict[int, list[str]] | None = None,
 ) -> dict[str, int]:
-    """Push graph directly to a running Neo4j instance via the Python driver.
-
-    Requires: pip install neo4j
-
-    Uses MERGE so re-running is safe - nodes and edges are upserted, not duplicated.
-    Returns a dict with counts of nodes and edges pushed.
-    """
+    """Upsert the graph into Neo4j using its Python driver."""
     try:
         from neo4j import GraphDatabase
-    except ImportError as e:
-        raise ImportError(
-            "neo4j driver not installed. Run: pip install neo4j"
-        ) from e
-
-    node_community = _node_community_map(communities) if communities else {}
-
-    def _safe_rel(relation: str) -> str:
-        return re.sub(r"[^A-Z0-9_]", "_", relation.upper().replace(" ", "_").replace("-", "_")) or "RELATED_TO"
-
-    def _safe_label(label: str) -> str:
-        """Sanitize a Neo4j node label to prevent Cypher injection."""
-        sanitized = re.sub(r"[^A-Za-z0-9_]", "", label)
-        return sanitized if sanitized else "Entity"
+    except ImportError as exc:
+        raise ImportError("neo4j driver not installed. Run: pip install 'purpory[neo4j]'") from exc
 
     driver = GraphDatabase.driver(uri, auth=(user, password))
-    nodes_pushed = 0
-    edges_pushed = 0
+    try:
+        with driver.session() as session:
+            _push_graph(graph, communities, lambda query, params: session.run(query, **params))
+    finally:
+        driver.close()
+    return {"nodes": graph.number_of_nodes(), "edges": graph.number_of_edges()}
 
-    with driver.session() as session:
-        for node_id, data in G.nodes(data=True):
-            props = {
-                k: v for k, v in data.items()
-                if isinstance(v, (str, int, float, bool)) and not k.startswith("_")
-            }
-            props["id"] = node_id
-            cid = node_community.get(node_id)
-            if cid is not None:
-                props["community"] = cid
-            ftype = _safe_label(data.get("file_type", "Entity").capitalize())
-            session.run(
-                f"MERGE (n:{ftype} {{id: $id}}) SET n += $props",
-                id=node_id,
-                props=props,
-            )
-            nodes_pushed += 1
-
-        for u, v, data in G.edges(data=True):
-            rel = _safe_rel(data.get("relation", "RELATED_TO"))
-            props = {
-                k: v for k, v in data.items()
-                if isinstance(v, (str, int, float, bool)) and not k.startswith("_")
-            }
-            session.run(
-                f"MATCH (a {{id: $src}}), (b {{id: $tgt}}) "
-                f"MERGE (a)-[r:{rel}]->(b) SET r += $props",
-                src=u,
-                tgt=v,
-                props=props,
-            )
-            edges_pushed += 1
-
-    driver.close()
-    return {"nodes": nodes_pushed, "edges": edges_pushed}
 
 def push_to_falkordb(
-    G: nx.Graph,
+    graph: nx.Graph,
     uri: str,
     user: str | None = None,
     password: str | None = None,
     communities: dict[int, list[str]] | None = None,
     graph_name: str = "purpory",
 ) -> dict[str, int]:
-    """Push graph directly to a running FalkorDB instance via the Python SDK.
-
-    Requires: pip install falkordb
-
-    FalkorDB is OpenCypher-compatible, so the MERGE/SET upsert queries are
-    identical to push_to_neo4j. Differences from the Neo4j path:
-      - connects with FalkorDB(host, port, username, password) instead of a bolt
-        driver; only the host/port are read from the URI, so the scheme is
-        informational - "falkordb://localhost:6379", "redis://localhost:6379"
-        and a bare "localhost:6379" are all equivalent (default port 6379).
-      - a named graph is selected via db.select_graph(graph_name) (default
-        "purpory"); FalkorDB keys each graph by name in the same instance.
-      - queries run via graph.query(cypher, params) - there is no session object.
-      - auth is optional (FalkorDB runs without credentials by default), so user
-        and password may be None.
-      - no APOC: the Neo4j path does not use APOC either, so nothing to port.
-
-    Uses MERGE so re-running is safe - nodes and edges are upserted, not
-    duplicated. Returns a dict with counts of nodes and edges pushed.
-    """
+    """Upsert the graph into a named FalkorDB graph."""
     try:
         from falkordb import FalkorDB
-    except ImportError as e:
-        raise ImportError(
-            "falkordb SDK not installed. Run: pip install falkordb"
-        ) from e
-
-    from urllib.parse import urlparse
-
-    node_community = _node_community_map(communities) if communities else {}
-
-    def _safe_rel(relation: str) -> str:
-        return re.sub(r"[^A-Z0-9_]", "_", relation.upper().replace(" ", "_").replace("-", "_")) or "RELATED_TO"
-
-    def _safe_label(label: str) -> str:
-        """Sanitize a FalkorDB node label to prevent Cypher injection."""
-        sanitized = re.sub(r"[^A-Za-z0-9_]", "", label)
-        return sanitized if sanitized else "Entity"
+    except ImportError as exc:
+        raise ImportError("falkordb SDK not installed. Run: pip install 'purpory[falkordb]'") from exc
 
     parsed = urlparse(uri if "://" in uri else f"redis://{uri}")
-    # FalkorDB auth is optional. Only send credentials when a password is
-    # provided; otherwise connect anonymously and ignore any bolt-style default
-    # username (e.g. Neo4j's "neo4j"), which FalkorDB rejects as an unknown ACL
-    # user. Credentials embedded in the URI take precedence over the args.
-    connect_user = parsed.username or (user if password else None)
-    connect_password = parsed.password or (password or None)
-    db = FalkorDB(
+    connect_password = parsed.password or password
+    connect_user = parsed.username or (user if connect_password else None)
+    target = FalkorDB(
         host=parsed.hostname or "localhost",
         port=parsed.port or 6379,
         username=connect_user,
         password=connect_password,
-    )
-    graph = db.select_graph(graph_name)
-    nodes_pushed = 0
-    edges_pushed = 0
+    ).select_graph(graph_name)
+    _push_graph(graph, communities, target.query)
 
-    for node_id, data in G.nodes(data=True):
-        props = {
-            k: v for k, v in data.items()
-            if isinstance(v, (str, int, float, bool)) and not k.startswith("_")
-        }
-        props["id"] = node_id
-        cid = node_community.get(node_id)
-        if cid is not None:
-            props["community"] = cid
-        ftype = _safe_label(data.get("file_type", "Entity").capitalize())
-        graph.query(
-            f"MERGE (n:{ftype} {{id: $id}}) SET n += $props",
-            {"id": node_id, "props": props},
-        )
-        nodes_pushed += 1
-
-    for u, v, data in G.edges(data=True):
-        rel = _safe_rel(data.get("relation", "RELATED_TO"))
-        props = {
-            k: v for k, v in data.items()
-            if isinstance(v, (str, int, float, bool)) and not k.startswith("_")
-        }
-        graph.query(
-            f"MATCH (a {{id: $src}}), (b {{id: $tgt}}) "
-            f"MERGE (a)-[r:{rel}]->(b) SET r += $props",
-            {"src": u, "tgt": v, "props": props},
-        )
-        edges_pushed += 1
-
-    return {"nodes": nodes_pushed, "edges": edges_pushed}
+    return {"nodes": graph.number_of_nodes(), "edges": graph.number_of_edges()}

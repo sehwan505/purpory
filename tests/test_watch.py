@@ -106,22 +106,6 @@ def test_check_update_does_not_clear_flag(tmp_path):
     assert flag.exists()
 
 
-def test_watch_raises_without_watchdog(tmp_path, monkeypatch):
-    import builtins
-    real_import = builtins.__import__
-
-    def mock_import(name, *args, **kwargs):
-        if name == "watchdog.observers" or name == "watchdog.events":
-            raise ImportError("mocked missing watchdog")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", mock_import)
-
-    from purpory.watch import watch
-    with pytest.raises(ImportError, match="watchdog not installed"):
-        watch(tmp_path)
-
-
 # --- _rebuild_lock (GH-858) ---
 
 

@@ -101,7 +101,7 @@ def test_detect_backend_none_without_envvars(monkeypatch):
 def test_ollama_api_key_sentinel(monkeypatch):
     """extract_files_direct with backend=ollama and no OLLAMA_API_KEY should use sentinel 'ollama' not raise."""
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
     from pathlib import Path
     import tempfile
 
@@ -113,16 +113,17 @@ def test_ollama_api_key_sentinel(monkeypatch):
         "output_tokens": 10,
         "finish_reason": "stop",
     }
-    with patch("purpory.llm._call_openai_compat", return_value=fake_result) as mock_call:
+    provider = MagicMock()
+    provider.call_direct.return_value = fake_result
+    with patch("purpory.llm.providers.get_provider", return_value=provider):
         from purpory.llm import extract_files_direct
         with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
             f.write("x = 1\n")
             tmp = Path(f.name)
         try:
             extract_files_direct([tmp], backend="ollama", root=tmp.parent)
-            # Should have called _call_openai_compat with api_key="ollama"
-            assert mock_call.called
-            call_kwargs = mock_call.call_args
+            assert provider.call_direct.called
+            call_kwargs = provider.call_direct.call_args
             api_key_used = call_kwargs.args[1] if call_kwargs.args else call_kwargs.kwargs.get("api_key", "")
             assert api_key_used == "ollama"
         finally:

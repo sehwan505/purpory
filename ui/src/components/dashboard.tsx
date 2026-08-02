@@ -58,7 +58,6 @@ import {
   getRecall,
   getRequests,
   getView,
-  getVizUrl,
   prepareContext,
   resolveRequest,
   resolveNeedsReview,
@@ -1028,30 +1027,10 @@ function PreparationPanel({
 }
 
 function GraphPanel() {
-  const [activeTab, setActiveTab] = useState<"explorer" | "tree" | "callflow">("explorer")
   const [scope, setScope] = useState("")
   const [graph, setGraph] = useState<GraphPayload | null>(null)
   const [pending, setPending] = useState(true)
   const [previewError, setPreviewError] = useState("")
-  const [vizStatus, setVizStatus] = useState<Record<string, "idle" | "loading" | "ready" | "missing">>({
-    "GRAPH_TREE.html": "idle",
-    "purpory-callflow.html": "idle",
-  })
-
-  const checkVizFile = useCallback(async (filename: string) => {
-    setVizStatus((previous) => ({ ...previous, [filename]: "loading" }))
-    try {
-      const response = await fetch(getVizUrl(filename), { method: "HEAD" })
-      setVizStatus((previous) => ({ ...previous, [filename]: response.ok ? "ready" : "missing" }))
-    } catch {
-      setVizStatus((previous) => ({ ...previous, [filename]: "missing" }))
-    }
-  }, [])
-
-  useEffect(() => {
-    if (activeTab === "tree") void checkVizFile("GRAPH_TREE.html")
-    if (activeTab === "callflow") void checkVizFile("purpory-callflow.html")
-  }, [activeTab, checkVizFile])
 
   const loadGraph = useCallback(async (selectedScope?: string) => {
     setPending(true)
@@ -1091,40 +1070,17 @@ function GraphPanel() {
     [graph, positions],
   )
 
-  const tabs: Array<{ id: typeof activeTab; label: string; filename?: string; cmd?: string }> = [
-    { id: "explorer", label: "Context graph" },
-    { id: "tree", label: "Module tree", filename: "GRAPH_TREE.html", cmd: "purpory tree" },
-    { id: "callflow", label: "Call flow", filename: "purpory-callflow.html", cmd: "purpory export callflow-html" },
-  ]
-  const current = tabs.find((tab) => tab.id === activeTab)
-  const status = current?.filename ? vizStatus[current.filename] : "idle"
-
   return (
     <Card className="flex min-h-[740px] flex-col overflow-hidden">
-      <CardHeader className="flex-col border-b border-line pb-5 sm:flex-row sm:items-center">
+      <CardHeader className="border-b border-line pb-5">
         <div>
-          <CardTitle>Codebase visualizations</CardTitle>
-          <CardDescription>Structural relationships, dependency hierarchies, and runtime call flow.</CardDescription>
-        </div>
-        <div className="flex flex-wrap gap-1 rounded-[11px] border border-line bg-canvas p-1">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={cn(
-                "rounded-lg px-3 py-2 text-xs font-semibold transition",
-                activeTab === tab.id ? "bg-signal text-white" : "text-muted hover:bg-black/[0.04] hover:text-ink",
-              )}
-            >
-              {tab.label}
-            </button>
-          ))}
+          <CardTitle>Code graph</CardTitle>
+          <CardDescription>Structural relationships from the canonical context graph.</CardDescription>
         </div>
       </CardHeader>
 
       <CardContent className="flex flex-1 flex-col p-0">
-        {activeTab === "explorer" ? (
-          <div className="flex flex-1 flex-col gap-4 p-5">
+        <div className="flex flex-1 flex-col gap-4 p-5">
             <div className="flex gap-2">
               <Input
                 value={scope}
@@ -1203,53 +1159,7 @@ function GraphPanel() {
                 </div>
               )}
             </div>
-          </div>
-        ) : (
-          <div className="flex min-h-[560px] flex-1 flex-col">
-            {status === "loading" && (
-              <div className="flex flex-1 flex-col items-center justify-center gap-3 py-20 text-muted">
-                <RefreshCw className="size-7 animate-spin text-accent-blue" />
-                <span className="text-xs font-semibold">Checking visualization…</span>
-              </div>
-            )}
-            {status === "missing" && (
-              <div className="flex flex-1 flex-col items-center justify-center p-8 py-20 text-center">
-                <div className="mb-4 rounded-full border border-amber-700/15 bg-amber-50 p-4">
-                  <AlertCircle className="size-7 text-amber-800" />
-                </div>
-                <h3 className="text-sm font-semibold text-ink">{current?.filename} not found</h3>
-                <p className="mt-2 max-w-sm text-xs leading-5 text-muted">
-                  Generate this static visualization from the current codebase graph.
-                </p>
-                <div className="mt-6 w-full max-w-md rounded-[11px] border border-line bg-canvas p-4 text-left font-mono text-[11px]">
-                  <div className="mb-2 text-dim">Run from the project root</div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-signal">{current?.cmd}</span>
-                    <button
-                      type="button"
-                      onClick={() => current?.cmd && navigator.clipboard.writeText(current.cmd)}
-                      className="text-[10px] text-muted transition hover:text-ink"
-                    >
-                      Copy
-                    </button>
-                  </div>
-                </div>
-                <Button className="mt-6" size="sm" onClick={() => current?.filename && checkVizFile(current.filename)}>
-                  <RefreshCw /> Retry check
-                </Button>
-              </div>
-            )}
-            {status === "ready" && current?.filename && (
-              <div className="flex min-h-[650px] flex-1 flex-col overflow-hidden bg-canvas">
-                <iframe
-                  src={getVizUrl(current.filename)}
-                  className="h-[650px] w-full flex-1 border-none"
-                  title={current.filename}
-                />
-              </div>
-            )}
-          </div>
-        )}
+        </div>
       </CardContent>
     </Card>
   )

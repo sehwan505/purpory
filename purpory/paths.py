@@ -6,7 +6,7 @@ relative name (``"purpory-out-feature"``) or an absolute path
 (``"/shared/purpory-out"``).
 
 This used to be duplicated as an identical ``_PURPORY_OUT`` constant in
-``__main__``, ``cache``, and ``watch``, while ``security`` and ``callflow_html``
+``__main__``, ``cache``, and ``watch``, while ``security`` previously
 hardcoded the literal ``"purpory-out"`` and silently ignored the override
 (#1423). Centralising it here keeps the name in one place. The value is read
 once at import time, matching the previous per-module constants — set

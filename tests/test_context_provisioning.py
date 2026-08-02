@@ -66,7 +66,7 @@ def _service_with_graph(tmp_path: Path) -> ContextService:
 def test_catalog_is_compact_and_never_copies_memory_values(tmp_path: Path) -> None:
     service = _service_with_graph(tmp_path)
 
-    catalog = service.catalog(session_id="agent-a")
+    catalog = service._provisioner().catalog(session_id="agent-a")
 
     assert catalog["counts"]["human"] == 1
     assert catalog["counts"]["code"] == 3
@@ -80,7 +80,7 @@ def test_search_connects_distinct_concepts_through_the_context_graph(
 ) -> None:
     service = _service_with_graph(tmp_path)
 
-    result = service.search(
+    result = service._provisioner().search(
         "auth database",
         session_id="agent-a",
         scopes=["code"],
@@ -103,7 +103,7 @@ def test_search_uses_only_terms_present_in_the_context_vocabulary(
 ) -> None:
     service = _service_with_graph(tmp_path)
 
-    result = service.search(
+    result = service._provisioner().search(
         "인증과 데이터베이스 연결",
         session_id="agent-a",
         scopes=["code"],
@@ -123,12 +123,32 @@ def test_search_uses_only_terms_present_in_the_context_vocabulary(
     }
 
 
+def test_generic_service_term_does_not_select_unrelated_context(tmp_path: Path) -> None:
+    service = _service_with_graph(tmp_path)
+
+    result = service._provisioner().search(
+        "service",
+        session_id="agent-a",
+        scopes=["code"],
+        connect=False,
+    )
+
+    assert result["candidates"] == []
+
+
+def test_context_steps_are_internal_to_prepare(tmp_path: Path) -> None:
+    service = _service_with_graph(tmp_path)
+
+    for name in ("catalog", "search", "expand", "context_path", "deliver"):
+        assert not hasattr(service, name)
+
+
 def test_search_expands_korean_developer_terms_without_an_llm(
     tmp_path: Path,
 ) -> None:
     service = _service_with_graph(tmp_path)
 
-    result = service.search(
+    result = service._provisioner().search(
         "인증과 데이터베이스를 찾아줘",
         session_id="agent-a",
         scopes=["code"],
@@ -147,7 +167,7 @@ def test_search_expands_korean_developer_terms_without_an_llm(
 
 def test_session_scope_can_recall_previously_delivered_memory(tmp_path: Path) -> None:
     service = _service_with_graph(tmp_path)
-    memory_search = service.search(
+    memory_search = service._provisioner().search(
         "token expiry",
         session_id="agent-a",
         scopes=["human"],
@@ -155,9 +175,9 @@ def test_session_scope_can_recall_previously_delivered_memory(tmp_path: Path) ->
         connect=False,
     )
     memory_id = memory_search["candidates"][0]["nodeId"]
-    service.deliver([memory_id], session_id="agent-a", token_budget=512)
+    service._provisioner().deliver([memory_id], session_id="agent-a", token_budget=512)
 
-    result = service.search(
+    result = service._provisioner().search(
         "token",
         session_id="agent-a",
         scopes=["session"],
@@ -186,7 +206,7 @@ def test_deliver_records_project_local_reconciled_memory(tmp_path: Path) -> None
     )
     assert applied["changes"][0]["action"] == "created"
 
-    search = service.search(
+    search = service._provisioner().search(
         "long term autonomy durable intent",
         session_id="agent-a",
         scopes=["human"],
@@ -194,7 +214,7 @@ def test_deliver_records_project_local_reconciled_memory(tmp_path: Path) -> None
     )
     memory = next(candidate for candidate in search["candidates"] if candidate["key"] == key)
 
-    delivered = service.deliver(
+    delivered = service._provisioner().deliver(
         [memory["nodeId"]],
         session_id="agent-a",
         token_budget=512,
@@ -225,7 +245,7 @@ def test_candidate_pool_reserves_space_for_memory_and_active_paths(
         value="shared token policy",
         kind="decision",
     )
-    service.catalog(session_id="agent-a")
+    service._provisioner().catalog(session_id="agent-a")
 
     candidates = service.repository.search_retrieval_nodes(
         project=service.project_id,
@@ -246,7 +266,7 @@ def test_search_result_covers_distinct_terms_before_filling_by_score(
 ) -> None:
     service = _service_with_graph(tmp_path)
 
-    result = service.search(
+    result = service._provisioner().search(
         "auth token database",
         session_id="agent-a",
         scopes=["human", "code"],
@@ -267,14 +287,14 @@ def test_search_result_covers_distinct_terms_before_filling_by_score(
 
 def test_expand_is_relation_filtered_and_bounded(tmp_path: Path) -> None:
     service = _service_with_graph(tmp_path)
-    search = service.search("AuthService", session_id="agent-a", scopes=["code"], connect=False)
+    search = service._provisioner().search("AuthService", session_id="agent-a", scopes=["code"], connect=False)
     auth_id = next(
         candidate["nodeId"]
         for candidate in search["candidates"]
         if candidate["label"] == "AuthService"
     )
 
-    expanded = service.expand([auth_id], depth=1, relations=["calls"], node_limit=10)
+    expanded = service._provisioner().expand([auth_id], depth=1, relations=["calls"], node_limit=10)
 
     assert {node["label"] for node in expanded["nodes"]} == {
         "AuthService",
@@ -288,11 +308,11 @@ def test_deliver_records_exact_context_and_deduplicates_per_session(
     tmp_path: Path,
 ) -> None:
     service = _service_with_graph(tmp_path)
-    search = service.search("AuthService", session_id="agent-a", scopes=["code"], connect=False)
+    search = service._provisioner().search("AuthService", session_id="agent-a", scopes=["code"], connect=False)
     auth_id = search["candidates"][0]["nodeId"]
 
-    first = service.deliver([auth_id], session_id="agent-a", token_budget=512)
-    second = service.deliver([auth_id], session_id="agent-a", token_budget=512)
+    first = service._provisioner().deliver([auth_id], session_id="agent-a", token_budget=512)
+    second = service._provisioner().deliver([auth_id], session_id="agent-a", token_budget=512)
 
     assert first["delivery"][0]["mode"] == "context-graph"
     assert "AuthService" in first["rendered"]

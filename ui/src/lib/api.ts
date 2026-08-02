@@ -220,7 +220,3 @@ export function subscribeToEvents(onEvent: () => void) {
   }
   return () => source.close()
 }
-
-export function getVizUrl(filename: string) {
-  return readUrl(`/api/viz/${filename}`)
-}
