@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from purpory.security import sanitize_label, sanitize_metadata
+from purpory.supervise.embeddings import search_embeddings
 from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 from purpory.supervise.repository import ContextGraphRepository, stable_json, value_hash
 from purpory.supervise.recall import recall_summary
@@ -135,6 +136,7 @@ SEARCH_TERM_ALIASES: dict[str, tuple[str, ...]] = {
 # distinct concept in short queries while eliminating the long tail created by
 # incidental matches in large code graphs.
 RELATIVE_SCORE_FLOOR = 0.05
+RRF_K = 60
 ALLOWED_SCOPES = frozenset({"human", "resource", "code", "session"})
 MAX_QUERY_CHARS = 4_096
 MAX_KEYWORDS = 12
@@ -292,11 +294,7 @@ class ContextProvisioningService:
         self.root = Path(root).expanduser().resolve()
         self.graph_project = graph_project.strip()
         self.graph_projects = tuple(
-            dict.fromkeys(
-                item.strip()
-                for item in (graph_project, *graph_projects)
-                if item.strip()
-            )
+            dict.fromkeys(item.strip() for item in (graph_project, *graph_projects) if item.strip())
         )
         self.project = project.strip()
         self.resource_node_ids = tuple(dict.fromkeys(resource_node_ids))
@@ -382,11 +380,26 @@ class ContextProvisioningService:
         raw_input_terms = _raw_tokens((normalized_query, *selected_keywords))
         expanded_input_terms = _tokens((normalized_query, *selected_keywords))
         expansion_by_input = {
-            term: _tokens((term,))
-            for term in raw_input_terms
-            if term not in SEARCH_STOPWORDS
+            term: _tokens((term,)) for term in raw_input_terms if term not in SEARCH_STOPWORDS
         }
         active = {self._active_path(path) for path in selected_paths}
+        semantic_failed = False
+        try:
+            semantic_hits = search_embeddings(
+                self.repository,
+                " ".join((normalized_query, *selected_keywords)),
+                memory_project=self.project,
+                code_projects=self.graph_projects,
+                resource_node_ids=self.resource_node_ids,
+                include_memory=("human" in selected_scopes or "session" in selected_scopes),
+                include_code="code" in selected_scopes,
+                include_resources="resource" in selected_scopes,
+                limit=min(200, max(32, parsed_limit * 4)),
+            )
+        except (OSError, RuntimeError, ValueError):
+            semantic_hits = []
+            semantic_failed = True
+        semantic_by_id = {str(item["nodeId"]): float(item["similarity"]) for item in semantic_hits}
         nodes = [
             node
             for node in self.repository.search_retrieval_nodes(
@@ -405,11 +418,14 @@ class ContextProvisioningService:
                 and ("human" in selected_scopes or "session" in selected_scopes)
             )
             or (node["namespace"] == "code" and "code" in selected_scopes)
-            or (
-                node["namespace"] in {"resource", "context"}
-                and "resource" in selected_scopes
-            )
+            or (node["namespace"] in {"resource", "context"} and "resource" in selected_scopes)
         ]
+        known_ids = {str(node["id"]) for node in nodes}
+        nodes.extend(
+            node
+            for node in self.repository.get_context_nodes(list(semantic_by_id))
+            if str(node["id"]) not in known_ids and self._visible(node)
+        )
         searchable_by_id = {node["id"]: self._searchable_text(node) for node in nodes}
         document_frequency = {
             term: sum(term in searchable for searchable in searchable_by_id.values())
@@ -441,18 +457,35 @@ class ContextProvisioningService:
                 recall_scores=recall_scores,
                 usage=usage_by_id.get(node["id"]),
                 previous_deliveries=previous,
+                semantic_score=semantic_by_id.get(str(node["id"])),
             )
             if candidate is not None:
                 ranked.append(candidate)
         ranked.sort(key=lambda item: (-item["score"], item["key"], item["nodeId"]))
-        score_floor = (
-            ranked[0]["score"] * RELATIVE_SCORE_FLOOR
-            if ranked
-            else None
-        )
+        direct_ranked = [
+            candidate
+            for candidate in ranked
+            if candidate["matchedTerms"] or "active-path" in candidate["signals"]
+        ]
+        score_floor = direct_ranked[0]["score"] * RELATIVE_SCORE_FLOOR if direct_ranked else None
         if score_floor is not None:
-            ranked = [candidate for candidate in ranked if candidate["score"] >= score_floor]
-        candidates = self._select_candidates(ranked, terms, parsed_limit)
+            ranked = [
+                candidate
+                for candidate in ranked
+                if (candidate["semanticScore"] is not None or candidate["score"] >= score_floor)
+            ]
+        lexical_ranked = [candidate for candidate in ranked if candidate["matchedTerms"]]
+        semantic_ranked = sorted(
+            (candidate for candidate in ranked if candidate["semanticScore"] is not None),
+            key=lambda item: (-item["semanticScore"], item["key"], item["nodeId"]),
+        )
+        active_ranked = [candidate for candidate in ranked if "active-path" in candidate["signals"]]
+        fused = self._fuse_candidates(
+            lexical=lexical_ranked,
+            semantic=semantic_ranked,
+            active_path=active_ranked,
+        )
+        candidates = self._select_candidates(fused, terms, parsed_limit)
         self._add_relation_counts(candidates)
         connections = (
             self._connect_candidates(candidates, terms) if connect and len(candidates) > 1 else []
@@ -474,6 +507,16 @@ class ContextProvisioningService:
             ],
             "scoreFloor": round(score_floor, 6) if score_floor is not None else None,
             "scopes": list(selected_scopes),
+            "fusion": {
+                "method": "rrf",
+                "k": RRF_K,
+                "sources": {
+                    "lexical": len(lexical_ranked),
+                    "semantic": len(semantic_ranked),
+                    "activePath": len(active_ranked),
+                },
+                "semanticFailed": semantic_failed,
+            },
             "candidates": candidates,
             "connections": connections,
             "hasEvidence": bool(candidates),
@@ -822,6 +865,7 @@ class ContextProvisioningService:
         recall_scores: dict[str, float],
         usage: dict[str, Any] | None,
         previous_deliveries: set[str],
+        semantic_score: float | None,
     ) -> dict[str, Any] | None:
         label = str(node.get("label") or "").lower()
         stable_key = str(node.get("stableKey") or "").lower()
@@ -861,8 +905,14 @@ class ContextProvisioningService:
         # Recall and raw-use counters affect ordering only after the current
         # request has supplied direct lexical or active-path evidence. They
         # must never manufacture relevance for an unrelated memory.
-        if not (set(matched_terms) & distinctive_terms) and not active_path_match:
+        if (
+            not (set(matched_terms) & distinctive_terms)
+            and not active_path_match
+            and semantic_score is None
+        ):
             return None
+        if semantic_score is not None:
+            signals.append("semantic")
         if node["namespace"] == "memory":
             lookup_key = str(node["stableKey"])
         elif node["namespace"] == "code":
@@ -898,7 +948,7 @@ class ContextProvisioningService:
         if stale:
             score -= 10
             signals.append("stale")
-        if score <= 0:
+        if score <= 0 and semantic_score is None:
             return None
         preview = None
         if node["namespace"] == "memory" and node.get("value"):
@@ -913,6 +963,7 @@ class ContextProvisioningService:
             "source": sanitize_label(str(node.get("source") or "")) or None,
             "preview": preview,
             "score": round(score, 6),
+            "semanticScore": round(semantic_score, 6) if semantic_score is not None else None,
             "signals": sorted(set(signals)),
             "matchedTerms": sorted(set(matched_terms)),
             "stale": stale,
@@ -924,6 +975,41 @@ class ContextProvisioningService:
                 "lastExpandedAt": None,
             },
         }
+
+    @staticmethod
+    def _fuse_candidates(
+        *,
+        lexical: Sequence[dict[str, Any]],
+        semantic: Sequence[dict[str, Any]],
+        active_path: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        candidates = {
+            candidate["nodeId"]: candidate
+            for ranking in (lexical, semantic, active_path)
+            for candidate in ranking
+        }
+        scores: dict[str, float] = {}
+        ranks: dict[str, dict[str, int]] = {node_id: {} for node_id in candidates}
+        for source, ranking in (
+            ("lexical", lexical),
+            ("semantic", semantic),
+            ("activePath", active_path),
+        ):
+            for rank, candidate in enumerate(ranking, start=1):
+                node_id = candidate["nodeId"]
+                scores[node_id] = scores.get(node_id, 0.0) + 1 / (RRF_K + rank)
+                ranks[node_id][source] = rank
+        fused = []
+        for node_id, candidate in candidates.items():
+            fused.append(
+                {
+                    **candidate,
+                    "score": round(scores[node_id], 8),
+                    "retrievalRanks": ranks[node_id],
+                }
+            )
+        fused.sort(key=lambda item: (-item["score"], item["key"], item["nodeId"]))
+        return fused
 
     def _recall_scores(self, session_id: str) -> dict[str, float]:
         summary = recall_summary(self.repository, session_id=session_id)
@@ -964,13 +1050,29 @@ class ContextProvisioningService:
         selected: list[dict[str, Any]] = []
         covered_terms: set[str] = set()
         requested_terms = set(terms)
+        extra_sources = {
+            source
+            for candidate in ranked
+            if not candidate["matchedTerms"]
+            for source in candidate.get("retrievalRanks", {})
+            if source != "lexical"
+        }
+        covered_sources: set[str] = set()
         for candidate in ranked:
             matched_terms = set(candidate["matchedTerms"])
-            if not matched_terms - covered_terms:
+            candidate_sources = (
+                set(candidate.get("retrievalRanks", {})) - {"lexical"}
+                if not matched_terms
+                else set()
+            )
+            if not matched_terms - covered_terms and not candidate_sources - covered_sources:
                 continue
             selected.append(candidate)
             covered_terms.update(matched_terms)
-            if len(selected) >= limit or covered_terms >= requested_terms:
+            covered_sources.update(candidate_sources)
+            if len(selected) >= limit or (
+                covered_terms >= requested_terms and covered_sources >= extra_sources
+            ):
                 break
         # Do not pad the result with candidates that repeat concepts already
         # covered. Long-running agents can issue a narrower follow-up prepare
@@ -1045,9 +1147,7 @@ class ContextProvisioningService:
             }
         if node["namespace"] != "memory":
             return None
-        topic = self.repository.get_topic(
-            str(node["stableKey"]), project=self.project
-        )
+        topic = self.repository.get_topic(str(node["stableKey"]), project=self.project)
         if topic is None:
             return None
         topic = {
