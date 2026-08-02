@@ -57,6 +57,24 @@ SEARCH_STOPWORDS = frozenset(
         "your",
     }
 )
+GENERIC_SEARCH_TERMS = frozenset(
+    {
+        "app",
+        "application",
+        "code",
+        "component",
+        "core",
+        "file",
+        "helper",
+        "manager",
+        "module",
+        "service",
+        "services",
+        "system",
+        "util",
+        "utils",
+    }
+)
 KOREAN_SUFFIXES = (
     "에서",
     "에게",
@@ -325,7 +343,6 @@ class ContextProvisioningService:
             "graphSnapshot": snapshots[0] if snapshots else None,
             "graphSnapshots": snapshots,
             "resourceTypes": [dict(item) for item in inventory["resourceTypes"]],
-            "capabilities": ["search", "expand", "path", "deliver", "request"],
         }
 
     def search(
@@ -399,6 +416,7 @@ class ContextProvisioningService:
             for term in expanded_input_terms
         }
         terms = [term for term in expanded_input_terms if document_frequency[term] > 0]
+        distinctive_terms = set(terms) - GENERIC_SEARCH_TERMS
         total_documents = max(1, len(nodes))
         idf = {
             term: math.log(1 + total_documents / (1 + document_frequency[term])) for term in terms
@@ -417,6 +435,7 @@ class ContextProvisioningService:
                 node,
                 searchable=searchable_by_id[node["id"]],
                 terms=terms,
+                distinctive_terms=distinctive_terms,
                 idf=idf,
                 active_paths=active,
                 recall_scores=recall_scores,
@@ -793,6 +812,7 @@ class ContextProvisioningService:
         *,
         searchable: str,
         terms: Sequence[str],
+        distinctive_terms: set[str],
         idf: dict[str, float],
         active_paths: set[str],
         recall_scores: dict[str, float],
@@ -837,7 +857,7 @@ class ContextProvisioningService:
         # Recall and raw-use counters affect ordering only after the current
         # request has supplied direct lexical or active-path evidence. They
         # must never manufacture relevance for an unrelated memory.
-        if not matched_terms and not active_path_match:
+        if not (set(matched_terms) & distinctive_terms) and not active_path_match:
             return None
         if node["namespace"] == "memory":
             lookup_key = str(node["stableKey"])

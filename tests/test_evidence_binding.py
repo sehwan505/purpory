@@ -7,7 +7,7 @@ rejects nodes attributed to a file that was NOT dispatched — cannot see.
 """
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from purpory import llm
 
@@ -32,7 +32,9 @@ def _run(files, nodes, tmp_path):
         "output_tokens": 1,
         "finish_reason": "stop",
     }
-    with patch("purpory.llm._call_openai_compat", return_value=result):
+    provider = MagicMock()
+    provider.call_direct.return_value = result
+    with patch("purpory.llm.providers.get_provider", return_value=provider):
         return llm.extract_files_direct(files, backend="kimi", api_key="k", root=tmp_path)
 
 

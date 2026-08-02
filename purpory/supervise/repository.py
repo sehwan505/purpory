@@ -23,7 +23,7 @@ from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 from purpory.supervise.identity import resolve_project_id
 
 DEFAULT_DB_PATH = Path.home() / ".purpory" / "context.db"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MEMORY_NAMESPACE = "memory"
 RESOURCE_NAMESPACE = "resource"
 CONTEXT_NAMESPACE = "context"
@@ -154,55 +154,6 @@ class ContextGraphRepository:
                 CREATE TABLE IF NOT EXISTS context_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS context_namespaces (
-                    id TEXT PRIMARY KEY,
-                    namespace_kind TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    description TEXT NOT NULL DEFAULT '',
-                    parent_id TEXT,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    CHECK (namespace_kind IN ('project')),
-                    FOREIGN KEY(parent_id) REFERENCES context_namespaces(id) ON DELETE SET NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS context_resources (
-                    id TEXT PRIMARY KEY,
-                    provider TEXT NOT NULL,
-                    resource_kind TEXT NOT NULL,
-                    external_identity TEXT NOT NULL,
-                    label TEXT NOT NULL,
-                    properties_json TEXT NOT NULL DEFAULT '{}',
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    UNIQUE(provider, external_identity)
-                );
-
-                CREATE TABLE IF NOT EXISTS context_namespace_resources (
-                    namespace_id TEXT NOT NULL,
-                    resource_id TEXT NOT NULL,
-                    alias TEXT,
-                    created_at INTEGER NOT NULL,
-                    PRIMARY KEY(namespace_id, resource_id),
-                    FOREIGN KEY(namespace_id)
-                        REFERENCES context_namespaces(id) ON DELETE CASCADE,
-                    FOREIGN KEY(resource_id)
-                        REFERENCES context_resources(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS context_resource_views (
-                    id TEXT PRIMARY KEY,
-                    resource_id TEXT NOT NULL,
-                    locator TEXT NOT NULL,
-                    revision TEXT,
-                    state_hash TEXT,
-                    properties_json TEXT NOT NULL DEFAULT '{}',
-                    observed_at INTEGER NOT NULL,
-                    UNIQUE(resource_id, locator),
-                    FOREIGN KEY(resource_id)
-                        REFERENCES context_resources(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS context_nodes (
@@ -401,19 +352,13 @@ class ContextGraphRepository:
                     "ALTER TABLE graph_snapshots "
                     "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
                 )
-            self._migrate_namespace_resource_bindings(connection)
+            self._migrate_registry_tables(connection)
             self._initialize_views(connection)
             self._initialize_fts(connection)
             connection.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_context_nodes_lookup
                     ON context_nodes(namespace, project, stable_key);
-                CREATE INDEX IF NOT EXISTS idx_context_namespaces_kind
-                    ON context_namespaces(namespace_kind, name);
-                CREATE INDEX IF NOT EXISTS idx_context_resources_provider
-                    ON context_resources(provider, resource_kind);
-                CREATE INDEX IF NOT EXISTS idx_context_resource_views_locator
-                    ON context_resource_views(locator);
                 CREATE INDEX IF NOT EXISTS idx_context_nodes_type
                     ON context_nodes(project, node_type, origin);
                 CREATE INDEX IF NOT EXISTS idx_context_nodes_source
@@ -444,7 +389,6 @@ class ContextGraphRepository:
                     ON global_memory_requests(status, created_at DESC);
                 """
             )
-            self._sync_registry_context_graph(connection)
             versioned = {
                 (str(row["project"]), str(row["key"]))
                 for row in connection.execute(
@@ -488,40 +432,6 @@ class ContextGraphRepository:
                 (str(SCHEMA_VERSION),),
             )
             connection.commit()
-
-    @staticmethod
-    def _migrate_namespace_resource_bindings(connection: sqlite3.Connection) -> None:
-        """Remove the v3 one-project-per-resource constraint."""
-        row = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'context_namespace_resources'"
-        ).fetchone()
-        definition = str(row["sql"] or "") if row is not None else ""
-        if not re.search(r"resource_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE", definition, re.I):
-            return
-        connection.executescript(
-            """
-            ALTER TABLE context_namespace_resources
-                RENAME TO context_namespace_resources_v3;
-            CREATE TABLE context_namespace_resources (
-                namespace_id TEXT NOT NULL,
-                resource_id TEXT NOT NULL,
-                alias TEXT,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY(namespace_id, resource_id),
-                FOREIGN KEY(namespace_id)
-                    REFERENCES context_namespaces(id) ON DELETE CASCADE,
-                FOREIGN KEY(resource_id)
-                    REFERENCES context_resources(id) ON DELETE CASCADE
-            );
-            INSERT INTO context_namespace_resources(
-                namespace_id, resource_id, alias, created_at
-            )
-            SELECT namespace_id, resource_id, alias, created_at
-            FROM context_namespace_resources_v3;
-            DROP TABLE context_namespace_resources_v3;
-            """
-        )
 
     @staticmethod
     def _initialize_fts(connection: sqlite3.Connection) -> None:
@@ -654,8 +564,16 @@ class ContextGraphRepository:
         return node_id
 
     @classmethod
-    def _sync_registry_context_graph(cls, connection: sqlite3.Connection) -> None:
-        """Project registry tables are projections of canonical context entities."""
+    def _migrate_registry_tables(cls, connection: sqlite3.Connection) -> None:
+        """Move the pre-v5 project registry into the canonical graph once."""
+        legacy_tables = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "context_namespaces" not in legacy_tables:
+            return
         projects = connection.execute(
             """
             SELECT id, name, description, parent_id, created_at, updated_at
@@ -752,14 +670,18 @@ class ContextGraphRepository:
                 timestamp=int(binding["created_at"]),
             )
 
-        views = connection.execute(
-            """
-            SELECT id, resource_id, locator, revision, state_hash,
-                   properties_json, observed_at
-            FROM context_resource_views
-            ORDER BY id
-            """
-        ).fetchall()
+        views = (
+            connection.execute(
+                """
+                SELECT id, resource_id, locator, revision, state_hash,
+                       properties_json, observed_at
+                FROM context_resource_views
+                ORDER BY id
+                """
+            ).fetchall()
+            if "context_resource_views" in legacy_tables
+            else []
+        )
         for view in views:
             resource_node_id = resource_ids.get(str(view["resource_id"]))
             if resource_node_id is None:
@@ -833,6 +755,14 @@ class ContextGraphRepository:
                     origin="human",
                     timestamp=_now(),
                 )
+        for table in (
+            "context_resource_views",
+            "context_namespace_resources",
+            "context_resources",
+            "context_namespaces",
+        ):
+            if table in legacy_tables:
+                connection.execute(f"DROP TABLE {table}")
 
     def create_project_namespace(
         self,
@@ -852,25 +782,26 @@ class ContextGraphRepository:
         namespace_id = _registry_id("project")
         with self.connect() as connection:
             duplicate = connection.execute(
-                "SELECT 1 FROM context_namespaces WHERE lower(name) = lower(?)",
-                (normalized_name,),
+                """
+                SELECT 1 FROM context_nodes
+                WHERE namespace = ? AND node_type = 'project' AND lower(label) = lower(?)
+                """,
+                (CONTEXT_NAMESPACE, normalized_name),
             ).fetchone()
             if duplicate is not None:
                 raise ValueError(f"project already exists: {normalized_name}")
-            connection.execute(
-                """
-                INSERT INTO context_namespaces(
-                    id, namespace_kind, name, description, parent_id,
-                    created_at, updated_at
-                ) VALUES (?, 'project', ?, ?, NULL, ?, ?)
-                """,
-                (
-                    namespace_id,
-                    normalized_name,
-                    normalized_description,
-                    timestamp,
-                    timestamp,
-                ),
+            self._upsert_registry_node(
+                connection,
+                namespace=CONTEXT_NAMESPACE,
+                project=namespace_id,
+                stable_key=namespace_id,
+                node_type="project",
+                label=normalized_name,
+                value=normalized_description or None,
+                source=None,
+                origin="human",
+                properties={"description": normalized_description, "parentId": None},
+                timestamp=timestamp,
             )
             self._record_event(
                 connection,
@@ -879,7 +810,6 @@ class ContextGraphRepository:
                 payload={"name": normalized_name, "description": normalized_description},
                 occurred_at=timestamp,
             )
-            self._sync_registry_context_graph(connection)
             connection.commit()
         project = self.get_project_namespace(namespace_id)
         if project is None:
@@ -895,12 +825,10 @@ class ContextGraphRepository:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, namespace_kind, name, description, parent_id,
-                       created_at, updated_at
-                FROM context_namespaces
-                WHERE id = ? AND namespace_kind = 'project'
+                SELECT * FROM context_nodes
+                WHERE namespace = ? AND stable_key = ? AND node_type = 'project'
                 """,
-                (normalized_id,),
+                (CONTEXT_NAMESPACE, normalized_id),
             ).fetchone()
             if row is None:
                 return None
@@ -910,12 +838,11 @@ class ContextGraphRepository:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, namespace_kind, name, description, parent_id,
-                       created_at, updated_at
-                FROM context_namespaces
-                WHERE namespace_kind = 'project'
-                ORDER BY lower(name), id
+                SELECT * FROM context_nodes
+                WHERE namespace = ? AND node_type = 'project'
+                ORDER BY lower(label), stable_key
                 """
+                , (CONTEXT_NAMESPACE,)
             ).fetchall()
             return [self._project_namespace(connection, row) for row in rows]
 
@@ -926,58 +853,61 @@ class ContextGraphRepository:
     ) -> dict[str, Any]:
         resource_rows = connection.execute(
             """
-            SELECT resource.id, resource.provider, resource.resource_kind,
-                   resource.external_identity, resource.label,
-                   resource.properties_json, resource.created_at,
-                   resource.updated_at, binding.alias
-            FROM context_namespace_resources binding
-            JOIN context_resources resource ON resource.id = binding.resource_id
-            WHERE binding.namespace_id = ?
-            ORDER BY lower(COALESCE(binding.alias, resource.label)), resource.id
+            SELECT resource.*, binding.properties_json AS binding_properties
+            FROM context_edges binding
+            JOIN context_nodes resource ON resource.id = binding.target_id
+            WHERE binding.source_id = ? AND binding.relation = 'contains'
+              AND resource.namespace = ? AND resource.node_type LIKE 'resource.%'
+            ORDER BY lower(resource.label), resource.stable_key
             """,
-            (row["id"],),
+            (row["id"], RESOURCE_NAMESPACE),
         ).fetchall()
         resources: list[dict[str, Any]] = []
         for resource in resource_rows:
             view_rows = connection.execute(
                 """
-                SELECT id, locator, revision, state_hash, properties_json, observed_at
-                FROM context_resource_views
-                WHERE resource_id = ?
-                ORDER BY locator
+                SELECT view.* FROM context_edges relation
+                JOIN context_nodes view ON view.id = relation.target_id
+                WHERE relation.source_id = ? AND relation.relation = 'has-view'
+                  AND view.namespace = ? AND view.node_type = 'resource-view'
+                ORDER BY view.source
                 """,
-                (resource["id"],),
+                (resource["id"], RESOURCE_NAMESPACE),
             ).fetchall()
+            resource_properties = _json_object(resource["properties_json"])
+            binding_properties = _json_object(resource["binding_properties"])
             resources.append(
                 {
-                    "id": resource["id"],
-                    "provider": resource["provider"],
-                    "kind": resource["resource_kind"],
-                    "externalIdentity": resource["external_identity"],
+                    "id": resource["stable_key"],
+                    "provider": resource_properties.get("provider"),
+                    "kind": resource_properties.get("resourceKind"),
+                    "externalIdentity": resource_properties.get("externalIdentity"),
                     "label": resource["label"],
-                    "alias": resource["alias"],
-                    "properties": json.loads(resource["properties_json"]),
+                    "alias": binding_properties.get("alias"),
+                    "properties": resource_properties,
                     "createdAt": resource["created_at"],
                     "updatedAt": resource["updated_at"],
                     "views": [
                         {
-                            "id": view["id"],
-                            "locator": view["locator"],
-                            "revision": view["revision"],
-                            "stateHash": view["state_hash"],
-                            "properties": json.loads(view["properties_json"]),
-                            "observedAt": view["observed_at"],
+                            "id": view["stable_key"],
+                            "locator": properties.get("locator", view["source"]),
+                            "revision": properties.get("revision"),
+                            "stateHash": properties.get("stateHash"),
+                            "properties": properties,
+                            "observedAt": view["set_at"],
                         }
                         for view in view_rows
+                        for properties in [_json_object(view["properties_json"])]
                     ],
                 }
             )
+        properties = _json_object(row["properties_json"])
         return {
-            "id": row["id"],
-            "kind": row["namespace_kind"],
-            "name": row["name"],
-            "description": row["description"],
-            "parentId": row["parent_id"],
+            "id": row["stable_key"],
+            "kind": "project",
+            "name": row["label"],
+            "description": properties.get("description", row["value"] or ""),
+            "parentId": properties.get("parentId"),
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
             "resources": resources,
@@ -1019,57 +949,66 @@ class ContextGraphRepository:
             if (
                 connection.execute(
                     """
-                    SELECT 1 FROM context_namespaces
-                    WHERE id = ? AND namespace_kind = 'project'
+                    SELECT 1 FROM context_nodes
+                    WHERE namespace = ? AND stable_key = ? AND node_type = 'project'
                     """,
-                    (normalized_namespace,),
+                    (CONTEXT_NAMESPACE, normalized_namespace),
                 ).fetchone()
                 is None
             ):
                 raise KeyError(f"project namespace not found: {normalized_namespace}")
             existing = connection.execute(
                 """
-                SELECT id FROM context_resources
-                WHERE provider = ? AND external_identity = ?
+                SELECT stable_key FROM context_nodes
+                WHERE namespace = ? AND source = ? AND node_type LIKE 'resource.%'
+                  AND json_extract(properties_json, '$.provider') = ?
+                LIMIT 1
                 """,
-                (normalized_provider, normalized_identity),
+                (RESOURCE_NAMESPACE, normalized_identity, normalized_provider),
             ).fetchone()
-            resource_id = str(existing["id"]) if existing is not None else _registry_id("resource")
-            connection.execute(
-                """
-                INSERT INTO context_resources(
-                    id, provider, resource_kind, external_identity, label,
-                    properties_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, external_identity) DO UPDATE SET
-                    resource_kind = excluded.resource_kind,
-                    label = excluded.label,
-                    properties_json = excluded.properties_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    resource_id,
-                    normalized_provider,
-                    normalized_kind,
-                    normalized_identity,
-                    normalized_label,
-                    stable_json(properties or {}),
-                    timestamp,
-                    timestamp,
-                ),
+            resource_id = (
+                str(existing["stable_key"]) if existing is not None else _registry_id("resource")
             )
-            connection.execute(
+            resource_properties = {
+                **(properties or {}),
+                "provider": normalized_provider,
+                "resourceKind": normalized_kind,
+                "externalIdentity": normalized_identity,
+            }
+            resource_node_id = self._upsert_registry_node(
+                connection,
+                namespace=RESOURCE_NAMESPACE,
+                project="",
+                stable_key=resource_id,
+                node_type=f"resource.{normalized_kind}",
+                label=normalized_label,
+                value=stable_json(resource_properties),
+                source=normalized_identity,
+                origin="registered",
+                properties=resource_properties,
+                timestamp=timestamp,
+            )
+            project_node_id = _stable_id(
+                CONTEXT_NAMESPACE, normalized_namespace, normalized_namespace
+            )
+            binding = connection.execute(
                 """
-                INSERT INTO context_namespace_resources(
-                    namespace_id, resource_id, alias, created_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(namespace_id, resource_id) DO UPDATE SET
-                    alias = COALESCE(
-                        excluded.alias,
-                        context_namespace_resources.alias
-                    )
+                SELECT properties_json FROM context_edges
+                WHERE source_id = ? AND target_id = ? AND relation = 'contains'
                 """,
-                (normalized_namespace, resource_id, normalized_alias, timestamp),
+                (project_node_id, resource_node_id),
+            ).fetchone()
+            binding_alias = normalized_alias
+            if binding_alias is None and binding is not None:
+                binding_alias = _json_object(binding["properties_json"]).get("alias")
+            self._upsert_edge(
+                connection,
+                source_id=project_node_id,
+                target_id=resource_node_id,
+                relation="contains",
+                origin="registered",
+                properties={"alias": binding_alias},
+                timestamp=timestamp,
             )
             for raw_view in views:
                 if not isinstance(raw_view, dict):
@@ -1104,37 +1043,49 @@ class ContextGraphRepository:
                     raise ValueError("resource view properties must be an object")
                 view = connection.execute(
                     """
-                    SELECT id FROM context_resource_views
-                    WHERE resource_id = ? AND locator = ?
+                    SELECT view.stable_key FROM context_edges relation
+                    JOIN context_nodes view ON view.id = relation.target_id
+                    WHERE relation.source_id = ? AND relation.relation = 'has-view'
+                      AND view.namespace = ? AND view.node_type = 'resource-view'
+                      AND view.source = ?
                     """,
-                    (resource_id, locator),
+                    (resource_node_id, RESOURCE_NAMESPACE, locator),
                 ).fetchone()
-                view_id = str(view["id"]) if view is not None else _registry_id("view")
-                connection.execute(
-                    """
-                    INSERT INTO context_resource_views(
-                        id, resource_id, locator, revision, state_hash,
-                        properties_json, observed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(resource_id, locator) DO UPDATE SET
-                        revision = excluded.revision,
-                        state_hash = excluded.state_hash,
-                        properties_json = excluded.properties_json,
-                        observed_at = excluded.observed_at
-                    """,
-                    (
-                        view_id,
-                        resource_id,
-                        locator,
-                        revision,
-                        state_hash,
-                        stable_json(view_properties or {}),
-                        timestamp,
-                    ),
+                view_id = (
+                    str(view["stable_key"]) if view is not None else _registry_id("view")
+                )
+                canonical_view_properties = {
+                    **(view_properties or {}),
+                    "resourceId": resource_id,
+                    "locator": locator,
+                    "revision": revision,
+                    "stateHash": state_hash,
+                }
+                view_node_id = self._upsert_registry_node(
+                    connection,
+                    namespace=RESOURCE_NAMESPACE,
+                    project="",
+                    stable_key=view_id,
+                    node_type="resource-view",
+                    label=str(canonical_view_properties.get("branch") or Path(locator).name),
+                    value=stable_json(canonical_view_properties),
+                    source=locator,
+                    origin="observed",
+                    properties=canonical_view_properties,
+                    timestamp=timestamp,
+                )
+                self._upsert_edge(
+                    connection,
+                    source_id=resource_node_id,
+                    target_id=view_node_id,
+                    relation="has-view",
+                    origin="observed",
+                    properties={"revision": revision, "stateHash": state_hash},
+                    timestamp=timestamp,
                 )
             connection.execute(
-                "UPDATE context_namespaces SET updated_at = ? WHERE id = ?",
-                (timestamp, normalized_namespace),
+                "UPDATE context_nodes SET updated_at = ? WHERE id = ?",
+                (timestamp, project_node_id),
             )
             self._record_event(
                 connection,
@@ -1147,7 +1098,6 @@ class ContextGraphRepository:
                 },
                 occurred_at=timestamp,
             )
-            self._sync_registry_context_graph(connection)
             connection.commit()
         project = self.get_project_namespace(normalized_namespace)
         if project is None:
@@ -1169,35 +1119,47 @@ class ContextGraphRepository:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT resource.id, binding.namespace_id
-                FROM context_resources resource
-                JOIN context_namespace_resources binding
-                  ON binding.resource_id = resource.id
-                WHERE resource.provider = ? AND resource.external_identity = ?
+                SELECT resource.stable_key AS resource_id,
+                       project.stable_key AS namespace_id
+                FROM context_nodes resource
+                JOIN context_edges binding ON binding.target_id = resource.id
+                JOIN context_nodes project ON project.id = binding.source_id
+                WHERE resource.namespace = ? AND resource.source = ?
+                  AND resource.node_type LIKE 'resource.%'
+                  AND json_extract(resource.properties_json, '$.provider') = ?
+                  AND binding.relation = 'contains' AND project.node_type = 'project'
+                LIMIT 1
                 """,
-                (normalized_provider, normalized_identity),
+                (RESOURCE_NAMESPACE, normalized_identity, normalized_provider),
             ).fetchone()
         if row is None:
             return None
-        return {"resourceId": row["id"], "namespaceId": row["namespace_id"]}
+        return {"resourceId": row["resource_id"], "namespaceId": row["namespace_id"]}
 
     def resolve_resource_view(self, location: str | Path) -> dict[str, Any] | None:
         requested = Path(location).expanduser().resolve()
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT namespace.id AS namespace_id, namespace.name AS namespace_name,
-                       resource.id AS resource_id, resource.provider,
-                       resource.resource_kind, resource.label AS resource_label,
-                       view.id AS view_id, view.locator, view.revision,
-                       view.state_hash, view.properties_json
-                FROM context_resource_views view
-                JOIN context_resources resource ON resource.id = view.resource_id
-                JOIN context_namespace_resources binding
-                  ON binding.resource_id = resource.id
-                JOIN context_namespaces namespace ON namespace.id = binding.namespace_id
-                ORDER BY length(view.locator) DESC, view.locator
+                SELECT project.stable_key AS namespace_id,
+                       project.label AS namespace_name,
+                       resource.stable_key AS resource_id,
+                       resource.label AS resource_label,
+                       resource.properties_json AS resource_properties,
+                       view.stable_key AS view_id, view.source AS locator,
+                       view.properties_json AS view_properties
+                FROM context_nodes view
+                JOIN context_edges view_edge ON view_edge.target_id = view.id
+                    AND view_edge.relation = 'has-view'
+                JOIN context_nodes resource ON resource.id = view_edge.source_id
+                JOIN context_edges binding ON binding.target_id = resource.id
+                    AND binding.relation = 'contains'
+                JOIN context_nodes project ON project.id = binding.source_id
+                WHERE view.namespace = ? AND view.node_type = 'resource-view'
+                  AND project.node_type = 'project'
+                ORDER BY length(view.source) DESC, view.source
                 """
+                , (RESOURCE_NAMESPACE,)
             ).fetchall()
         for row in rows:
             locator = Path(str(row["locator"])).expanduser()
@@ -1205,18 +1167,20 @@ class ContextGraphRepository:
                 requested.relative_to(locator.resolve())
             except (OSError, ValueError):
                 continue
+            resource_properties = _json_object(row["resource_properties"])
+            view_properties = _json_object(row["view_properties"])
             return {
                 "namespaceId": row["namespace_id"],
                 "namespaceName": row["namespace_name"],
                 "resourceId": row["resource_id"],
-                "provider": row["provider"],
-                "resourceKind": row["resource_kind"],
+                "provider": resource_properties.get("provider"),
+                "resourceKind": resource_properties.get("resourceKind"),
                 "resourceLabel": row["resource_label"],
                 "viewId": row["view_id"],
                 "locator": str(locator.resolve()),
-                "revision": row["revision"],
-                "stateHash": row["state_hash"],
-                "properties": json.loads(row["properties_json"]),
+                "revision": view_properties.get("revision"),
+                "stateHash": view_properties.get("stateHash"),
+                "properties": view_properties,
             }
         return None
 
@@ -1352,9 +1316,25 @@ class ContextGraphRepository:
                     timestamp,
                 ),
             )
+            if normalized_project:
+                project_node = connection.execute(
+                    """
+                    SELECT id FROM context_nodes
+                    WHERE namespace = ? AND stable_key = ? AND node_type = 'project'
+                    """,
+                    (CONTEXT_NAMESPACE, normalized_project),
+                ).fetchone()
+                if project_node is not None:
+                    self._upsert_edge(
+                        connection,
+                        source_id=str(project_node["id"]),
+                        target_id=_stable_id(MEMORY_NAMESPACE, normalized_project, key),
+                        relation="contains",
+                        origin="human",
+                        timestamp=timestamp,
+                    )
             if origin == "graph-seed" and seed_node_id:
                 self._link_seed(connection, key, seed_node_id, seed_graph, timestamp)
-            self._sync_registry_context_graph(connection)
             connection.commit()
             return action
 
@@ -1573,6 +1553,24 @@ class ContextGraphRepository:
                             timestamp,
                         ),
                     )
+                    project_node = connection.execute(
+                        """
+                        SELECT id FROM context_nodes
+                        WHERE namespace = ? AND stable_key = ? AND node_type = 'project'
+                        """,
+                        (CONTEXT_NAMESPACE, normalized_project),
+                    ).fetchone()
+                    if project_node is not None:
+                        self._upsert_edge(
+                            connection,
+                            source_id=str(project_node["id"]),
+                            target_id=_stable_id(
+                                MEMORY_NAMESPACE, normalized_project, change["key"]
+                            ),
+                            relation="contains",
+                            origin="human",
+                            timestamp=timestamp,
+                        )
                     version_id = self._record_memory_version(
                         connection,
                         project=normalized_project,
@@ -1606,7 +1604,6 @@ class ContextGraphRepository:
                         payload={"changes": event_changes},
                         occurred_at=timestamp,
                     )
-                self._sync_registry_context_graph(connection)
                 connection.commit()
             return {"applied": apply, "project": normalized_project, "changes": results}
 
@@ -2599,16 +2596,20 @@ class ContextGraphRepository:
             matching_views = [
                 view
                 for view in connection.execute(
-                    "SELECT id, locator FROM context_resource_views ORDER BY id"
+                    """
+                    SELECT id, stable_key, source AS locator FROM context_nodes
+                    WHERE namespace = ? AND node_type = 'resource-view'
+                    ORDER BY stable_key
+                    """,
+                    (RESOURCE_NAMESPACE,),
                 ).fetchall()
                 if resolve_project_id(str(view["locator"])) == normalized_project
             ]
             for view in matching_views:
-                view_node_id = _stable_id(RESOURCE_NAMESPACE, "", str(view["id"]))
                 for code_node_id in node_ids.values():
                     self._upsert_edge(
                         connection,
-                        source_id=view_node_id,
+                        source_id=str(view["id"]),
                         target_id=code_node_id,
                         relation="contains",
                         origin="derived",
@@ -3234,14 +3235,19 @@ class ContextGraphRepository:
                 return None
             view_rows = connection.execute(
                 """
-                SELECT view.id AS view_id, view.locator, view.revision,
+                SELECT view.stable_key AS view_id, view.source AS locator,
                        view.properties_json AS view_properties,
-                       resource.id AS resource_id, resource.label AS resource_label,
-                       resource.provider, resource.external_identity
-                FROM context_resource_views view
-                JOIN context_resources resource ON resource.id = view.resource_id
-                ORDER BY view.id
+                       resource.stable_key AS resource_id,
+                       resource.label AS resource_label,
+                       resource.properties_json AS resource_properties
+                FROM context_nodes view
+                JOIN context_edges relation ON relation.target_id = view.id
+                    AND relation.relation = 'has-view'
+                JOIN context_nodes resource ON resource.id = relation.source_id
+                WHERE view.namespace = ? AND view.node_type = 'resource-view'
+                ORDER BY view.stable_key
                 """,
+                (RESOURCE_NAMESPACE,),
             ).fetchall()
             view_row = next(
                 (
@@ -3268,16 +3274,18 @@ class ContextGraphRepository:
             ).fetchall()
         node = json.loads(node_row["properties_json"])
         node["id"] = node_row["stable_key"]
+        view_properties = _json_object(view_row["view_properties"]) if view_row else {}
+        resource_properties = _json_object(view_row["resource_properties"]) if view_row else {}
         resource_context = (
             {
                 "resourceId": view_row["resource_id"],
                 "resourceLabel": view_row["resource_label"],
-                "provider": view_row["provider"],
-                "externalIdentity": view_row["external_identity"],
+                "provider": resource_properties.get("provider"),
+                "externalIdentity": resource_properties.get("externalIdentity"),
                 "viewId": view_row["view_id"],
                 "locator": view_row["locator"],
-                "revision": view_row["revision"],
-                "view": _json_object(view_row["view_properties"]),
+                "revision": view_properties.get("revision"),
+                "view": view_properties,
             }
             if view_row is not None
             else None
@@ -4141,13 +4149,22 @@ class ContextGraphRepository:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             counts = {
                 "projects": int(
-                    connection.execute("SELECT COUNT(*) FROM context_namespaces").fetchone()[0]
+                    connection.execute(
+                        "SELECT COUNT(*) FROM context_nodes WHERE namespace = ? AND node_type = 'project'",
+                        (CONTEXT_NAMESPACE,),
+                    ).fetchone()[0]
                 ),
                 "resources": int(
-                    connection.execute("SELECT COUNT(*) FROM context_resources").fetchone()[0]
+                    connection.execute(
+                        "SELECT COUNT(*) FROM context_nodes WHERE namespace = ? AND node_type LIKE 'resource.%'",
+                        (RESOURCE_NAMESPACE,),
+                    ).fetchone()[0]
                 ),
                 "resourceViews": int(
-                    connection.execute("SELECT COUNT(*) FROM context_resource_views").fetchone()[0]
+                    connection.execute(
+                        "SELECT COUNT(*) FROM context_nodes WHERE namespace = ? AND node_type = 'resource-view'",
+                        (RESOURCE_NAMESPACE,),
+                    ).fetchone()[0]
                 ),
                 "nodes": int(
                     connection.execute("SELECT COUNT(*) FROM context_nodes").fetchone()[0]

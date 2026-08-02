@@ -298,12 +298,12 @@ def test_retrieval_combines_selected_views_from_multiple_git_resources(
     service.attach_git_resource(project["id"], secondary, alias="Secondary service")
     service.sync_graph()
 
-    code = service.search(
+    code = service._provisioner().search(
         "secondary_handler",
         session_id="multi-resource",
         scopes=("code",),
     )
-    resources = service.search(
+    resources = service._provisioner().search(
         "Secondary service",
         session_id="multi-resource",
         scopes=("resource",),
