@@ -505,6 +505,10 @@ class ContextProvisioningService:
         if len(visible_seeds) != len(seeds):
             missing = sorted(set(seeds) - {node["id"] for node in visible_seeds})
             raise KeyError(f"context nodes not found: {', '.join(missing)}")
+        self.repository.record_embedding_targets(
+            [str(node["id"]) for node in visible_seeds],
+            reason="expanded",
+        )
         memory_history: dict[str, list[dict[str, Any]]] = {}
         needs_reviews: list[dict[str, Any]] = []
         for node in visible_seeds:

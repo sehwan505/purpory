@@ -124,17 +124,26 @@ audit.
 
 The routing model is optional. Deterministic fallback remains usable when it is absent.
 
+Install and start Ollama, then:
+
 ```bash
-pip install 'purpory[gate]'
 purpory model install
 purpory model start
 purpory model status
 ```
 
-Purpory reuses the Hugging Face disk cache and keeps weights in one warm `transformers serve`
-process. The small classifier emits exactly one of `SKIP`, `SEARCH`, or `ASK`; Purpory performs
+Purpory uses the same `OLLAMA_BASE_URL` runtime as its other local models. The small classifier
+emits exactly one of `SKIP`, `SEARCH`, or `ASK`; Purpory performs
 deterministic retrieval, applies the token budget, and records the exact delivered bytes. See
 [`docs/GATEWAY.md`](docs/GATEWAY.md).
+
+Embeddings are lazy: only explicit expansion seeds and successfully delivered nodes are queued.
+They are materialized in bounded batches and remain an optional SQLite projection:
+
+```bash
+purpory embed --status --json
+purpory embed --limit 32
+```
 
 ## Code Graph
 

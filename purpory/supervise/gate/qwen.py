@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
@@ -20,7 +21,7 @@ from purpory.supervise.gate.contract import (
 )
 from purpory.supervise.gate.provider import GateProviderError
 
-DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B"
+DEFAULT_MODEL = "qwen3.5:0.8b"
 DEFAULT_TIMEOUT_SECONDS = 2.0
 DEFAULT_MAX_INPUT_TOKENS = 20_000
 DEFAULT_MAX_CONTEXT_TOKENS = 262_144
@@ -144,11 +145,11 @@ class QwenGateProvider:
                     "content": request.message,
                 },
             ],
-            # transformers serve 5.14 ignores OpenAI's response_format field,
-            # so the local 0.8B model performs one bounded classification. The
+            # The local 0.8B model performs one bounded classification. The
             # adapter deterministically expands that classification into the
             # richer internal proposal contract.
             "max_tokens": MAX_RESPONSE_TOKENS,
+            "reasoning_effort": "none",
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -189,8 +190,11 @@ class QwenGateProvider:
     def input_limit_reason(self, request: GateRequest) -> str | None:
         """Return why this request cannot fit, without altering its message."""
         if self.tokenizer_path is None:
-            return None
-        prompt_tokens = self._count_prompt_tokens(request.message)
+            prompt_tokens = math.ceil(
+                (len(SYSTEM_PROMPT.encode("utf-8")) + len(request.message.encode("utf-8"))) / 4
+            )
+        else:
+            prompt_tokens = self._count_prompt_tokens(request.message)
         if prompt_tokens > self.max_input_tokens:
             return (
                 f"gate prompt requires {prompt_tokens} tokens, "

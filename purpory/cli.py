@@ -24,13 +24,14 @@ _COMMANDS = {
     "cluster-only": "rerun graph clustering",
     "codex": "manage Codex integration",
     "dashboard": "launch the supervision dashboard",
+    "embed": "materialize embeddings for used context",
     "explain": "explain a graph node",
     "export": "export json, report, wiki, or push to a graph database",
     "extract": "run structural and semantic extraction",
     "hook": "manage Git hooks",
     "import": "import a graph.json compatibility artifact",
     "label": "label graph communities",
-    "model": "manage the local gate model",
+    "model": "manage local models in Ollama",
     "path": "find a path between graph nodes",
     "preflight": "run agent prompt preflight",
     "prepare": "prepare context for an agent request",
@@ -388,7 +389,7 @@ def _enforce_graph_size_cap_or_exit(gp: Path) -> None:
 
 def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> None:
     argv = ["purpory", cmd, *arguments]
-    if cmd in {"remember", "prepare", "dashboard"}:
+    if cmd in {"remember", "prepare", "dashboard", "embed"}:
         from purpory.supervise.cli import dispatch_product_command
 
         dispatch_product_command(cmd, argv[2:])

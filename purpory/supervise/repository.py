@@ -23,7 +23,7 @@ from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 from purpory.supervise.identity import resolve_project_id
 
 DEFAULT_DB_PATH = Path.home() / ".purpory" / "context.db"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MEMORY_NAMESPACE = "memory"
 RESOURCE_NAMESPACE = "resource"
 CONTEXT_NAMESPACE = "context"
@@ -336,6 +336,37 @@ class ContextGraphRepository:
                     CHECK (status IN ('pending', 'approved', 'rejected'))
                 );
 
+                CREATE TABLE IF NOT EXISTS embedding_targets (
+                    node_id TEXT PRIMARY KEY,
+                    priority INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    requested_at INTEGER NOT NULL,
+                    usage_count INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS embedding_profiles (
+                    profile_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    vector_format TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS node_embeddings (
+                    profile_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    source_updated_at INTEGER NOT NULL,
+                    vector BLOB,
+                    embedded_at INTEGER,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    PRIMARY KEY(profile_id, node_id)
+                );
+
                 """
             )
             graph_snapshot_columns = {
@@ -387,6 +418,8 @@ class ContextGraphRepository:
                     ON needs_reviews(project, status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_global_memory_requests_status
                     ON global_memory_requests(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_embedding_targets_priority
+                    ON embedding_targets(priority DESC, usage_count DESC, requested_at);
                 """
             )
             versioned = {
@@ -3377,8 +3410,62 @@ class ContextGraphRepository:
                 },
                 occurred_at=timestamp,
             )
+            self._upsert_embedding_target(
+                connection,
+                node_id=node_id,
+                priority=100,
+                reason="delivered",
+                timestamp=timestamp,
+            )
             connection.commit()
         return digest
+
+    def record_embedding_targets(
+        self,
+        node_ids: Sequence[str],
+        *,
+        reason: str,
+        recorded_at: int | None = None,
+    ) -> None:
+        priorities = {"expanded": 60, "delivered": 100}
+        if reason not in priorities:
+            raise ValueError(f"unsupported embedding signal: {reason}")
+        normalized = list(dict.fromkeys(node_id.strip() for node_id in node_ids if node_id.strip()))
+        if not normalized:
+            return
+        timestamp = _now(recorded_at)
+        with self.connect() as connection:
+            for node_id in normalized:
+                self._upsert_embedding_target(
+                    connection,
+                    node_id=node_id,
+                    priority=priorities[reason],
+                    reason=reason,
+                    timestamp=timestamp,
+                )
+            connection.commit()
+
+    @staticmethod
+    def _upsert_embedding_target(
+        connection: sqlite3.Connection,
+        *,
+        node_id: str,
+        priority: int,
+        reason: str,
+        timestamp: int,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO embedding_targets(node_id, priority, reason, requested_at, usage_count)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(node_id) DO UPDATE SET
+                priority = MAX(priority, excluded.priority),
+                reason = excluded.reason,
+                requested_at = excluded.requested_at,
+                usage_count = usage_count + 1
+            """,
+            (node_id, priority, reason, timestamp),
+        )
 
     @staticmethod
     def _record_event(
