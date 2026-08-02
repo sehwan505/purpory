@@ -592,29 +592,6 @@ def test_extract_purpory_force_env_redispatches(monkeypatch, tmp_path):
     assert len(calls) == 2, "PURPORY_FORCE=1 must force a re-dispatch"
 
 
-def test_cache_check_mode_deep_reads_deep_namespace(monkeypatch, tmp_path, capsys):
-    """cache-check --mode deep consults cache/semantic-deep/; without the flag
-    it keeps reading cache/semantic/ (deep entries are invisible to it)."""
-    from purpory.cache import save_semantic_cache
-    from purpory.supervise.structural import project_state_directory
-
-    doc = tmp_path / "doc.md"
-    doc.write_text("# Doc\n")
-    save_semantic_cache([{"id": "d", "source_file": "doc.md"}], [],
-                        root=tmp_path, mode="deep",
-                        cache_root=project_state_directory(tmp_path))
-    files_from = tmp_path / "files.txt"
-    files_from.write_text(str(doc) + "\n")
-
-    _run_extract(monkeypatch, ["purpory", "cache-check", str(files_from),
-                               "--root", str(tmp_path)])
-    assert "Cache: 0 hit, 1 miss" in capsys.readouterr().out
-
-    _run_extract(monkeypatch, ["purpory", "cache-check", str(files_from),
-                               "--root", str(tmp_path), "--mode", "deep"])
-    assert "Cache: 1 hit, 0 miss" in capsys.readouterr().out
-
-
 def _code_only_corpus(tmp_path):
     """A corpus with only code — no docs/papers/images."""
     (tmp_path / "auth.py").write_text(
@@ -978,31 +955,3 @@ def test_no_cluster_incremental_prunes_newly_excluded_file(
         f"--no-cluster early exit must prune excluded sources, still see {sources}"
     )
     assert any("keep.py" in s for s in sources)
-
-
-def test_cache_check_prompt_file_scopes_hits_to_that_prompt(monkeypatch, tmp_path, capsys):
-    """#1939: cache-check --prompt-file only counts entries produced by that same
-    extraction prompt, so an upgraded prompt reports a miss (re-extract) rather
-    than replaying the older vintage."""
-    from purpory.cache import save_semantic_cache
-    from purpory.supervise.structural import project_state_directory
-
-    doc = tmp_path / "doc.md"
-    doc.write_text("# Doc\n")
-    spec = tmp_path / "extraction-spec.md"
-    spec.write_text("PROMPT V1", encoding="utf-8")
-    save_semantic_cache([{"id": "d", "source_file": "doc.md"}], [],
-                        root=tmp_path, prompt_file=str(spec),
-                        cache_root=project_state_directory(tmp_path))
-    files_from = tmp_path / "files.txt"
-    files_from.write_text(str(doc) + "\n")
-
-    base = ["purpory", "cache-check", str(files_from), "--root", str(tmp_path)]
-    _run_extract(monkeypatch, base + ["--prompt-file", str(spec)])
-    assert "Cache: 1 hit, 0 miss" in capsys.readouterr().out
-
-    # An upgrade rewrites the prompt: the entry must no longer satisfy the run.
-    spec.write_text("PROMPT V2 — rewritten by an upgrade", encoding="utf-8")
-    os.utime(spec, ns=(0, 0))
-    _run_extract(monkeypatch, base + ["--prompt-file", str(spec)])
-    assert "Cache: 0 hit, 1 miss" in capsys.readouterr().out

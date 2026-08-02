@@ -56,11 +56,8 @@ def test_help_lists_only_supported_agent_integrations(monkeypatch, capsys):
     _run_main(monkeypatch, "--help")
     output = capsys.readouterr().out
 
-    assert "claude install" in output
-    assert "claude uninstall" in output
-    assert "codex install" in output
-    assert "codex uninstall" in output
-    assert "UserPromptSubmit preflight" in output
+    assert "claude" in output
+    assert "codex" in output
     for agent in LEGACY_AGENTS:
         assert f"{agent} install" not in output
 

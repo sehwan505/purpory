@@ -7,12 +7,73 @@ import of main to avoid a cli<->__main__ import cycle.
 """
 
 from __future__ import annotations
+import argparse
 import json
 import os
 import sys
 from pathlib import Path
 
 from purpory.paths import PURPORY_OUT as _PURPORY_OUT
+
+_COMMANDS = {
+    "add": "fetch a URL and update the graph",
+    "affected": "find nodes affected by a symbol",
+    "benchmark": "benchmark graph queries",
+    "check-update": "check for pending semantic updates",
+    "claude": "manage Claude Code integration",
+    "cluster-only": "rerun graph clustering",
+    "codex": "manage Codex integration",
+    "dashboard": "launch the supervision dashboard",
+    "explain": "explain a graph node",
+    "export": "export json, report, wiki, or push to a graph database",
+    "extract": "run structural and semantic extraction",
+    "hook": "manage Git hooks",
+    "import": "import a graph.json compatibility artifact",
+    "label": "label graph communities",
+    "model": "manage the local gate model",
+    "path": "find a path between graph nodes",
+    "preflight": "run agent prompt preflight",
+    "prepare": "prepare context for an agent request",
+    "prs": "inspect pull requests",
+    "query": "query the canonical graph",
+    "remember": "store durable human context",
+    "update": "rebuild the structural graph",
+}
+
+
+def _root_parser(version: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="purpory")
+    parser.add_argument("--version", "-v", action="version", version=f"purpory {version}")
+    commands = parser.add_subparsers(dest="command", metavar="command")
+    for command, help_text in _COMMANDS.items():
+        commands.add_parser(command, add_help=False, help=help_text)
+    return parser
+
+
+def run_cli(arguments: list[str] | None = None, *, version: str = "unknown") -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+    raw = list(sys.argv[1:] if arguments is None else arguments)
+    if "-?" in raw:
+        raw[raw.index("-?")] = "--help"
+    parser = _root_parser(version)
+    try:
+        options, remaining = parser.parse_known_args(raw)
+    except SystemExit as exc:
+        if exc.code in (None, 0):
+            return
+        raise
+    if options.command is None:
+        parser.print_help()
+        return
+    from purpory.install import dispatch_install_cli
+
+    if not dispatch_install_cli(options.command, remaining):
+        dispatch_command(options.command, remaining)
 
 
 def _load_graph_data(
@@ -312,8 +373,8 @@ def _enforce_graph_size_cap_or_exit(gp: Path) -> None:
     raised ``ValueError`` into a CLI-style ``error: ...`` message + exit 1.
     Use this from ``__main__.py`` subcommands that already use the ``print +
     sys.exit(1)`` idiom. Library/MCP/loader callers (``serve._load_graph``,
-    ``build``, ``benchmark``, ``tree_html``, ``callflow_html``, ``prs``,
-    ``watch``, ``export``) call the security helper directly
+    ``build``, ``benchmark``, ``prs``, ``watch``, and
+    ``export``) call the security helper directly
     and let the ``ValueError`` propagate.
     """
     from purpory.security import check_graph_file_size_cap
@@ -325,227 +386,34 @@ def _enforce_graph_size_cap_or_exit(gp: Path) -> None:
         sys.exit(1)
 
 
-def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None) -> Path:
-    """Clone a GitHub repo to a local cache dir and return the path.
-
-    Clones into ~/.purpory/repos/<owner>/<repo> by default so repeated
-    runs on the same URL reuse the existing clone (git pull instead of clone).
-    """
-    import subprocess as _sp
-    import re as _re
-
-    # Normalise URL — strip trailing .git if present
-    url = url.rstrip("/")
-    if not url.endswith(".git"):
-        git_url = url + ".git"
-    else:
-        git_url = url
-        url = url[:-4]
-
-    # Extract owner/repo from URL
-    m = _re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", url)
-    if not m:
-        print(f"error: not a recognised GitHub URL: {url}", file=sys.stderr)
-        sys.exit(1)
-    owner, repo = m.group(1), m.group(2)
-
-    if out_dir:
-        dest = out_dir
-    else:
-        dest = Path.home() / ".purpory" / "repos" / owner / repo
-
-    if branch and branch.startswith("-"):
-        print(f"error: invalid branch name: {branch!r}", file=sys.stderr)
-        sys.exit(1)
-
-    if dest.exists():
-        print(f"Repo already cloned at {dest} - pulling latest...", flush=True)
-        cmd = ["git", "-C", str(dest), "pull"]
-        if branch:
-            cmd += ["origin", "--", branch]
-        result = _sp.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"warning: git pull failed:\n{result.stderr}", file=sys.stderr)
-    else:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Cloning {url} -> {dest} ...", flush=True)
-        cmd = ["git", "clone", "--depth", "1"]
-        if branch:
-            cmd += ["--branch", branch]
-        cmd += ["--", git_url, str(dest)]
-        result = _sp.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"error: git clone failed:\n{result.stderr}", file=sys.stderr)
-            sys.exit(1)
-
-    print(f"Ready at: {dest}", flush=True)
-    return dest
-
-
-def _reenter_main() -> None:
-    from purpory.__main__ import main
-
-    main()
-
-
-def dispatch_command(cmd: str) -> None:
+def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> None:
+    argv = ["purpory", cmd, *arguments]
     if cmd in {"remember", "prepare", "dashboard"}:
         from purpory.supervise.cli import dispatch_product_command
 
-        dispatch_product_command(cmd, sys.argv[2:])
+        dispatch_product_command(cmd, argv[2:])
     elif cmd == "preflight":
         from purpory.supervise.preflight import run_preflight
 
-        if len(sys.argv) != 3:
+        if len(argv) != 3:
             print("Usage: purpory preflight [claude|codex]", file=sys.stderr)
             raise SystemExit(2)
-        run_preflight(sys.argv[2])
+        run_preflight(argv[2])
     elif cmd == "model":
         from purpory.supervise.model_cli import dispatch_model
 
-        dispatch_model(sys.argv[2:])
-    elif cmd == "provider":
-        from purpory.llm import (
-            _custom_providers_path,
-            _read_custom_providers_file,
-            BACKENDS,
-        )
-        import json as _json
-
-        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
-        global_path = _custom_providers_path(global_=True)
-
-        if subcmd == "list":
-            global_path.parent.mkdir(parents=True, exist_ok=True)
-            existing = (
-                _read_custom_providers_file(global_path) if global_path.is_file() else {}
-            )
-            if not existing:
-                print("No custom providers registered.")
-            else:
-                for name in existing:
-                    print(f"  {name}  ({existing[name].get('base_url', '')})")
-
-        elif subcmd == "show":
-            name = sys.argv[3] if len(sys.argv) > 3 else ""
-            if not name:
-                print("Usage: purpory provider show <name>", file=sys.stderr)
-                sys.exit(1)
-            existing = (
-                _read_custom_providers_file(global_path) if global_path.is_file() else {}
-            )
-            if name not in existing:
-                print(f"Provider '{name}' not found.", file=sys.stderr)
-                sys.exit(1)
-            print(_json.dumps({name: existing[name]}, indent=2))
-
-        elif subcmd == "add":
-            args = sys.argv[3:]
-            name = args[0] if args and not args[0].startswith("-") else ""
-            if not name:
-                print(
-                    "Usage: purpory provider add <name> --base-url URL --default-model MODEL --env-key KEY",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            if name in BACKENDS:
-                print(
-                    f"Error: '{name}' is a built-in provider and cannot be overridden.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            base_url = ""
-            default_model = ""
-            env_key = ""
-            pricing_input = 0.0
-            pricing_output = 0.0
-            i = 1
-            while i < len(args):
-                a = args[i]
-                if a == "--base-url" and i + 1 < len(args):
-                    base_url = args[i + 1]
-                    i += 2
-                elif a.startswith("--base-url="):
-                    base_url = a.split("=", 1)[1]
-                    i += 1
-                elif a == "--default-model" and i + 1 < len(args):
-                    default_model = args[i + 1]
-                    i += 2
-                elif a.startswith("--default-model="):
-                    default_model = a.split("=", 1)[1]
-                    i += 1
-                elif a == "--env-key" and i + 1 < len(args):
-                    env_key = args[i + 1]
-                    i += 2
-                elif a.startswith("--env-key="):
-                    env_key = a.split("=", 1)[1]
-                    i += 1
-                elif a == "--pricing-input" and i + 1 < len(args):
-                    pricing_input = float(args[i + 1])
-                    i += 2
-                elif a == "--pricing-output" and i + 1 < len(args):
-                    pricing_output = float(args[i + 1])
-                    i += 2
-                else:
-                    i += 1
-            if not base_url or not default_model or not env_key:
-                print(
-                    "Error: --base-url, --default-model, and --env-key are required.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            from purpory.llm import provider_base_url_ok
-
-            if not provider_base_url_ok(base_url, name):
-                print(
-                    f"Error: refusing to add provider with unsafe base_url {base_url!r}.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            global_path.parent.mkdir(parents=True, exist_ok=True)
-            existing = (
-                _read_custom_providers_file(global_path) if global_path.is_file() else {}
-            )
-            existing[name] = {
-                "base_url": base_url,
-                "default_model": default_model,
-                "env_key": env_key,
-                "pricing": {"input": pricing_input, "output": pricing_output},
-                "temperature": 0,
-            }
-            global_path.write_text(_json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-            print(f"Provider '{name}' added. Use with: purpory extract . --backend {name}")
-
-        elif subcmd == "remove":
-            name = sys.argv[3] if len(sys.argv) > 3 else ""
-            if not name:
-                print("Usage: purpory provider remove <name>", file=sys.stderr)
-                sys.exit(1)
-            existing = (
-                _read_custom_providers_file(global_path) if global_path.is_file() else {}
-            )
-            if name not in existing:
-                print(f"Provider '{name}' not found.", file=sys.stderr)
-                sys.exit(1)
-            del existing[name]
-            global_path.write_text(_json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-            print(f"Provider '{name}' removed.")
-
-        else:
-            print("Usage: purpory provider [add|list|show|remove]", file=sys.stderr)
-            if subcmd:
-                sys.exit(1)
+        dispatch_model(argv[2:])
     elif cmd == "prs":
         from purpory.prs import cmd_prs
 
-        cmd_prs(sys.argv[2:])
+        cmd_prs(argv[2:])
     elif cmd == "import":
         import argparse as _ap
 
         parser = _ap.ArgumentParser(prog="purpory import")
         parser.add_argument("graph")
         parser.add_argument("--root", default=".")
-        options = parser.parse_args(sys.argv[2:])
+        options = parser.parse_args(argv[2:])
         from purpory.supervise.identity import resolve_project_id, resolve_project_root
         from purpory.supervise.repository import ContextGraphRepository
 
@@ -566,7 +434,7 @@ def dispatch_command(cmd: str) -> None:
             status as hook_status,
         )
 
-        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        subcmd = argv[2] if len(argv) > 2 else ""
         if subcmd == "install":
             print(hook_install(Path(".")))
         elif subcmd == "uninstall":
@@ -577,7 +445,7 @@ def dispatch_command(cmd: str) -> None:
             print("Usage: purpory hook [install|uninstall|status]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "query":
-        if len(sys.argv) < 3:
+        if len(argv) < 3:
             print(
                 'Usage: purpory query "<question>" [--dfs] [--context C] [--budget N] [--graph path]',
                 file=sys.stderr,
@@ -586,12 +454,12 @@ def dispatch_command(cmd: str) -> None:
         from purpory.serve import _query_graph_text
         from purpory import querylog
 
-        question = sys.argv[2]
-        use_dfs = "--dfs" in sys.argv
+        question = argv[2]
+        use_dfs = "--dfs" in argv
         budget = 2000
         graph_path: str | None = None
         context_filters: list[str] = []
-        args = sys.argv[3:]
+        args = argv[3:]
         i = 0
         while i < len(args):
             if args[i] == "--budget" and i + 1 < len(args):
@@ -661,7 +529,7 @@ def dispatch_command(cmd: str) -> None:
         )
         print(_result)
     elif cmd == "affected":
-        if len(sys.argv) < 3:
+        if len(argv) < 3:
             print(
                 'Usage: purpory affected "<node-or-label>" [--relation R] [--depth N] [--graph path]',
                 file=sys.stderr,
@@ -669,11 +537,11 @@ def dispatch_command(cmd: str) -> None:
             sys.exit(1)
         from purpory.affected import DEFAULT_AFFECTED_RELATIONS, format_affected
 
-        query = sys.argv[2]
+        query = argv[2]
         graph_path: str | None = None
         depth = 2
         relations: list[str] = []
-        args = sys.argv[3:]
+        args = argv[3:]
         i = 0
         while i < len(args):
             if args[i] == "--graph" and i + 1 < len(args):
@@ -719,7 +587,7 @@ def dispatch_command(cmd: str) -> None:
             )
         )
     elif cmd == "path":
-        if len(sys.argv) < 4:
+        if len(argv) < 4:
             print(
                 'Usage: purpory path "<source>" "<target>" [--graph path]',
                 file=sys.stderr,
@@ -728,10 +596,10 @@ def dispatch_command(cmd: str) -> None:
         from purpory.serve import _pick_scored_endpoint, _score_nodes
         import networkx as _nx
 
-        source_label = sys.argv[2]
-        target_label = sys.argv[3]
+        source_label = argv[2]
+        target_label = argv[3]
         graph_path: str | None = None
-        args = sys.argv[4:]
+        args = argv[4:]
         for i, a in enumerate(args):
             if a == "--graph" and i + 1 < len(args):
                 graph_path = args[i + 1]
@@ -808,20 +676,20 @@ def dispatch_command(cmd: str) -> None:
 
         querylog.log_query(
             kind="path",
-            question=f"{sys.argv[2]} -> {sys.argv[3]}",
+            question=f"{argv[2]} -> {argv[3]}",
             corpus=_corpus,
             nodes_returned=hops,
         )
 
     elif cmd == "explain":
-        if len(sys.argv) < 3:
+        if len(argv) < 3:
             print('Usage: purpory explain "<node>" [--graph path]', file=sys.stderr)
             sys.exit(1)
         from purpory.serve import _find_node
 
-        label = sys.argv[2]
+        label = argv[2]
         graph_path: str | None = None
-        args = sys.argv[3:]
+        args = argv[3:]
         for i, a in enumerate(args):
             if a == "--graph" and i + 1 < len(args):
                 graph_path = args[i + 1]
@@ -864,110 +732,13 @@ def dispatch_command(cmd: str) -> None:
 
         querylog.log_query(
             kind="explain",
-            question=sys.argv[2],
+            question=argv[2],
             corpus=_corpus,
             nodes_returned=len(connections),
         )
 
-    elif cmd == "diagnose":
-        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
-        if subcmd != "multigraph":
-            print(
-                "Usage: purpory diagnose multigraph "
-                "[--graph path] [--json] [--max-examples N] "
-                "[--directed] [--undirected] [--extract-path path]",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        graph_path: Path | None = None
-        max_examples = 5
-        directed: bool | None = None
-        direction_flag: str | None = None
-        json_output = False
-        extract_path: Path | None = None
-
-        i = 3
-        while i < len(sys.argv):
-            arg = sys.argv[i]
-            if arg == "--graph":
-                i += 1
-                if i >= len(sys.argv):
-                    print("error: --graph requires a path", file=sys.stderr)
-                    sys.exit(1)
-                graph_path = Path(sys.argv[i])
-            elif arg == "--json":
-                json_output = True
-            elif arg == "--max-examples":
-                i += 1
-                if i >= len(sys.argv):
-                    print("error: --max-examples requires an integer", file=sys.stderr)
-                    sys.exit(1)
-                try:
-                    max_examples = int(sys.argv[i])
-                except ValueError:
-                    print("error: --max-examples requires an integer", file=sys.stderr)
-                    sys.exit(1)
-                if max_examples < 0:
-                    print("error: --max-examples must be >= 0", file=sys.stderr)
-                    sys.exit(1)
-            elif arg == "--directed":
-                if direction_flag == "undirected":
-                    print(
-                        "error: --directed and --undirected are mutually exclusive",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                direction_flag = "directed"
-                directed = True
-            elif arg == "--undirected":
-                if direction_flag == "directed":
-                    print(
-                        "error: --directed and --undirected are mutually exclusive",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                direction_flag = "undirected"
-                directed = False
-            elif arg == "--extract-path":
-                i += 1
-                if i >= len(sys.argv):
-                    print("error: --extract-path requires a path", file=sys.stderr)
-                    sys.exit(1)
-                extract_path = Path(sys.argv[i])
-            else:
-                print(f"error: unknown diagnose option {arg}", file=sys.stderr)
-                sys.exit(1)
-            i += 1
-
-        from purpory.diagnostics import (
-            diagnose_file,
-            format_diagnostic_json,
-            format_diagnostic_report,
-        )
-
-        if graph_path is None:
-            print("error: --graph is required for artifact diagnostics", file=sys.stderr)
-            sys.exit(1)
-        try:
-            summary = diagnose_file(
-                graph_path,
-                directed=directed,
-                root=Path(".").resolve(),
-                max_examples=max_examples,
-                extract_path=extract_path,
-            )
-        except Exception as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-        if json_output:
-            print(json.dumps(format_diagnostic_json(summary), indent=2))
-        else:
-            print(format_diagnostic_report(summary))
-
     elif cmd == "add":
-        if len(sys.argv) < 3:
+        if len(argv) < 3:
             print(
                 "Usage: purpory add <url> [--author Name] [--contributor Name] [--dir ./raw]",
                 file=sys.stderr,
@@ -975,11 +746,11 @@ def dispatch_command(cmd: str) -> None:
             sys.exit(1)
         from purpory.ingest import ingest as _ingest
 
-        url = sys.argv[2]
+        url = argv[2]
         author: str | None = None
         contributor: str | None = None
         target_dir = Path("raw")
-        args = sys.argv[3:]
+        args = argv[3:]
         i = 0
         while i < len(args):
             if args[i] == "--author" and i + 1 < len(args):
@@ -1001,33 +772,20 @@ def dispatch_command(cmd: str) -> None:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    elif cmd == "watch":
-        watch_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
-        if not watch_path.exists():
-            print(f"error: path not found: {watch_path}", file=sys.stderr)
-            sys.exit(1)
-        from purpory.watch import watch as _watch
-
-        try:
-            _watch(watch_path)
-        except ImportError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            sys.exit(1)
-
     elif cmd in ("cluster-only", "label"):
         # `label` is `cluster-only` that always (re)generates community names with
         # the configured backend, even when a .purpory_labels.json already exists.
         force_relabel = cmd == "label"
         # Mirror the tree/export arg-parsing pattern: walk argv so flags and
         # the optional positional path can appear in any order (#724).
-        no_label = "--no-label" in sys.argv
-        missing_only = "--missing-only" in sys.argv
-        co_timing = "--timing" in sys.argv
-        _backend_arg = next((a for a in sys.argv if a.startswith("--backend=")), None)
+        no_label = "--no-label" in argv
+        missing_only = "--missing-only" in argv
+        co_timing = "--timing" in argv
+        _backend_arg = next((a for a in argv if a.startswith("--backend=")), None)
         label_backend = _backend_arg.split("=", 1)[1] if _backend_arg else None
-        _model_arg = next((a for a in sys.argv if a.startswith("--model=")), None)
+        _model_arg = next((a for a in argv if a.startswith("--model=")), None)
         label_model = _model_arg.split("=", 1)[1] if _model_arg else None
-        args = sys.argv[2:]
+        args = argv[2:]
         watch_path: Path | None = None
         graph_override: Path | None = None
         co_resolution: float = 1.0
@@ -1257,7 +1015,7 @@ def dispatch_command(cmd: str) -> None:
     elif cmd == "update":
         force = os.environ.get("PURPORY_FORCE", "").lower() in ("1", "true", "yes")
         no_cluster = False
-        args = sys.argv[2:]
+        args = argv[2:]
         watch_arg: str | None = None
         for a in args:
             if a == "--force":
@@ -1310,670 +1068,147 @@ def dispatch_command(cmd: str) -> None:
             sys.exit(1)
 
     elif cmd == "check-update":
-        if len(sys.argv) < 3:
+        if len(argv) < 3:
             print("Usage: purpory check-update <path>", file=sys.stderr)
             sys.exit(1)
         from purpory.watch import check_update
 
-        check_update(Path(sys.argv[2]).resolve())
+        check_update(Path(argv[2]).resolve())
         sys.exit(0)
-    elif cmd == "tree":
-        # Emit a D3 v7 collapsible-tree HTML view of graph.json:
-        # expand-all / collapse-all / reset-view buttons, multi-line
-        # wrapText labels with separately-coloured name + count,
-        # depth-based palette, click-to-toggle subtree, hover inspector
-        # showing top-K outbound edges per symbol.
-        from typing import Optional as _Opt
-        from purpory.tree_html import write_tree_html, DEFAULT_MAX_CHILDREN
-
-        graph_path: Path | None = None
-        output_path: "_Opt[Path]" = None
-        root: "_Opt[str]" = None
-        max_children = DEFAULT_MAX_CHILDREN
-        top_k_edges = 0
-        project_label: "_Opt[str]" = None
-        args = sys.argv[2:]
-        i_arg = 0
-        while i_arg < len(args):
-            a = args[i_arg]
-            if a == "--graph" and i_arg + 1 < len(args):
-                graph_path = Path(args[i_arg + 1])
-                i_arg += 2
-            elif a == "--output" and i_arg + 1 < len(args):
-                output_path = Path(args[i_arg + 1])
-                i_arg += 2
-            elif a == "--root" and i_arg + 1 < len(args):
-                root = args[i_arg + 1]
-                i_arg += 2
-            elif a == "--max-children" and i_arg + 1 < len(args):
-                max_children = int(args[i_arg + 1])
-                i_arg += 2
-            elif a == "--top-k-edges" and i_arg + 1 < len(args):
-                top_k_edges = int(args[i_arg + 1])
-                i_arg += 2
-            elif a == "--label" and i_arg + 1 < len(args):
-                project_label = args[i_arg + 1]
-                i_arg += 2
-            elif a in ("-h", "--help"):
-                print("Usage: purpory tree [--graph PATH] [--output HTML]")
-                print("  --graph PATH         path to graph.json (default purpory-out/graph.json)")
-                print("  --output HTML        output path (default purpory-out/GRAPH_TREE.html)")
-                print(
-                    "  --root PATH          filesystem root (default: longest common dir of all source_files)"
-                )
-                print("  --max-children N     cap visible children per node (default 200)")
-                print(
-                    "  --top-k-edges N      pre-compute top-K outbound edges per symbol (default 12)"
-                )
-                print("  --label NAME         project label shown in the page header")
-                return
-            else:
-                i_arg += 1
-        try:
-            graph, _, explicit_graph = _load_graph_data(graph_path)
-        except Exception as exc:
-            print(f"error: could not load graph: {exc}", file=sys.stderr)
-            sys.exit(1)
-        if output_path is None:
-            output_path = (
-                explicit_graph.parent if explicit_graph is not None else Path(_PURPORY_OUT)
-            ) / "GRAPH_TREE.html"
-        out = write_tree_html(
-            graph_path=explicit_graph,
-            output_path=output_path,
-            graph_data=graph,
-            root=root,
-            max_children=max_children,
-            top_k_edges=top_k_edges,
-            project_label=project_label,
-        )
-        size_kb = out.stat().st_size / 1024
-        print(f"wrote {out} ({size_kb:.1f} KB)")
-        print(f"open with: xdg-open {out}  (or file://{out.resolve()})")
-        sys.exit(0)
-
-    elif cmd == "merge-driver":
-        # git merge driver for graph.json — takes (base, current, other) and writes
-        # the union of current+other nodes/edges back to current. Exits 1 on
-        # corrupt input so git surfaces the conflict instead of silently
-        # accepting a poisoned merge (see F-005).
-        # Usage: purpory merge-driver %O %A %B  (set in .git/config merge driver)
-        if len(sys.argv) < 5:
-            print("Usage: purpory merge-driver <base> <current> <other>", file=sys.stderr)
-            sys.exit(1)
-        _base_path, _current_path, _other_path = sys.argv[2], sys.argv[3], sys.argv[4]
-        # Hard caps so a malicious or corrupted graph.json cannot exhaust memory
-        # at parse time. 50 MB / 100k nodes are well above any realistic graph
-        # (typical graphs are <5 MB / <50k nodes); anything larger should fail
-        # the merge so a human can investigate.
-        _MERGE_MAX_BYTES = 50 * 1024 * 1024
-        _MERGE_MAX_NODES = 100_000
-        import networkx as _nx
-        from networkx.readwrite import json_graph as _jg
-
-        def _load_graph(p: str):
-            path_obj = Path(p)
-            try:
-                size = path_obj.stat().st_size
-            except OSError as exc:
-                raise RuntimeError(f"cannot stat {p}: {exc}") from exc
-            if size > _MERGE_MAX_BYTES:
-                raise RuntimeError(
-                    f"graph.json {p} is {size} bytes, exceeds {_MERGE_MAX_BYTES}-byte cap"
-                )
-            data = json.loads(path_obj.read_text(encoding="utf-8"))
-            try:
-                return _jg.node_link_graph(data, edges="links"), data
-            except TypeError:
-                return _jg.node_link_graph(data), data
-
-        try:
-            G_cur, _ = _load_graph(_current_path)
-            G_oth, _ = _load_graph(_other_path)
-        except Exception as exc:
-            print(f"[purpory merge-driver] error loading graphs: {exc}", file=sys.stderr)
-            sys.exit(1)  # surface the conflict so git doesn't accept a corrupt merge
-        merged = _nx.compose(G_cur, G_oth)
-        if merged.number_of_nodes() > _MERGE_MAX_NODES:
-            print(
-                f"[purpory merge-driver] merged graph has {merged.number_of_nodes()} nodes, "
-                f"exceeds {_MERGE_MAX_NODES}-node cap; aborting merge.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        try:
-            out_data = _jg.node_link_data(merged, edges="links")
-        except TypeError:
-            out_data = _jg.node_link_data(merged)
-        from purpory.paths import write_json_atomic
-
-        write_json_atomic(_current_path, out_data, indent=2)
-        sys.exit(0)
-
-    elif cmd == "merge-graphs":
-        # purpory merge-graphs graph1.json graph2.json ... --out merged.json
-        args = sys.argv[2:]
-        graph_paths: list[Path] = []
-        out_path = Path(_PURPORY_OUT) / "merged-graph.json"
-        i = 0
-        while i < len(args):
-            if args[i] == "--out" and i + 1 < len(args):
-                out_path = Path(args[i + 1])
-                i += 2
-            else:
-                graph_paths.append(Path(args[i]))
-                i += 1
-        if len(graph_paths) < 2:
-            print(
-                "Usage: purpory merge-graphs <graph1.json> <graph2.json> [...] [--out merged.json]",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        import networkx as _nx
-        from networkx.readwrite import json_graph as _jg
-        from purpory.build import (
-            prefix_graph_for_global as _prefix,
-            distinct_repo_tags as _repo_tags,
-        )
-
-        graphs = []
-        for gp in graph_paths:
-            if not gp.exists():
-                print(f"error: not found: {gp}", file=sys.stderr)
-                sys.exit(1)
-            _enforce_graph_size_cap_or_exit(gp)
-            data = json.loads(gp.read_text(encoding="utf-8"))
-            # Normalize edges/links key before loading — purpory writes "links"
-            # via node_link_data but older runs may have used "edges" (#738).
-            if "links" not in data and "edges" in data:
-                data = dict(data, links=data["edges"])
-            try:
-                G = _jg.node_link_graph(data, edges="links")
-            except TypeError:
-                G = _jg.node_link_graph(data)
-            graphs.append(G)
-
-        # nx.compose requires all graphs to be the same type.  When input graphs
-        # come from different sources (e.g. an AST-only run vs a full LLM run) one
-        # may be a MultiGraph and another a Graph.  Normalise everything to Graph
-        # (the purpory default) by converting MultiGraphs with nx.Graph().
-        def _to_simple(g: "_nx.Graph") -> "_nx.Graph":
-            # nx.compose requires every graph to be the same type. Inputs may
-            # disagree on BOTH axes — directed vs undirected, and multi vs simple
-            # — because per-repo graph.json files are written by different extract
-            # paths at different times. Normalise everything to a plain undirected
-            # Graph (the merged cross-repo view is undirected anyway), which covers
-            # DiGraph / MultiGraph / MultiDiGraph. Without this a directed input
-            # crashed compose with "All graphs must be directed or undirected" (#1606).
-            if type(g) is not _nx.Graph:
-                return _nx.Graph(g)
-            return g
-
-        # Unique repo tag per graph. The bare `purpory-out/..` dir name is not
-        # unique across inputs (src/purpory-out and frontend/src/purpory-out both
-        # → "src"), which collides same-stem node ids and silently merges unrelated
-        # entities (#1729). distinct_repo_tags guarantees a distinct prefix per graph.
-        repo_tags = _repo_tags(graph_paths)
-        naive_tags = [gp.parent.parent.name for gp in graph_paths]
-        if len(set(naive_tags)) != len(naive_tags):
-            print(f"  note: repo dir names collide; using distinct tags: {', '.join(repo_tags)}")
-        merged = _nx.Graph()
-        for G, repo_tag in zip(graphs, repo_tags):
-            prefixed = _to_simple(_prefix(G, repo_tag))
-            merged = _nx.compose(merged, prefixed)
-        try:
-            out_data = _jg.node_link_data(merged, edges="links")
-        except TypeError:
-            out_data = _jg.node_link_data(merged)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        from purpory.paths import write_json_atomic as _wja
-
-        _wja(out_path, out_data, indent=2)
-        print(
-            f"Merged {len(graphs)} graphs -> {merged.number_of_nodes()} nodes, {merged.number_of_edges()} edges"
-        )
-        print(f"Written to: {out_path}")
-
-    elif cmd == "clone":
-        if len(sys.argv) < 3:
-            print(
-                "Usage: purpory clone <github-url> [--branch <branch>] [--out <dir>]",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        url = sys.argv[2]
-        branch: str | None = None
-        out_dir: Path | None = None
-        args = sys.argv[3:]
-        i = 0
-        while i < len(args):
-            if args[i] == "--branch" and i + 1 < len(args):
-                branch = args[i + 1]
-                i += 2
-            elif args[i] == "--out" and i + 1 < len(args):
-                out_dir = Path(args[i + 1])
-                i += 2
-            else:
-                i += 1
-        local_path = _clone_repo(url, branch=branch, out_dir=out_dir)
-        print(local_path)
-
     elif cmd == "export":
-        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
-        if subcmd not in (
-            "html",
-            "json",
-            "report",
-            "callflow-html",
-            "obsidian",
-            "wiki",
-            "svg",
-            "graphml",
-            "neo4j",
-            "falkordb",
-        ):
-            print("Usage: purpory export <format>", file=sys.stderr)
-            print(
-                "  html      [--graph PATH] [--labels PATH] [--node-limit N] [--no-viz]",
-                file=sys.stderr,
-            )
-            print("  json      [--output PATH]", file=sys.stderr)
-            print("  report    [--output PATH]", file=sys.stderr)
-            print(
-                "  callflow-html [GRAPH|DIR] [--graph PATH] [--labels PATH] [--report PATH] [--sections PATH] [--output HTML]",
-                file=sys.stderr,
-            )
-            print(
-                "            [--lang auto|zh-CN|en] [--max-sections N] [--diagram-scale N]",
-                file=sys.stderr,
-            )
-            print("  obsidian  [--graph PATH] [--labels PATH] [--dir PATH]", file=sys.stderr)
-            print("  wiki      [--graph PATH] [--labels PATH]", file=sys.stderr)
-            print("  svg       [--graph PATH] [--labels PATH]", file=sys.stderr)
-            print("  graphml   [--graph PATH]", file=sys.stderr)
-            print(
-                "  neo4j     [--graph PATH] [--push URI] [--user U] [--password P]", file=sys.stderr
-            )
-            print(
-                "            (or set NEO4J_PASSWORD instead of --password to keep it off argv)",
-                file=sys.stderr,
-            )
-            print(
-                "  falkordb  [--graph PATH] [--push URI] [--user U] [--password P]", file=sys.stderr
-            )
-            print(
-                "            (or set FALKORDB_PASSWORD instead of --password to keep it off argv)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        import argparse
 
-        # Parse shared args
-        args = sys.argv[3:]
-        graph_path = Path(_PURPORY_OUT) / "graph.json"
-        graph_path_explicit = False
-        labels_path = Path(_PURPORY_OUT) / ".purpory_labels.json"
-        labels_path_explicit = False
-        report_path = Path(_PURPORY_OUT) / "GRAPH_REPORT.md"
-        report_path_explicit = False
-        sections_path: Path | None = None
-        callflow_output: Path | None = None
-        json_output = Path("graph.json")
-        report_output = Path("GRAPH_REPORT.md")
-        callflow_lang = "auto"
-        callflow_max_sections = 15
-        callflow_diagram_scale = 1.0
-        callflow_max_diagram_nodes = 18
-        callflow_max_diagram_edges = 24
-        analysis_path = Path(_PURPORY_OUT) / ".purpory_analysis.json"
-        export_root = Path(".")
-        node_limit = 5000
-        no_viz = False
-        obsidian_dir = Path(_PURPORY_OUT) / "obsidian"
-        # Shared push-connection settings for the graph-database sinks (neo4j,
-        # falkordb), parsed from the generic --push/--user/--password flags below.
-        push_uri: str | None = None
-        push_user = "neo4j"  # Neo4j default user; FalkorDB auth is optional and ignores it
-        # F-031: prefer an env var so the password never appears on argv (visible
-        # in `ps` output / shell history). The explicit --password flag still
-        # overrides it. Each sink reads its own var: FALKORDB_PASSWORD for falkordb,
-        # NEO4J_PASSWORD otherwise.
-        push_password: str | None = (
-            os.environ.get("FALKORDB_PASSWORD")
-            if subcmd == "falkordb"
-            else os.environ.get("NEO4J_PASSWORD")
-        ) or None
-        i = 0
-        while i < len(args):
-            a = args[i]
-            if a == "--graph" and i + 1 < len(args):
-                graph_path = Path(args[i + 1])
-                graph_path_explicit = True
-                i += 2
-            elif a == "--labels" and i + 1 < len(args):
-                labels_path = Path(args[i + 1])
-                labels_path_explicit = True
-                i += 2
-            elif a == "--report" and i + 1 < len(args):
-                report_path = Path(args[i + 1])
-                report_path_explicit = True
-                i += 2
-            elif a == "--sections" and i + 1 < len(args):
-                sections_path = Path(args[i + 1])
-                i += 2
-            elif a == "--output" and i + 1 < len(args):
-                parsed_output = Path(args[i + 1]).expanduser()
-                if subcmd == "json":
-                    json_output = parsed_output
-                elif subcmd == "report":
-                    report_output = parsed_output
-                else:
-                    callflow_output = parsed_output
-                    if not callflow_output.is_absolute():
-                        callflow_output = Path.cwd() / callflow_output
-                i += 2
-            elif a == "--root" and i + 1 < len(args):
-                export_root = Path(args[i + 1]).expanduser()
-                i += 2
-            elif a == "--lang" and i + 1 < len(args):
-                callflow_lang = args[i + 1]
-                i += 2
-            elif a == "--max-sections" and i + 1 < len(args):
-                callflow_max_sections = int(args[i + 1])
-                i += 2
-            elif a == "--diagram-scale" and i + 1 < len(args):
-                callflow_diagram_scale = float(args[i + 1])
-                i += 2
-            elif a == "--max-diagram-nodes" and i + 1 < len(args):
-                callflow_max_diagram_nodes = int(args[i + 1])
-                i += 2
-            elif a == "--max-diagram-edges" and i + 1 < len(args):
-                callflow_max_diagram_edges = int(args[i + 1])
-                i += 2
-            elif a in ("-h", "--help") and subcmd == "callflow-html":
-                print(
-                    "Usage: purpory export callflow-html [GRAPH|DIR] [--graph PATH] [--labels PATH]"
-                )
-                print("  --report PATH          path to GRAPH_REPORT.md")
-                print("  --sections PATH        JSON section definitions")
-                print(
-                    "  --output HTML          output path (default purpory-out/<project>-callflow.html)"
-                )
-                print("  --lang LANG            auto, zh-CN, en, etc. (default auto)")
-                print("  --max-sections N       maximum auto-derived sections (default 15)")
-                print("  --diagram-scale N      Mermaid diagram scale (default 1.0)")
-                print("  --max-diagram-nodes N  representative nodes per section (default 18)")
-                print("  --max-diagram-edges N  representative edges per section (default 24)")
-                sys.exit(0)
-            elif a == "--node-limit" and i + 1 < len(args):
-                node_limit = int(args[i + 1])
-                i += 2
-            elif a == "--no-viz":
-                no_viz = True
-                i += 1
-            elif a == "--dir" and i + 1 < len(args):
-                obsidian_dir = Path(args[i + 1])
-                i += 2
-            elif a == "--push" and i + 1 < len(args):
-                push_uri = args[i + 1]
-                i += 2
-            elif a == "--user" and i + 1 < len(args):
-                push_user = args[i + 1]
-                i += 2
-            elif a == "--password" and i + 1 < len(args):
-                push_password = args[i + 1]
-                i += 2
-            elif subcmd == "callflow-html" and not a.startswith("-") and not graph_path_explicit:
-                candidate = Path(a)
-                if candidate.name == "graph.json" or candidate.suffix.lower() == ".json":
-                    graph_path = candidate
-                elif (candidate / "graph.json").exists():
-                    graph_path = candidate / "graph.json"
-                else:
-                    graph_path = candidate / _PURPORY_OUT / "graph.json"
-                graph_path_explicit = True
-                i += 1
-            else:
-                i += 1
-
-        graph_path = graph_path.expanduser()
-        if graph_path_explicit:
-            graph_out_dir = graph_path.parent
-            if not labels_path_explicit:
-                labels_path = graph_out_dir / ".purpory_labels.json"
-            if not report_path_explicit:
-                report_path = graph_out_dir / "GRAPH_REPORT.md"
-        labels_path = labels_path.expanduser()
-        report_path = report_path.expanduser()
-
-        try:
-            _raw, _, _explicit_graph = _load_graph_data(
-                graph_path if graph_path_explicit else None,
-                root=export_root,
+        parser = argparse.ArgumentParser(prog="purpory export")
+        formats = parser.add_subparsers(dest="format", required=True)
+        for name in ("json", "report", "wiki"):
+            sub = formats.add_parser(name)
+            sub.add_argument("--graph")
+            sub.add_argument("--root", default=".")
+            sub.add_argument("--output")
+        for name in ("neo4j", "falkordb"):
+            sub = formats.add_parser(name)
+            sub.add_argument("--graph")
+            sub.add_argument("--root", default=".")
+            sub.add_argument("--push", required=True, metavar="URI")
+            sub.add_argument("--user", default="neo4j" if name == "neo4j" else None)
+            sub.add_argument(
+                "--password",
+                help=f"defaults to {name.upper()}_PASSWORD",
             )
-        except Exception as exc:
-            print(f"error: could not load graph: {exc}", file=sys.stderr)
-            sys.exit(1)
+            if name == "falkordb":
+                sub.add_argument("--graph-name", default="purpory")
+        options = parser.parse_args(argv[2:])
+        raw, _, explicit_graph = _load_graph_data(options.graph, root=options.root)
 
-        if subcmd == "json":
+        if options.format == "json":
             from purpory.paths import write_json_atomic
 
-            write_json_atomic(json_output, _raw, indent=2)
-            print(f"graph JSON written: {json_output}")
-            sys.exit(0)
+            output = Path(options.output or "graph.json").expanduser()
+            write_json_atomic(output, raw, indent=2)
+            print(f"graph JSON written: {output}")
+            return
 
-        if subcmd == "callflow-html":
-            from purpory.callflow_html import write_callflow_html as _write_callflow_html
-
-            out = _write_callflow_html(
-                graph=_explicit_graph,
-                graph_data=_raw,
-                report=report_path,
-                labels=labels_path,
-                sections=sections_path,
-                output=callflow_output,
-                lang=callflow_lang,
-                max_sections=callflow_max_sections,
-                diagram_scale=callflow_diagram_scale,
-                max_diagram_nodes=callflow_max_diagram_nodes,
-                max_diagram_edges=callflow_max_diagram_edges,
-                verbose=True,
-            )
-            print(f"callflow HTML written - open in any browser: {out}")
-            sys.exit(0)
-
-        G = _networkx_graph(_raw)
-
-        # Load optional analysis/labels
+        graph = _networkx_graph(raw)
         communities: dict[int, list[str]] = {}
-        _an = _raw.get("analysis")
-        if not isinstance(_an, dict) and analysis_path.exists():
-            _an = json.loads(analysis_path.read_text(encoding="utf-8"))
-        if isinstance(_an, dict):
-            communities = {int(k): v for k, v in _an.get("communities", {}).items()}
-            cohesion: dict[int, float] = {int(k): v for k, v in _an.get("cohesion", {}).items()}
-            gods_data = _an.get("gods", [])
-        else:
-            cohesion = {}
-            gods_data = []
-
-        # Fallback: graph.json carries the per-node community as a node attribute
-        # (`to_json` writes it on every node). The analysis sidecar is the
-        # canonical source — but the post-commit / watch rebuild path doesn't
-        # regenerate it, and `extract` may have its temp files cleaned up. When
-        # that happens, `purpory export html` previously bailed with
-        # "Single community - aggregated view not useful." even though the
-        # per-node attribute had the right data all along. Reconstruct from
-        # the graph itself so downstream subcommands (html, obsidian, wiki,
-        # svg, graphml, neo4j) don't silently produce a degraded artifact.
+        analysis = raw.get("analysis")
+        sidecar_dir = explicit_graph.parent if explicit_graph else Path(_PURPORY_OUT)
+        analysis_path = sidecar_dir / ".purpory_analysis.json"
+        if not isinstance(analysis, dict) and analysis_path.exists():
+            analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        if isinstance(analysis, dict):
+            communities = {
+                int(key): value for key, value in analysis.get("communities", {}).items()
+            }
         if not communities:
-            reconstructed: dict[int, list[str]] = {}
-            for node_id, data in G.nodes(data=True):
-                cid_raw = data.get("community")
-                if cid_raw is None:
-                    continue
-                try:
-                    cid = int(cid_raw)
-                except (TypeError, ValueError):
-                    continue
-                reconstructed.setdefault(cid, []).append(str(node_id))
-            if reconstructed:
-                communities = reconstructed
-
+            for node_id, data in graph.nodes(data=True):
+                community = data.get("community")
+                if community is not None:
+                    communities.setdefault(int(community), []).append(str(node_id))
         labels = {
             int(data["community"]): data["community_name"]
-            for _, data in G.nodes(data=True)
+            for _, data in graph.nodes(data=True)
             if data.get("community") is not None and data.get("community_name")
         }
-        if not labels and labels_path.exists():
-            labels = {
-                int(k): v for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()
-            }
 
-        if subcmd == "report":
+        if options.format == "neo4j":
+            from purpory.exporters.graphdb import push_to_neo4j
+
+            password = options.password or os.environ.get("NEO4J_PASSWORD")
+            if not password:
+                parser.error("neo4j push requires --password or NEO4J_PASSWORD")
+            result = push_to_neo4j(
+                graph,
+                uri=options.push,
+                user=options.user,
+                password=password,
+                communities=communities,
+            )
+            print(f"Pushed to Neo4j: {result['nodes']} nodes, {result['edges']} edges")
+            return
+
+        if options.format == "falkordb":
+            from purpory.exporters.graphdb import push_to_falkordb
+
+            result = push_to_falkordb(
+                graph,
+                uri=options.push,
+                user=options.user,
+                password=options.password or os.environ.get("FALKORDB_PASSWORD"),
+                communities=communities,
+                graph_name=options.graph_name,
+            )
+            print(f"Pushed to FalkorDB: {result['nodes']} nodes, {result['edges']} edges")
+            return
+
+        if options.format == "report":
             from purpory.report import generate
 
-            report_output.parent.mkdir(parents=True, exist_ok=True)
-            report_output.write_text(
+            output = Path(options.output or "GRAPH_REPORT.md").expanduser()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            analysis = analysis if isinstance(analysis, dict) else {}
+            output.write_text(
                 generate(
-                    G,
+                    graph,
                     communities,
-                    cohesion,
+                    {int(key): value for key, value in analysis.get("cohesion", {}).items()},
                     labels,
-                    gods_data,
-                    _an.get("surprises", []) if isinstance(_an, dict) else [],
+                    analysis.get("gods", []),
+                    analysis.get("surprises", []),
                     {"warning": "exported from canonical SQLite graph"},
-                    _an.get("tokens", {"input": 0, "output": 0})
-                    if isinstance(_an, dict)
-                    else {"input": 0, "output": 0},
-                    str(export_root.resolve()),
-                    suggested_questions=_an.get("questions", [])
-                    if isinstance(_an, dict)
-                    else [],
-                    built_at_commit=_raw.get("built_at_commit"),
+                    analysis.get("tokens", {"input": 0, "output": 0}),
+                    str(Path(options.root).resolve()),
+                    suggested_questions=analysis.get("questions", []),
+                    built_at_commit=raw.get("built_at_commit"),
                 ),
                 encoding="utf-8",
             )
-            print(f"graph report written: {report_output}")
-            sys.exit(0)
+            print(f"graph report written: {output}")
+            return
 
-        out_dir = _explicit_graph.parent if _explicit_graph is not None else Path(_PURPORY_OUT)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        if not communities:
+            parser.error("wiki export requires clustered community data")
+        from purpory.analyze import god_nodes
+        from purpory.wiki import to_wiki
 
-        if subcmd == "html":
-            from purpory.export import to_html as _to_html
-
-            if no_viz:
-                html_target = out_dir / "graph.html"
-                if html_target.exists():
-                    html_target.unlink()
-                print("--no-viz: skipped graph.html")
-            else:
-                # Over-cap fallback (#1019): force the community-aggregation
-                # path so the oversized graph still renders a usable artifact.
-                _effective_node_limit = node_limit
-                _to_html(
-                    G,
-                    communities,
-                    str(out_dir / "graph.html"),
-                    community_labels=labels or None,
-                    node_limit=_effective_node_limit,
-                )
-                if G.number_of_nodes() <= _effective_node_limit:
-                    print(f"graph.html written - open in any browser, no server needed")
-
-        elif subcmd == "obsidian":
-            from purpory.export import to_obsidian as _to_obsidian, to_canvas as _to_canvas
-
-            n = _to_obsidian(
-                G,
-                communities,
-                str(obsidian_dir),
-                community_labels=labels or None,
-                cohesion=cohesion or None,
-            )
-            print(f"Obsidian vault: {n} notes in {obsidian_dir}/")
-            _to_canvas(
-                G, communities, str(obsidian_dir / "graph.canvas"), community_labels=labels or None
-            )
-            print(f"Canvas: {obsidian_dir}/graph.canvas")
-            print(f"Open {obsidian_dir}/ as a vault in Obsidian.")
-
-        elif subcmd == "wiki":
-            from purpory.wiki import to_wiki as _to_wiki
-            from purpory.analyze import god_nodes as _god_nodes
-
-            if not communities:
-                print(
-                    "error: .purpory_analysis.json is missing or empty — refusing to export wiki to prevent data loss.\n"
-                    "Run `purpory extract .` (or `purpory cluster-only .`) to regenerate community data first.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            if not gods_data:
-                gods_data = _god_nodes(G)
-            n = _to_wiki(
-                G,
-                communities,
-                str(out_dir / "wiki"),
-                community_labels=labels or None,
-                cohesion=cohesion or None,
-                god_nodes_data=gods_data,
-            )
-            print(f"Wiki: {n} articles written to {out_dir}/wiki/")
-            print(f"  {out_dir}/wiki/index.md  ->  agent entry point")
-
-        elif subcmd == "svg":
-            from purpory.export import to_svg as _to_svg
-
-            _to_svg(G, communities, str(out_dir / "graph.svg"), community_labels=labels or None)
-            print(f"graph.svg written - embeds in Obsidian, Notion, GitHub READMEs")
-
-        elif subcmd == "graphml":
-            from purpory.export import to_graphml as _to_graphml
-
-            _to_graphml(G, communities, str(out_dir / "graph.graphml"))
-            print(f"graph.graphml written - open in Gephi, yEd, or any GraphML tool")
-
-        elif subcmd == "neo4j":
-            if push_uri:
-                from purpory.export import push_to_neo4j as _push
-
-                if push_password is None:
-                    print("error: --password required for --push", file=sys.stderr)
-                    sys.exit(1)
-                result = _push(
-                    G, uri=push_uri, user=push_user, password=push_password, communities=communities
-                )
-                print(f"Pushed to Neo4j: {result['nodes']} nodes, {result['edges']} edges")
-            else:
-                from purpory.export import to_cypher as _to_cypher
-
-                _to_cypher(G, str(out_dir / "cypher.txt"))
-                print(f"cypher.txt written - import with: cypher-shell < {out_dir}/cypher.txt")
-
-        elif subcmd == "falkordb":
-            if push_uri:
-                from purpory.export import push_to_falkordb as _push
-
-                result = _push(
-                    G, uri=push_uri, user=push_user, password=push_password, communities=communities
-                )
-                print(f"Pushed to FalkorDB: {result['nodes']} nodes, {result['edges']} edges")
-            else:
-                from purpory.export import to_cypher as _to_cypher
-
-                _to_cypher(G, str(out_dir / "cypher.txt"))
-                print(
-                    f"cypher.txt written ({out_dir}/cypher.txt) - statements are OpenCypher. "
-                    f"FalkorDB's GRAPH.QUERY runs one statement at a time (no bulk script "
-                    f"import), so load a graph with: purpory export falkordb --push "
-                    f"falkordb://localhost:6379"
-                )
+        output = Path(options.output or sidecar_dir / "wiki").expanduser()
+        analysis = analysis if isinstance(analysis, dict) else {}
+        count = to_wiki(
+            graph,
+            communities,
+            str(output),
+            community_labels=labels or None,
+            cohesion={
+                int(key): value for key, value in analysis.get("cohesion", {}).items()
+            } or None,
+            god_nodes_data=analysis.get("gods") or god_nodes(graph),
+        )
+        print(f"Wiki: {count} articles written to {output}")
+        print(f"  {output / 'index.md'}  ->  agent entry point")
 
     elif cmd == "benchmark":
         from purpory.benchmark import run_benchmark, print_benchmark
 
-        graph_path = sys.argv[2] if len(sys.argv) > 2 else None
+        graph_path = argv[2] if len(argv) > 2 else None
         graph_data = None
         if graph_path is not None:
             _enforce_graph_size_cap_or_exit(Path(graph_path))
@@ -2005,7 +1240,7 @@ def dispatch_command(cmd: str) -> None:
         # docs/papers/images -> merge -> build -> cluster -> write outputs.
         # Calls extract_corpus_parallel directly using whichever backend has an
         # API key set.
-        if len(sys.argv) < 3:
+        if len(argv) < 3:
             print(
                 "Usage: purpory extract <path> [--backend gemini|kimi|claude|openai|deepseek|ollama] "
                 "[--model M] [--mode deep] [--out DIR] [--google-workspace] [--no-cluster] "
@@ -2016,11 +1251,11 @@ def dispatch_command(cmd: str) -> None:
             sys.exit(1)
 
         has_path = True
-        if sys.argv[2].startswith("-"):
+        if argv[2].startswith("-"):
             has_path = False
             target = Path(".").resolve()
         else:
-            target = Path(sys.argv[2]).resolve()
+            target = Path(argv[2]).resolve()
             if not target.exists():
                 print(f"error: path not found: {target}", file=sys.stderr)
                 sys.exit(1)
@@ -2072,7 +1307,7 @@ def dispatch_command(cmd: str) -> None:
                 sys.exit(2)
             return v
 
-        args = sys.argv[3:] if has_path else sys.argv[2:]
+        args = argv[3:] if has_path else argv[2:]
         i = 0
         while i < len(args):
             a = args[i]
@@ -2191,8 +1426,7 @@ def dispatch_command(cmd: str) -> None:
         if deep_mode:
             print("[purpory extract] deep mode enabled: richer semantic extraction")
 
-        # CLI flag wins over env var. Setting PURPORY_API_TIMEOUT here so
-        # _call_openai_compat picks it up without needing a new kwarg path.
+        # CLI flag wins over the provider's environment default.
         if cli_api_timeout is not None:
             os.environ["PURPORY_API_TIMEOUT"] = str(cli_api_timeout)
         if cli_max_workers is not None:
@@ -3041,230 +2275,6 @@ def dispatch_command(cmd: str) -> None:
             )
         stages.total()
 
-    elif cmd == "cache-check":
-        # purpory cache-check <files_from> [--root <dir>] [--mode <m> | --deep]
-        #                       [--prompt-file <path>]
-        # Reads file paths (one per line) from <files_from>, checks semantic cache.
-        # --mode deep (or --deep) checks the cache/semantic-deep/ namespace
-        # written by `extract --mode deep` instead of cache/semantic/ (#1894).
-        # --prompt-file names the extraction prompt the caller will use (an agent's
-        # references/extraction-spec.md), restricting hits to entries produced by
-        # that same prompt (#1939). Omitting it reads the unattributed layout, which
-        # cannot see entries a fingerprinted run wrote.
-        # Writes cached/uncached handoff files into the project state directory.
-        # Stdout: "Cache: N hit, M miss"
-        from purpory.cache import check_semantic_cache
-
-        if len(sys.argv) < 3:
-            print(
-                "Usage: purpory cache-check <files_from> [--root <dir>] "
-                "[--mode <m> | --deep] [--prompt-file <path>]",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        files_from = Path(sys.argv[2])
-        root = Path(".")
-        cache_mode: str | None = None
-        prompt_file: str | None = None
-        i = 3
-        while i < len(sys.argv):
-            if sys.argv[i] == "--root" and i + 1 < len(sys.argv):
-                root = Path(sys.argv[i + 1])
-                i += 2
-            elif sys.argv[i] == "--mode" and i + 1 < len(sys.argv):
-                cache_mode = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i].startswith("--mode="):
-                cache_mode = sys.argv[i].split("=", 1)[1]
-                i += 1
-            elif sys.argv[i] == "--deep":
-                cache_mode = "deep"
-                i += 1
-            elif sys.argv[i] == "--prompt-file" and i + 1 < len(sys.argv):
-                prompt_file = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i].startswith("--prompt-file="):
-                prompt_file = sys.argv[i].split("=", 1)[1]
-                i += 1
-            else:
-                i += 1
-        files = [f for f in files_from.read_text(encoding="utf-8").splitlines() if f.strip()]
-        from purpory.supervise.structural import project_state_directory
-
-        cache_root = project_state_directory(root)
-        cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(
-            files,
-            root,
-            mode=cache_mode,
-            prompt_file=prompt_file,
-            cache_root=cache_root,
-        )
-        out = cache_root / _PURPORY_OUT
-        out.mkdir(parents=True, exist_ok=True)
-        if cached_nodes or cached_edges or cached_hyperedges:
-            (out / ".purpory_cached.json").write_text(
-                json.dumps(
-                    {"nodes": cached_nodes, "edges": cached_edges, "hyperedges": cached_hyperedges},
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        (out / ".purpory_uncached.txt").write_text("\n".join(uncached), encoding="utf-8")
-        print(f"Cache: {len(files) - len(uncached)} hit, {len(uncached)} miss")
-
-    elif cmd == "merge-chunks":
-        # purpory merge-chunks <chunk_glob_or_files...> --out <path>
-        # Concatenates .purpory_chunk_*.json files written by semantic workers.
-        # Deduplicates nodes by id (first writer wins). Sums token counts.
-        import glob as _glob
-
-        if len(sys.argv) < 3:
-            print("Usage: purpory merge-chunks <chunk_files...> --out <path>", file=sys.stderr)
-            sys.exit(1)
-        out_path: Path | None = None
-        chunk_args: list[str] = []
-        i = 2
-        while i < len(sys.argv):
-            if sys.argv[i] == "--out" and i + 1 < len(sys.argv):
-                out_path = Path(sys.argv[i + 1])
-                i += 2
-            else:
-                chunk_args.append(sys.argv[i])
-                i += 1
-        if not out_path:
-            print("error: --out <path> required", file=sys.stderr)
-            sys.exit(1)
-        chunk_files: list[str] = []
-        for arg in chunk_args:
-            expanded = _glob.glob(arg)
-            chunk_files.extend(sorted(expanded) if expanded else [arg])
-        merged: dict = {
-            "nodes": [],
-            "edges": [],
-            "hyperedges": [],
-            "input_tokens": 0,
-            "output_tokens": 0,
-        }
-        seen_ids: set[str] = set()
-        valid_chunks = 0
-        # These chunk files are untrusted subagent output. load_validated_...
-        # stats the file size BEFORE reading it (so a multi-GB chunk can't blow up
-        # memory), parses the JSON, and validates the security caps + the node/
-        # edge id charset that blocks path traversal (#825) — the same enforcement
-        # external semantic merge workflows apply. A bad chunk is skipped with a warning
-        # while valid siblings still merge; if every chunk is invalid, fail
-        # closed instead of reporting success and replacing --out with an empty
-        # semantic layer. Deliberately NOT wired into
-        # build_from_json/load_graph_json, which must keep loading valid
-        # pre-existing graphs. file_type is left to build's coercion (#840).
-        from purpory.semantic_cleanup import load_validated_semantic_fragment
-
-        for cf in chunk_files:
-            chunk, _chunk_errs = load_validated_semantic_fragment(Path(cf))
-            if _chunk_errs:
-                print(
-                    f"[purpory merge-chunks] warning: skipping invalid chunk {cf}: "
-                    f"{'; '.join(_chunk_errs[:3])}",
-                    file=sys.stderr,
-                )
-                continue
-            valid_chunks += 1
-            for n in chunk.get("nodes", []):
-                if n.get("id") not in seen_ids:
-                    seen_ids.add(n["id"])
-                    merged["nodes"].append(n)
-            merged["edges"].extend(chunk.get("edges", []))
-            merged["hyperedges"].extend(chunk.get("hyperedges", []))
-            # Coerce token counts: a chunk is untrusted, so a non-numeric
-            # input_tokens/output_tokens must not abort the whole merge with a
-            # TypeError after other chunks already merged.
-            for _tok in ("input_tokens", "output_tokens"):
-                _v = chunk.get(_tok, 0)
-                merged[_tok] += _v if isinstance(_v, (int, float)) else 0
-        if not valid_chunks:
-            print(
-                f"[purpory merge-chunks] error: no valid chunks to merge; "
-                f"refusing to write {out_path}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        from purpory.paths import write_json_atomic as _wja
-
-        _wja(out_path, merged, ensure_ascii=False)
-        chunk_summary = (
-            f"{valid_chunks} chunks"
-            if valid_chunks == len(chunk_files)
-            else f"{valid_chunks} of {len(chunk_files)} chunks"
-        )
-        print(
-            f"Merged {chunk_summary}: {len(merged['nodes'])} nodes, {len(merged['edges'])} edges, "
-            f"{merged['input_tokens']:,} in / {merged['output_tokens']:,} out tokens"
-        )
-
-    elif cmd == "merge-semantic":
-        # purpory merge-semantic --cached <path> --new <path> --out <path>
-        # Merges cached semantic results with freshly-extracted chunk results.
-        # Deduplicates nodes by id (cached entries take priority over new ones).
-        if len(sys.argv) < 3:
-            print(
-                "Usage: purpory merge-semantic --cached <path> --new <path> --out <path>",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        cached_path: Path | None = None
-        new_path: Path | None = None
-        out_path2: Path | None = None
-        i = 2
-        while i < len(sys.argv):
-            if sys.argv[i] == "--cached" and i + 1 < len(sys.argv):
-                cached_path = Path(sys.argv[i + 1])
-                i += 2
-            elif sys.argv[i] == "--new" and i + 1 < len(sys.argv):
-                new_path = Path(sys.argv[i + 1])
-                i += 2
-            elif sys.argv[i] == "--out" and i + 1 < len(sys.argv):
-                out_path2 = Path(sys.argv[i + 1])
-                i += 2
-            else:
-                i += 1
-        if not out_path2:
-            print("error: --out <path> required", file=sys.stderr)
-            sys.exit(1)
-        empty: dict = {"nodes": [], "edges": [], "hyperedges": []}
-        cached_data = (
-            json.loads(cached_path.read_text(encoding="utf-8"))
-            if cached_path and cached_path.exists()
-            else empty
-        )
-        new_data = (
-            json.loads(new_path.read_text(encoding="utf-8"))
-            if new_path and new_path.exists()
-            else empty
-        )
-        seen_ids2: set[str] = set()
-        all_nodes: list[dict] = []
-        for n in cached_data.get("nodes", []) + new_data.get("nodes", []):
-            if n.get("id") not in seen_ids2:
-                seen_ids2.add(n["id"])
-                all_nodes.append(n)
-        merged2 = {
-            "nodes": all_nodes,
-            "edges": cached_data.get("edges", []) + new_data.get("edges", []),
-            "hyperedges": cached_data.get("hyperedges", []) + new_data.get("hyperedges", []),
-        }
-        out_path2.parent.mkdir(parents=True, exist_ok=True)
-        from purpory.paths import write_json_atomic as _wja
-
-        _wja(out_path2, merged2, ensure_ascii=False)
-        print(f"Merged: {len(merged2['nodes'])} nodes, {len(merged2['edges'])} edges")
-
-    elif Path(cmd).exists() or cmd in (".", "..") or cmd.startswith(("./", "../", "/", "~")):
-        # User ran `purpory <path>` directly — treat as `purpory extract <path>`.
-        # Common when following examples that use the shorthand `purpory .`.
-        sys.argv.insert(2, sys.argv[1])
-        sys.argv[1] = "extract"
-        _reenter_main()
     else:
         print(f"error: unknown command '{cmd}'", file=sys.stderr)
         print("Run 'purpory --help' for usage.", file=sys.stderr)

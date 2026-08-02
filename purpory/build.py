@@ -1186,7 +1186,7 @@ def prefix_graph_for_global(G: nx.Graph, repo_tag: str) -> nx.Graph:
 
 
 def distinct_repo_tags(graph_paths: "list[Path]") -> "list[str]":
-    """Return a unique, human-meaningful repo tag per input graph for merge-graphs.
+    """Return a unique, human-meaningful repo tag per input graph.
 
     The naive tag (the ``purpory-out`` parent dir name) is NOT unique across
     inputs: ``src/purpory-out`` and ``frontend/src/purpory-out`` both yield

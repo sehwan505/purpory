@@ -344,9 +344,9 @@ def _parse_named_agent_options(args: list[str]) -> None:
         raise SystemExit(2)
 
 
-def _dispatch_agent(agent: str) -> None:
-    subcommand = sys.argv[2] if len(sys.argv) > 2 else ""
-    _parse_named_agent_options(sys.argv[3:])
+def _dispatch_agent(agent: str, arguments: list[str]) -> None:
+    subcommand = arguments[0] if arguments else ""
+    _parse_named_agent_options(arguments[1:])
     if subcommand == "install":
         (claude_install if agent == "claude" else codex_install)(Path("."))
         return
@@ -357,9 +357,9 @@ def _dispatch_agent(agent: str) -> None:
     raise SystemExit(1)
 
 
-def dispatch_install_cli(command: str) -> bool:
+def dispatch_install_cli(command: str, arguments: list[str] | None = None) -> bool:
     """Dispatch the two supported agent integration command groups."""
     if command not in _SUPPORTED_AGENTS:
         return False
-    _dispatch_agent(command)
+    _dispatch_agent(command, arguments or [])
     return True
