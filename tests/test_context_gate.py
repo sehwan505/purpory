@@ -399,6 +399,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
     assert "response_format" not in captured["body"]
     assert "temperature" not in captured["body"]
     assert captured["body"]["max_tokens"] == 8
+    assert captured["body"]["reasoning_effort"] == "none"
     assert captured["body"]["messages"][1]["content"] == "전에 정한 인증 정책"
     system_prompt = captured["body"]["messages"][0]["content"]
     assert "exactly one word" in system_prompt

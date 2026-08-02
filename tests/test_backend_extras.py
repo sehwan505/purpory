@@ -36,7 +36,7 @@ def test_anthropic_in_all_extra():
 
 def test_gate_extra_only_declares_the_runtime_it_uses_directly():
     extras = _extras()
-    assert extras["gate"] == ["transformers[serving]>=5.14.1,<6"]
+    assert extras["gate"] == []
     assert not {"requests", "torchvision", "pillow"} & {
         dep.split("[")[0].split(">=")[0] for dep in extras["all"]
     }

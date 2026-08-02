@@ -129,6 +129,19 @@ def _dashboard_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _embed_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="purpory embed",
+        description="Materialize embeddings queued by actual context use.",
+    )
+    parser.add_argument("--limit", type=int, default=32)
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--db")
+    parser.add_argument("--json", action="store_true")
+    return parser
+
+
 def _emit(value: Any, *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -170,6 +183,7 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
         "remember": _remember_parser,
         "prepare": _prepare_parser,
         "dashboard": _dashboard_parser,
+        "embed": _embed_parser,
     }
     try:
         parser_factory = parsers.get(command)
@@ -177,6 +191,15 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
             raise ValueError(f"unsupported product command: {command}")
         options = parser_factory().parse_args(raw)
         root = Path(options.root).expanduser().resolve()
+
+        if command == "embed":
+            from purpory.supervise.embeddings import EmbeddingService
+
+            service = ContextService(db_path=options.db, root=root)
+            embeddings = EmbeddingService(service.repository)
+            result = embeddings.status() if options.status else embeddings.run(limit=options.limit)
+            _emit(result, json_output=options.json)
+            return
 
         if command == "remember":
             service = ContextService(db_path=options.db, root=root)
@@ -283,7 +306,7 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
 
 def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit("usage: python -m purpory.supervise {remember|prepare|dashboard}")
+        raise SystemExit("usage: python -m purpory.supervise {remember|prepare|dashboard|embed}")
     dispatch_product_command(sys.argv[1], sys.argv[2:])
 
 

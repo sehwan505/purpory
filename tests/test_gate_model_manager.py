@@ -3,260 +3,125 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
-from purpory.supervise.gate.qwen import DEFAULT_MAX_INPUT_TOKENS
-from purpory.supervise.gate.runtime import GateModelManager, _gate_device
+from purpory.ollama import ollama_urls
+from purpory.supervise.gate.runtime import GateModelManager
 from purpory.supervise.model_cli import dispatch_model
 
 
-def _installed_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GateModelManager:
-    snapshot = tmp_path / "cache" / ("a" * 40)
-    snapshot.mkdir(parents=True)
+def test_status_reads_gate_model_from_ollama_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._download_snapshot",
-        lambda model_id, revision, force: str(snapshot),
-    )
-    manager = GateModelManager(tmp_path / "home")
-    manager.install(revision="main")
-    return manager
-
-
-def test_install_pins_resolved_hugging_face_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _installed_manager(tmp_path, monkeypatch)
-
-    manifest = json.loads(manager.manifest_path.read_text(encoding="utf-8"))
-
-    assert manifest["model"] == "Qwen/Qwen3.5-0.8B"
-    assert manifest["requestedRevision"] == "main"
-    assert manifest["resolvedRevision"] == "a" * 40
-    assert manager.status()["installed"] is True
-
-
-def test_install_reuses_matching_cached_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _installed_manager(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._download_snapshot",
-        lambda *args, **kwargs: pytest.fail("cache should have been reused"),
+        "purpory.supervise.gate.runtime._models",
+        lambda timeout_seconds=0.25: [
+            {"name": "qwen3.5:0.8b", "digest": "sha256:gate"},
+            {"name": "qwen3-embedding:0.6b", "digest": "sha256:embedding"},
+        ],
     )
 
-    result = manager.install(revision="main")
+    status = GateModelManager().status()
 
-    assert result["action"] == "kept"
+    assert status["installed"] is True
+    assert status["ready"] is True
+    assert status["runtime"] == "ollama"
+    assert status["revision"] == "sha256:gate"
+    assert status["endpoint"] == "http://localhost:11434/v1"
 
 
-def test_start_uses_detached_transformers_server_and_warms_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _installed_manager(tmp_path, monkeypatch)
-    captured: dict[str, object] = {}
+def test_install_pulls_only_when_missing_or_forced(monkeypatch: pytest.MonkeyPatch) -> None:
+    inventory: list[dict[str, str]] = []
+    requests: list[dict[str, object]] = []
 
     monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._transformers_executable",
-        lambda: "/venv/bin/transformers",
+        "purpory.supervise.gate.runtime._models",
+        lambda timeout_seconds=0.25: list(inventory),
     )
-    monkeypatch.setattr("purpory.supervise.gate.runtime._gate_device", lambda: "cpu")
-    monkeypatch.setattr("purpory.supervise.gate.runtime._available_port", lambda: 43123)
+
+    def request(method: str, path: str, *, body=None, timeout_seconds: float):
+        requests.append({"method": method, "path": path, "body": body})
+        inventory.append({"name": str(body["model"]), "digest": "sha256:new"})
+        return {"status": "success"}
+
+    monkeypatch.setattr("purpory.supervise.gate.runtime._request_json", request)
+    manager = GateModelManager()
+
+    assert manager.install()["action"] == "installed"
+    assert manager.install()["action"] == "kept"
+    assert manager.install(force=True)["action"] == "installed"
+    assert requests == [
+        {"method": "POST", "path": "/api/pull", "body": {"model": "qwen3.5:0.8b", "stream": False}},
+        {"method": "POST", "path": "/api/pull", "body": {"model": "qwen3.5:0.8b", "stream": False}},
+    ]
+
+
+def test_provider_reuses_ollama_endpoint_and_digest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._spawn",
-        lambda command, log: captured.setdefault("command", command) and SimpleNamespace(pid=4242),
+        "purpory.supervise.gate.runtime._models",
+        lambda timeout_seconds=0.25: [{"name": "qwen3.5:0.8b", "digest": "sha256:gate"}],
     )
-    monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._wait_for_endpoint",
-        lambda endpoint, pid, timeout: True,
-    )
-    monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._warm_model",
-        lambda endpoint, model, timeout_seconds: captured.update(endpoint=endpoint, model=model),
-    )
-    monkeypatch.setattr("purpory.supervise.gate.runtime._pid_is_running", lambda pid: True)
-    monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._endpoint_is_ready",
-        lambda endpoint, timeout_seconds: True,
-    )
-    result = manager.start(wait_seconds=5)
 
-    command = captured["command"]
-    assert command[:3] == (
-        "/venv/bin/transformers",
-        "serve",
-        f"Qwen/Qwen3.5-0.8B@{'a' * 40}",
-    )
-    assert "--continuous-batching" not in command
-    assert command[command.index("--device") + 1] == "cpu"
-    assert captured["endpoint"] == "http://127.0.0.1:43123/v1"
-    assert result["action"] == "started"
-    assert result["ready"] is True
+    provider = GateModelManager().provider()
+
+    assert provider is not None
+    assert provider.endpoint == "http://localhost:11434/v1/chat/completions"
+    assert provider.model == "qwen3.5:0.8b"
+    assert provider.model_revision == "sha256:gate"
+    assert provider.tokenizer_path is None
 
 
-def test_gate_device_defaults_to_cpu_on_macos(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("PURPORY_GATE_DEVICE", raising=False)
-    monkeypatch.setattr("purpory.supervise.gate.runtime.sys.platform", "darwin")
-
-    assert _gate_device() == "cpu"
-
-
-def test_gate_device_allows_an_explicit_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PURPORY_GATE_DEVICE", "mps")
-
-    assert _gate_device() == "mps"
-
-
-def test_gate_device_rejects_option_injection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PURPORY_GATE_DEVICE", "--help")
-
-    with pytest.raises(ValueError, match="one device identifier"):
-        _gate_device()
-
-
-def test_provider_uses_managed_endpoint_without_environment_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _installed_manager(tmp_path, monkeypatch)
+def test_start_does_not_own_or_spawn_shared_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = GateModelManager()
     monkeypatch.setattr(
         manager,
         "status",
-        lambda: {
-            "installed": True,
-            "ready": True,
-            "endpoint": "http://127.0.0.1:43123/v1",
-            "model": "Qwen/Qwen3.5-0.8B",
-            "revision": "a" * 40,
-        },
+        lambda **kwargs: {"running": True, "installed": True, "ready": True},
     )
 
-    provider = manager.provider()
-
-    assert provider is not None
-    assert provider.endpoint == "http://127.0.0.1:43123/v1/chat/completions"
-    assert provider.model == f"Qwen/Qwen3.5-0.8B@{'a' * 40}"
-    assert provider.tokenizer_path == manager.installation().snapshot_path
-    assert provider.max_input_tokens == DEFAULT_MAX_INPUT_TOKENS
+    assert manager.start()["action"] == "kept"
+    assert manager.stop()["action"] == "external-runtime"
 
 
-def test_stop_terminates_only_recorded_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _installed_manager(tmp_path, monkeypatch)
-    manager.runtime_directory.mkdir(parents=True)
-    manager.state_path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "pid": 4242,
-                "endpoint": "http://127.0.0.1:43123/v1",
-                "model": "Qwen/Qwen3.5-0.8B",
-                "revision": "a" * 40,
-                "status": "ready",
-                "startedAt": 1,
-                "logPath": str(manager.log_path),
-                "command": ["transformers", "serve"],
-                "error": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    terminated: list[int] = []
-    monkeypatch.setattr("purpory.supervise.gate.runtime._pid_is_running", lambda pid: True)
-    monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._endpoint_is_ready",
-        lambda endpoint, timeout_seconds: True,
-    )
-    monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._terminate_pid",
-        lambda pid, timeout_seconds: terminated.append(pid),
-    )
-
-    result = manager.stop(wait_seconds=1)
-
-    assert terminated == [4242]
-    assert result["action"] == "stopped"
-    assert not manager.state_path.exists()
-
-
-def test_stop_refuses_to_signal_an_unverified_pid(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _installed_manager(tmp_path, monkeypatch)
-    manager.runtime_directory.mkdir(parents=True)
-    manager.state_path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "pid": 4242,
-                "endpoint": "http://127.0.0.1:43123/v1",
-                "model": "Qwen/Qwen3.5-0.8B",
-                "revision": "a" * 40,
-                "status": "ready",
-                "startedAt": 1,
-                "logPath": str(manager.log_path),
-                "command": ["transformers", "serve"],
-                "error": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr("purpory.supervise.gate.runtime._pid_is_running", lambda pid: True)
-    monkeypatch.setattr(
-        "purpory.supervise.gate.runtime._endpoint_is_ready",
-        lambda endpoint, timeout_seconds: False,
-    )
-
-    with pytest.raises(RuntimeError, match="unverified pid"):
-        manager.stop(wait_seconds=1)
+def test_ollama_url_must_be_local_and_shared(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:1234/v1")
+    assert ollama_urls() == ("http://127.0.0.1:1234", "http://127.0.0.1:1234/v1")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://example.com/v1")
+    with pytest.raises(ValueError, match="loopback"):
+        ollama_urls()
 
 
 def test_model_cli_status_is_machine_readable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("PURPORY_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "purpory.supervise.gate.runtime._models",
+        lambda timeout_seconds=0.25: [],
+    )
 
     dispatch_model(["status", "--json"])
 
     result = json.loads(capsys.readouterr().out)
     assert result["installed"] is False
-    assert result["running"] is False
+    assert result["running"] is True
 
 
-def test_install_refuses_to_replace_a_running_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_model_cli_installs_gate_and_embedding_roles(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manager = _installed_manager(tmp_path, monkeypatch)
-    manager.runtime_directory.mkdir(parents=True)
-    manager.state_path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "pid": 4242,
-                "endpoint": "http://127.0.0.1:43123/v1",
-                "model": "Qwen/Qwen3.5-0.8B",
-                "revision": "a" * 40,
-                "status": "ready",
-                "startedAt": 1,
-                "logPath": str(manager.log_path),
-                "command": ["transformers", "serve"],
-                "error": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr("purpory.supervise.gate.runtime._pid_is_running", lambda pid: True)
+    installed: list[str] = []
 
-    with pytest.raises(RuntimeError, match="stop the running gate model"):
-        manager.install(model_id="Qwen/Qwen3.5-0.8B", revision="next", force=True)
+    def install(self, *, model_id: str, revision: str | None, force: bool):
+        installed.append(model_id)
+        return {"action": "installed", "model": model_id}
+
+    monkeypatch.setattr("purpory.supervise.gate.runtime.GateModelManager.install", install)
+
+    dispatch_model(["install", "--json"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert installed == ["qwen3.5:0.8b", "qwen3-embedding:0.6b"]
+    assert result["action"] == "installed"
 
 
 class _SkipProvider:
@@ -272,7 +137,7 @@ class _SkipProvider:
                     "clarification": None,
                 }
             ),
-            model_id="Qwen/Qwen3.5-0.8B",
+            model_id="qwen3.5:0.8b",
             model_revision="test",
             latency_ms=3,
         )
@@ -281,7 +146,6 @@ class _SkipProvider:
 def test_prepare_auto_discovers_managed_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("PURPORY_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("PURPORY_GATE_URL", raising=False)
     monkeypatch.setattr(
         "purpory.supervise.gate.runtime.GateModelManager.provider",
@@ -290,14 +154,7 @@ def test_prepare_auto_discovers_managed_provider(
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "purpory",
-            "prepare",
-            "hello",
-            "--db",
-            str(tmp_path / "context.db"),
-            "--json",
-        ],
+        ["purpory", "prepare", "hello", "--db", str(tmp_path / "context.db"), "--json"],
     )
 
     from purpory.__main__ import main
@@ -305,5 +162,5 @@ def test_prepare_auto_discovers_managed_provider(
     main()
 
     result = json.loads(capsys.readouterr().out)
-    assert result["model"]["id"] == "Qwen/Qwen3.5-0.8B"
+    assert result["model"]["id"] == "qwen3.5:0.8b"
     assert result["fallback"] is None

@@ -7,6 +7,7 @@ import json
 import sys
 from typing import Any, Sequence
 
+from purpory.supervise.embeddings import DEFAULT_MODEL as DEFAULT_EMBEDDING_MODEL
 from purpory.supervise.gate.qwen import DEFAULT_MODEL
 from purpory.supervise.gate.runtime import GateModelManager
 
@@ -14,21 +15,22 @@ from purpory.supervise.gate.runtime import GateModelManager
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="purpory model",
-        description="Manage the local gate model and its warm inference process.",
+        description="Manage the local gate model in the shared Ollama runtime.",
         epilog="Global option accepted anywhere: --json",
     )
     subparsers = parser.add_subparsers(dest="verb", required=True)
 
-    install = subparsers.add_parser("install", help="download and pin the gate model")
-    install.add_argument("--model", default=DEFAULT_MODEL)
+    install = subparsers.add_parser("install", help="pull the gate model into Ollama")
+    install.add_argument("--role", choices=("all", "gate", "embedding"), default="all")
+    install.add_argument("--model")
     install.add_argument("--revision")
     install.add_argument("--force", action="store_true")
 
-    start = subparsers.add_parser("start", help="start and warm the local model server")
+    start = subparsers.add_parser("start", help="verify the shared Ollama runtime")
     start.add_argument("--port", type=int, default=0)
     start.add_argument("--wait", type=float, default=300.0)
 
-    stop = subparsers.add_parser("stop", help="stop the managed model server")
+    stop = subparsers.add_parser("stop", help="report shared runtime ownership")
     stop.add_argument("--wait", type=float, default=10.0)
     stop.add_argument("--force", action="store_true")
 
@@ -64,17 +66,40 @@ def dispatch_model(arguments: Sequence[str] | None = None) -> None:
     manager = GateModelManager()
     try:
         if options.verb == "install":
-            result = manager.install(
-                model_id=options.model,
-                revision=options.revision,
-                force=options.force,
-            )
+            if options.model and options.role == "all":
+                raise ValueError("--model requires --role gate or --role embedding")
+            role_models = {
+                "gate": DEFAULT_MODEL,
+                "embedding": DEFAULT_EMBEDDING_MODEL,
+            }
+            roles = tuple(role_models) if options.role == "all" else (options.role,)
+            models = {
+                role: manager.install(
+                    model_id=options.model or role_models[role],
+                    revision=options.revision,
+                    force=options.force,
+                )
+                for role in roles
+            }
+            result = {
+                "action": (
+                    "installed"
+                    if any(item["action"] == "installed" for item in models.values())
+                    else "kept"
+                ),
+                "runtime": "ollama",
+                "models": models,
+            }
         elif options.verb == "start":
             result = manager.start(port=options.port, wait_seconds=options.wait)
         elif options.verb == "stop":
             result = manager.stop(wait_seconds=options.wait, force=options.force)
         elif options.verb == "status":
             result = manager.status()
+            result["models"] = {
+                "gate": result.copy(),
+                "embedding": manager.status(model=DEFAULT_EMBEDDING_MODEL),
+            }
         elif options.verb == "logs":
             result = manager.logs(lines=options.lines)
         else:
