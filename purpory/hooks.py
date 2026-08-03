@@ -34,21 +34,7 @@ _PINNED='__PINNED_PYTHON__'
 if [ -n "$_PINNED" ] && [ -x "$_PINNED" ] && "$_PINNED" -c "$_GFY_PROBE" 2>/dev/null; then
     PURPORY_PYTHON="$_PINNED"
 fi
-# Second probe: read purpory-out/.purpory_python (written by the skill and
-# CLI; survives uv-tool reinstalls and is the same source the README documents).
-if [ -z "$PURPORY_PYTHON" ]; then
-    _GFY_PYTHON_FILE="purpory-out/.purpory_python"
-    if [ -f "$_GFY_PYTHON_FILE" ]; then
-        _FROM_FILE=$(cat "$_GFY_PYTHON_FILE" 2>/dev/null | tr -d '[:space:]')
-        case "$_FROM_FILE" in
-            *[!a-zA-Z0-9/_.@:\\-]*) _FROM_FILE="" ;;  # allowlist (covers Windows paths)
-        esac
-        if [ -n "$_FROM_FILE" ] && [ -x "$_FROM_FILE" ] && "$_FROM_FILE" -c "$_GFY_PROBE" 2>/dev/null; then
-            PURPORY_PYTHON="$_FROM_FILE"
-        fi
-    fi
-fi
-# Third probe: resolve via the purpory launcher on PATH.
+# Second probe: resolve via the purpory launcher on PATH.
 if [ -z "$PURPORY_PYTHON" ]; then
     PURPORY_BIN=$(command -v purpory 2>/dev/null)
     if [ -n "$PURPORY_BIN" ]; then
@@ -123,14 +109,7 @@ try:
         signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError(f'purpory rebuild exceeded {_timeout}s')))
         signal.alarm(_timeout)
     _force = os.environ.get('PURPORY_FORCE', '').lower() in ('1', 'true', 'yes')
-    _root = Path('.')
-    _out = os.environ.get('PURPORY_OUT', 'purpory-out')
-    _saved = Path(_out) / '.purpory_root'
-    if _saved.exists():
-        _txt = _saved.read_text(encoding='utf-8').strip()
-        if _txt:
-            _root = Path(_txt)
-    if not _rebuild_code(_root, changed_paths=changed, force=_force):
+    if not _rebuild_code(Path('.'), changed_paths=changed, force=_force):
         raise RuntimeError('Purpory rebuild reported failure')
 except TimeoutError as exc:
     print(f'[purpory hook] {exc}')
@@ -154,14 +133,7 @@ try:
     # post-checkout: branch switch can touch arbitrary files; full rebuild path
     # (no changed_paths) is correct here. The flock inside _rebuild_code still
     # prevents pile-ups when commit + checkout fire back-to-back.
-    _root = Path('.')
-    _out = os.environ.get('PURPORY_OUT', 'purpory-out')
-    _saved = Path(_out) / '.purpory_root'
-    if _saved.exists():
-        _txt = _saved.read_text(encoding='utf-8').strip()
-        if _txt:
-            _root = Path(_txt)
-    if not _rebuild_code(_root, force=_force):
+    if not _rebuild_code(Path('.'), force=_force):
         raise RuntimeError('Purpory rebuild reported failure')
 except TimeoutError as exc:
     print(f'[purpory] {exc}')
@@ -219,25 +191,6 @@ def _detached_launch(rebuild_body: str) -> str:
     return '"$PURPORY_PYTHON" -c "' + launcher + '"\n'
 
 
-# Skip the rebuild inside a linked worktree (git worktree add), shared by both
-# hooks. With core.hooksPath shared across worktrees a commit in any worktree
-# fires these hooks; the canonical purpory-out/ belongs to the primary checkout,
-# so rebuilding from a worktree is wasteful, writes a rogue delta-only graph the
-# user never asked for, and races deploy/CI `git clean` against the detached
-# rebuild ("failed to remove purpory-out/: Directory not empty") (#1809, #1806).
-# A linked worktree has git-dir != git-common-dir. Both are resolved to absolute
-# via `cd ... && pwd` before comparing: git's exported GIT_DIR / --git-dir can be
-# absolute while --git-common-dir is the relative ".git", and a raw compare would
-# false-positive on the PRIMARY checkout and wrongly skip it.
-_WORKTREE_GUARD = """\
-_GFY_GITDIR=$(cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd)
-_GFY_COMMONDIR=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd)
-if [ -n "$_GFY_COMMONDIR" ] && [ "$_GFY_GITDIR" != "$_GFY_COMMONDIR" ]; then
-    exit 0
-fi
-"""
-
-
 _HOOK_SCRIPT = """\
 # purpory-hook-start
 # Auto-rebuilds the knowledge graph after each commit (code files only, no LLM needed).
@@ -266,7 +219,6 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 
 [ "${PURPORY_SKIP_HOOK:-0}" = "1" ] && exit 0
 
-""" + _WORKTREE_GUARD + """
 CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null)
 if [ -z "$CHANGED" ]; then
     exit 0
@@ -319,11 +271,6 @@ if [ "$BRANCH_SWITCH" != "1" ]; then
     exit 0
 fi
 
-# Only run if purpory-out/ exists (graph has been built before)
-if [ ! -d "purpory-out" ]; then
-    exit 0
-fi
-
 # Skip during rebase/merge/cherry-pick
 # git exports GIT_DIR to hooks; the rev-parse fallback only runs when invoked by
 # hand (each git exec costs 1s+ on AV-scanned Windows machines).
@@ -337,7 +284,7 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 # suppressed commit-triggered rebuilds but not branch-switch ones (#1809).
 [ "${PURPORY_SKIP_HOOK:-0}" = "1" ] && exit 0
 
-""" + _WORKTREE_GUARD + _PYTHON_DETECT + """
+""" + _PYTHON_DETECT + """
 _PURPORY_LOG="${HOME}/.cache/purpory-rebuild.log"
 mkdir -p "$(dirname "$_PURPORY_LOG")"
 export PURPORY_REBUILD_LOG="$_PURPORY_LOG"

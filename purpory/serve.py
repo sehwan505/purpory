@@ -11,12 +11,32 @@ import networkx as nx
 from networkx.readwrite import json_graph
 from purpory.security import sanitize_label, check_graph_file_size_cap
 from purpory.build import edge_data
-from purpory.paths import default_graph_json as _default_graph_json
 
 try:
     import jieba as _jieba  # type: ignore[import-untyped]
 except ImportError:
     _jieba = None
+
+
+def _graph_from_data(data: dict) -> nx.Graph:
+    if "links" not in data and "edges" in data:
+        data = dict(data, links=data["edges"])
+    data = {**data, "directed": True}
+    try:
+        from purpory.build import graph_has_legacy_ids as _legacy
+
+        if _legacy(data.get("nodes", [])):
+            print(
+                "[purpory] note: this graph uses the pre-#1504 node-ID scheme; "
+                "rebuild with `purpory extract --force` for path-qualified IDs.",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
+    try:
+        return json_graph.node_link_graph(data, edges="links")
+    except TypeError:
+        return json_graph.node_link_graph(data)
 
 
 def _load_graph(graph_path: str) -> nx.Graph:
@@ -29,24 +49,7 @@ def _load_graph(graph_path: str) -> nx.Graph:
         check_graph_file_size_cap(resolved)
         safe = resolved
         data = json.loads(safe.read_text(encoding="utf-8"))
-        if "links" not in data and "edges" in data:
-            data = dict(data, links=data["edges"])
-        data = {**data, "directed": True}
-        try:
-            from purpory.build import graph_has_legacy_ids as _legacy
-            if _legacy(data.get("nodes", [])):
-                print(
-                    "[purpory] note: this graph uses the pre-#1504 node-ID scheme; "
-                    "rebuild with `purpory extract --force` for path-qualified IDs.",
-                    file=sys.stderr,
-                )
-        except Exception:
-            pass
-        try:
-            G = json_graph.node_link_graph(data, edges="links")
-        except TypeError:
-            G = json_graph.node_link_graph(data)
-        return G
+        return _graph_from_data(data)
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -985,7 +988,7 @@ def _community_header(cid: int, community_name) -> str:
     return base
 
 
-def _build_server(graph_path: str):
+def _build_server(graph_path: str | None):
     """Build the configured low-level MCP Server (shared by every transport).
 
     All graph query tools and resources are registered here over a single
@@ -1002,13 +1005,9 @@ def _build_server(graph_path: str):
     except ImportError as e:
         raise ImportError('mcp not installed. Run: pip install "purpory[mcp]"') from e
 
-    from purpory import paths as _paths
-
-    # Per-graph context cache: resolved graph.json path -> {key, G, communities}.
-    # The server's default graph is just the first entry; a tool call carrying a
-    # project_path adds its own. Routing every graph through one cache means the
-    # eager trigram index and the mtime+size hot-reload behave identically for
-    # the default graph and for any project graph.
+    # Per-graph context cache: file path or context-project locator -> graph data.
+    # Explicit graph files remain supported as import/export compatibility; the
+    # default path reads the canonical user-global SQLite repository.
     _default_graph_path = graph_path
     _ctx_lock = threading.Lock()
     _ctx_cache: dict[str, dict] = {}
@@ -1020,11 +1019,24 @@ def _build_server(graph_path: str):
         missing/corrupt file — it raises, so a bad project_path surfaces as a
         tool error instead of killing a server that is happily serving other
         projects."""
-        try:
-            s = Path(path).stat()
-            key = (s.st_mtime_ns, s.st_size)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"graph.json not found: {path}")
+        if path.startswith("context:"):
+            from purpory.supervise.repository import ContextGraphRepository
+
+            project = path.removeprefix("context:")
+            repository = ContextGraphRepository()
+            snapshot = repository.graph_snapshot(project=project)
+            if snapshot is None:
+                raise FileNotFoundError(
+                    f"no structural graph for {project!r} in {repository.path}; "
+                    "run purpory update ."
+                )
+            key = snapshot["contentHash"]
+        else:
+            try:
+                s = Path(path).stat()
+                key = (s.st_mtime_ns, s.st_size)
+            except FileNotFoundError:
+                raise FileNotFoundError(f"graph.json not found: {path}")
         ent = _ctx_cache.get(path)
         if ent is not None and ent["key"] == key:
             return ent["G"], ent["communities"]
@@ -1032,10 +1044,16 @@ def _build_server(graph_path: str):
             ent = _ctx_cache.get(path)
             if ent is not None and ent["key"] == key:
                 return ent["G"], ent["communities"]  # another thread built it
-            try:
-                new_G = _load_graph(path)
-            except SystemExit as e:  # _load_graph exits on missing/corrupt file
-                raise RuntimeError(f"could not load graph.json at {path}") from e
+            if path.startswith("context:"):
+                data = repository.structural_graph(project=project)
+                if data is None:  # snapshot was removed between the two reads
+                    raise FileNotFoundError(f"no structural graph for {project!r}")
+                new_G = _graph_from_data(data)
+            else:
+                try:
+                    new_G = _load_graph(path)
+                except SystemExit as e:  # _load_graph exits on missing/corrupt file
+                    raise RuntimeError(f"could not load graph.json at {path}") from e
             # Warm the trigram index before exposing the graph so the first query
             # against it is fast (same rationale as the original startup warm-up).
             _get_trigram_index(new_G)
@@ -1044,22 +1062,26 @@ def _build_server(graph_path: str):
             return new_G, comm
 
     def _resolve_graph_path(project_path) -> str:
-        """Map an optional project_path to a concrete graph.json path. ``None``
-        keeps the server's default graph (backward-compatible); a project_path
-        resolves to ``<project_path>/<PURPORY_OUT>/graph.json``, honouring the
-        PURPORY_OUT override so worktree/shared-output setups keep working."""
-        if not project_path:
+        """Resolve an explicit export or a project in the canonical repository."""
+        if not project_path and _default_graph_path is not None:
             return _default_graph_path
-        return str(Path(project_path) / _paths.PURPORY_OUT / "graph.json")
+        if project_path and _default_graph_path is not None:
+            from purpory import paths as _paths
+
+            return str(Path(project_path) / _paths.PURPORY_OUT / "graph.json")
+        from purpory.supervise.identity import resolve_project_id, resolve_project_root
+
+        root = resolve_project_root(project_path or Path.cwd())
+        return f"context:{resolve_project_id(root)}"
 
     # Active per-request context, rebound by _select_graph() and read by the tool
     # handlers below. No lock needed on the hot path: _select_graph and the
     # handler run in one synchronous stretch of each call_tool coroutine (no
     # await between them), so a concurrent call never observes a half-applied
     # swap.
-    active_graph_path = _default_graph_path
+    active_graph_path = _resolve_graph_path(None)
     try:
-        G, communities = _load_ctx(_default_graph_path)
+        G, communities = _load_ctx(active_graph_path)
     except (FileNotFoundError, RuntimeError):
         # No default graph at startup → run as a pure multi-project server. Tools
         # then require project_path; a call without one gets a clear error rather
@@ -1205,9 +1227,8 @@ def _build_server(graph_path: str):
             _t.inputSchema.setdefault("properties", {})["project_path"] = {
                 "type": "string",
                 "description": (
-                    "Absolute path to a project directory containing "
-                    "purpory-out/graph.json. Optional — defaults to the graph "
-                    "this server was started with."
+                    "Absolute project directory. Optional — defaults to the "
+                    "server working directory's project."
                 ),
             }
         return _tools
@@ -1570,7 +1591,6 @@ def _build_server(graph_path: str):
 
 def serve(graph_path: str | None = None) -> None:
     """Start the MCP server over stdio (the default, per-developer transport)."""
-    graph_path = graph_path or _default_graph_json()
     try:
         from mcp.server.stdio import stdio_server
     except ImportError as e:
@@ -1645,7 +1665,7 @@ class _ApiKeyMiddleware:
 
 
 def _build_http_app(
-    graph_path: str,
+    graph_path: str | None,
     *,
     host: str = "127.0.0.1",
     port: int = 8080,
@@ -1748,7 +1768,6 @@ def serve_http(
     deliberate follow-up. Binding ``0.0.0.0`` exposes the server beyond
     localhost — set an api_key when you do.
     """
-    graph_path = graph_path or _default_graph_json()
     try:
         import uvicorn
     except ImportError as e:
@@ -1796,7 +1815,7 @@ def _main(argv: list[str] | None = None) -> None:
         "graph_path",
         nargs="?",
         default=None,
-        help="Path to graph.json (default: purpory-out/graph.json)",
+        help="Optional exported graph.json (default: current project in context DB)",
     )
     parser.add_argument(
         "--graph",
@@ -1836,7 +1855,7 @@ def _main(argv: list[str] | None = None) -> None:
         help="Reap stateful sessions idle this many seconds (default: 3600; 0 disables)",
     )
     args = parser.parse_args(argv)
-    graph_path = args.graph_flag or args.graph_path or _default_graph_json()
+    graph_path = args.graph_flag or args.graph_path
 
     if args.transport == "http":
         serve_http(

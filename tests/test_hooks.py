@@ -1,7 +1,6 @@
 """Tests for hooks.py - git hook install/uninstall."""
 
 import os
-import shutil
 import subprocess
 from types import SimpleNamespace
 from pathlib import Path
@@ -294,23 +293,13 @@ def test_rebuild_bodies_are_shell_quote_safe():
     "name,body",
     [("post-commit", _REBUILD_BODY_COMMIT), ("post-checkout", _REBUILD_BODY_CHECKOUT)],
 )
-def test_rebuild_bodies_read_purpory_root(name, body):
-    """The rebuild must honour the persisted scan root rather than hardcoding the
-    repo top (#1173). Both bodies read <output-dir>/.purpory_root and pass the
-    recovered root to _rebuild_code instead of the bare Path('.')."""
-    assert ".purpory_root" in body, f"{name} ignores .purpory_root (#1173)"
-    # The output dir is resolved from PURPORY_OUT at hook-run time, not hardcoded
-    # to purpory-out/, so a renamed output dir is still found (#1423).
-    assert "PURPORY_OUT" in body, f"{name} ignores the PURPORY_OUT override (#1423)"
-    # The recovered root is what gets rebuilt, not a hardcoded cwd.
-    assert "_rebuild_code(_root" in body, f"{name} does not pass the recovered root"
-    # Quote-safe inside the shell-double-quoted launcher: single quotes only.
-    assert "read_text(encoding='utf-8')" in body, f"{name} root read is not single-quoted"
+def test_rebuild_bodies_use_the_hook_worktree(name, body):
+    assert "_rebuild_code(Path('.')" in body, f"{name} does not rebuild its worktree"
+    assert "PURPORY_OUT" not in body
+    assert ".purpory_root" not in body
 
 
-def test_rebuild_bodies_with_purpory_root_are_valid_python():
-    """The .purpory_root snippet must parse so a quoting slip can't ship a hook
-    that crashes the moment git fires it (#1173)."""
+def test_rebuild_bodies_are_valid_python():
     for body in (_REBUILD_BODY_COMMIT, _REBUILD_BODY_CHECKOUT):
         ast.parse(body)
 
@@ -446,48 +435,10 @@ def test_hooks_honor_skip_env(name, script):
 
 
 @pytest.mark.parametrize("name,script", _HOOK_SCRIPTS)
-def test_hooks_skip_linked_worktrees(name, script):
-    """Both hooks must short-circuit in a linked worktree (git-dir != common-dir),
-    and must compare ABSOLUTE paths so the primary checkout (where --git-common-dir
-    is the relative ".git") is not false-positived and wrongly skipped (#1809, #1806)."""
-    assert script.count("_GFY_GITDIR=") == 1, f"{name} guard not present exactly once"
-    assert "git rev-parse --git-common-dir" in script
-    # absolute-normalized compare, not a raw string compare of git output
-    assert 'cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd' in script
-    assert '[ "$_GFY_GITDIR" != "$_GFY_COMMONDIR" ]' in script
-
-
-def _worktree_guard_snippet() -> str:
-    from purpory.hooks import _WORKTREE_GUARD
-
-    return _WORKTREE_GUARD + "echo RAN\n"
-
-
-def test_worktree_guard_runs_on_primary_skips_linked(tmp_path):
-    """End-to-end against a real `git worktree`: the guard falls through on the
-    primary checkout and exits early inside a linked worktree (#1809, #1806)."""
-    if shutil.which("git") is None:  # pragma: no cover
-        pytest.skip("git not available")
-    primary = tmp_path / "primary"
-    primary.mkdir()
-
-    def _git(*args, cwd):
-        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
-
-    _git("init", "-q", ".", cwd=primary)
-    _git("config", "user.email", "t@t.co", cwd=primary)
-    _git("config", "user.name", "t", cwd=primary)
-    (primary / "a.txt").write_text("x")
-    _git("add", "-A", cwd=primary)
-    _git("commit", "-qm", "init", cwd=primary)
-    linked = tmp_path / "linked"
-    _git("worktree", "add", "-q", str(linked), "-b", "feature", cwd=primary)
-
-    snippet = _worktree_guard_snippet()
-    r_primary = subprocess.run(["sh", "-c", snippet], cwd=primary, capture_output=True, text=True)
-    r_linked = subprocess.run(["sh", "-c", snippet], cwd=linked, capture_output=True, text=True)
-    assert "RAN" in r_primary.stdout, "guard wrongly skipped the primary checkout"
-    assert "RAN" not in r_linked.stdout, "guard failed to skip the linked worktree"
+def test_hooks_do_not_depend_on_project_local_graph_state(name, script):
+    assert "git rev-parse --git-common-dir" not in script
+    assert '[ ! -d "purpory-out" ]' not in script
+    assert "purpory-out/.purpory_python" not in script
 
 
 # ── #1907: duplicate keys in .git/config must not trigger spurious warnings ──
