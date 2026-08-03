@@ -20,6 +20,8 @@ DEFAULT_MODEL = "qwen3-embedding:0.6b"
 DEFAULT_DIMENSIONS = 512
 DEFAULT_MAX_BYTES = 128 * 1024 * 1024
 POLICY_VERSION = "used-node-v1"
+MIN_SEMANTIC_SIMILARITY = 0.4
+QUERY_INSTRUCTION = "Instruct: Retrieve project context relevant to the user request\nQuery: "
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -179,15 +181,15 @@ def search_embeddings(
     ]
     if not visible:
         return []
+    selected_provider = provider or OllamaEmbeddingProvider()
     if profile["vector_format"] != "f32":
         raise RuntimeError(f"unsupported embedding vector format: {profile['vector_format']}")
-    selected_provider = provider or OllamaEmbeddingProvider()
     if selected_provider.name != profile["provider"]:
         raise RuntimeError(f"active embedding provider is unavailable: {profile['provider']}")
     dimensions = int(profile["dimensions"])
-    query_vectors = selected_provider.embed(
-        [query], model=str(profile["model"]), dimensions=dimensions
-    )
+    model = str(profile["model"])
+    query_text = f"{QUERY_INSTRUCTION}{query}" if model.startswith("qwen3-embedding") else query
+    query_vectors = selected_provider.embed([query_text], model=model, dimensions=dimensions)
     if (
         len(query_vectors) != 1
         or len(query_vectors[0]) != dimensions
@@ -214,7 +216,7 @@ def search_embeddings(
         similarity = sum(
             query_value * value for query_value, value in zip(query_vector, vector, strict=True)
         ) / (query_norm * vector_norm)
-        if math.isfinite(similarity) and similarity > 0:
+        if math.isfinite(similarity) and similarity >= MIN_SEMANTIC_SIMILARITY:
             ranked.append({"nodeId": str(row["node_id"]), "similarity": similarity})
     ranked.sort(key=lambda item: (-item["similarity"], item["nodeId"]))
     return ranked[:limit]
@@ -280,7 +282,9 @@ class EmbeddingService:
             reason=signal,
         )
 
-    def _documents(self) -> tuple[list[EmbeddingDocument], int]:
+    def _documents(
+        self, node_ids: Sequence[str] = ()
+    ) -> tuple[list[EmbeddingDocument], int]:
         with self.repository.connect() as connection:
             targets = connection.execute(
                 "SELECT node_id, priority FROM embedding_targets "
@@ -294,6 +298,9 @@ class EmbeddingService:
                     (self.profile_id,),
                 )
             }
+        if node_ids:
+            selected_ids = set(node_ids)
+            targets = [row for row in targets if str(row["node_id"]) in selected_ids]
         target_ids = [str(row["node_id"]) for row in targets]
         nodes: dict[str, dict[str, Any]] = {}
         for offset in range(0, len(target_ids), 200):
@@ -336,10 +343,12 @@ class EmbeddingService:
             )
         return pending, len(target_ids) - len(orphan_ids)
 
-    def run(self, *, limit: int = 32) -> dict[str, Any]:
+    def run(
+        self, *, limit: int = 32, node_ids: Sequence[str] = ()
+    ) -> dict[str, Any]:
         if limit < 1 or limit > 256:
             raise ValueError("embedding limit must be between 1 and 256")
-        pending, target_count = self._documents()
+        pending, target_count = self._documents(node_ids)
         selected = pending[:limit]
         if selected:
             try:

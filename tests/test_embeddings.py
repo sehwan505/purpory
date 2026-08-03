@@ -60,7 +60,7 @@ def _memory(
     return str(row["id"])
 
 
-def test_only_expand_seeds_and_successful_deliveries_become_targets(tmp_path: Path) -> None:
+def test_remembered_memories_queue_and_use_signals_only_raise_priority(tmp_path: Path) -> None:
     repository = ContextGraphRepository(tmp_path / "context.db")
     node_id = _memory(repository, "knowledge.alpha", "alpha retrieval evidence")
     provisioner = ContextProvisioningService(
@@ -70,16 +70,18 @@ def test_only_expand_seeds_and_successful_deliveries_become_targets(tmp_path: Pa
         project="project",
     )
 
-    assert provisioner.search("alpha", session_id="s")["candidates"]
     with repository.connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM embedding_targets").fetchone()[0] == 0
+        target = connection.execute(
+            "SELECT priority, reason FROM embedding_targets WHERE node_id = ?", (node_id,)
+        ).fetchone()
+    assert dict(target) == {"priority": 80, "reason": "remembered"}
 
     provisioner.expand([node_id], depth=0)
     with repository.connect() as connection:
         target = connection.execute(
             "SELECT priority, reason FROM embedding_targets WHERE node_id = ?", (node_id,)
         ).fetchone()
-    assert dict(target) == {"priority": 60, "reason": "expanded"}
+    assert dict(target) == {"priority": 80, "reason": "remembered"}
 
     provisioner.deliver([node_id], session_id="s")
     with repository.connect() as connection:
@@ -87,6 +89,22 @@ def test_only_expand_seeds_and_successful_deliveries_become_targets(tmp_path: Pa
             "SELECT priority, reason FROM embedding_targets WHERE node_id = ?", (node_id,)
         ).fetchone()
     assert dict(target) == {"priority": 100, "reason": "delivered"}
+
+
+def test_normal_write_keeps_the_queue_when_embedding_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "purpory.supervise.embeddings.OllamaEmbeddingProvider.embed",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+    service = ContextService(db_path=tmp_path / "context.db", root=tmp_path)
+
+    service.set_topic("knowledge.alpha", value="alpha retrieval evidence")
+
+    status = EmbeddingService(service.repository).status()
+    assert status["pending"] == 1
+    assert status["embedded"] == 0
 
 
 def test_embedding_batch_refreshes_stale_content_and_keeps_profiles(
@@ -177,12 +195,15 @@ def test_search_fuses_lexical_and_semantic_results_and_keeps_fts_fallback(
         def embed(self, texts: Sequence[str], *, model: str, dimensions: int) -> list[list[float]]:
             assert dimensions == 2
             return [
-                [0.0, 1.0] if text == "billing" or "payments authorization" in text else [1.0, 0.1]
+                [0.0, 1.0]
+                if text.endswith("Query: billing") or "payments authorization" in text
+                else [1.0, 0.1]
                 for text in texts
             ]
 
     provider = Provider()
     EmbeddingService(repository, provider=provider).run()
+    pending_id = _memory(repository, "knowledge.pending", "deployment policy")
     monkeypatch.setattr(
         "purpory.supervise.embeddings.OllamaEmbeddingProvider.embed",
         lambda self, texts, *, model, dimensions: provider.embed(
@@ -203,15 +224,19 @@ def test_search_fuses_lexical_and_semantic_results_and_keeps_fts_fallback(
         semantic_id,
     ]
     assert hidden_id not in {candidate["nodeId"] for candidate in result["candidates"]}
+    with repository.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM node_embeddings WHERE node_id = ?", (pending_id,)
+        ).fetchone()[0] == 0
     lexical, semantic = result["candidates"]
-    assert lexical["retrievalRanks"] == {"lexical": 1, "semantic": 2}
-    assert lexical["score"] > semantic["score"]
+    assert lexical["retrievalRanks"] == {"lexical": 1}
+    assert lexical["score"] == semantic["score"]
     assert semantic["matchedTerms"] == []
     assert semantic["retrievalRanks"] == {"semantic": 1}
     assert result["fusion"] == {
         "method": "rrf",
         "k": 60,
-        "sources": {"lexical": 1, "semantic": 2, "activePath": 0},
+        "sources": {"lexical": 1, "semantic": 1, "activePath": 0},
         "semanticFailed": False,
     }
 
@@ -224,7 +249,7 @@ def test_search_fuses_lexical_and_semantic_results_and_keeps_fts_fallback(
     assert fallback["fusion"]["semanticFailed"] is True
 
 
-def test_delivered_memory_becomes_retrievable_by_semantic_paraphrase(
+def test_new_memory_is_automatically_retrievable_by_semantic_paraphrase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PURPORY_EMBEDDING_DIMENSIONS", "2")
@@ -233,30 +258,27 @@ def test_delivered_memory_becomes_retrievable_by_semantic_paraphrase(
         root=tmp_path,
         gate_provider=_SearchGateProvider(),
     )
-    service.set_topic(
-        "knowledge.cuj-semantic",
-        value="All production payments require two-person authorization before release.",
-    )
-
-    first = service.prepare("production payments authorization", session_id="lexical")
-    assert [item["key"] for item in first["delivery"]] == ["knowledge.cuj-semantic"]
-
     provider = _Provider()
     provider.name = "ollama"
-    assert EmbeddingService(service.repository, provider=provider).run()["processed"] == 1
     monkeypatch.setattr(
         "purpory.supervise.embeddings.OllamaEmbeddingProvider.embed",
         lambda self, texts, *, model, dimensions: provider.embed(
             texts, model=model, dimensions=dimensions
         ),
     )
+    service.set_topic(
+        "knowledge.cuj-semantic",
+        value="All production payments require two-person authorization before release.",
+    )
+    assert EmbeddingService(service.repository, provider=provider).status()["pending"] == 0
 
-    second = service.prepare(
+    result = service.prepare(
         "Which safeguard governs disbursement of corporate funds?",
         session_id="semantic",
     )
 
-    candidate = second["context"]["search"]["candidates"][0]
-    assert [item["key"] for item in second["delivery"]] == ["knowledge.cuj-semantic"]
+    candidate = result["context"]["search"]["candidates"][0]
+    assert [item["key"] for item in result["delivery"]] == ["knowledge.cuj-semantic"]
     assert candidate["matchedTerms"] == []
     assert candidate["retrievalRanks"] == {"semantic": 1}
+    assert EmbeddingService(service.repository, provider=provider).status()["embedded"] == 1

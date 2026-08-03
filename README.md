@@ -137,8 +137,9 @@ emits exactly one of `SKIP`, `SEARCH`, or `ASK`; Purpory performs
 deterministic retrieval, applies the token budget, and records the exact delivered bytes. See
 [`docs/GATEWAY.md`](docs/GATEWAY.md).
 
-Embeddings are lazy: only explicit expansion seeds and successfully delivered nodes are queued.
-They are materialized in bounded batches and remain an optional SQLite projection:
+New or changed human memory is embedded after a normal write, while retrieval embeds only the
+query. If the local model is unavailable, the durable queue is preserved. `purpory embed` drains
+that queue explicitly for bulk imports or backfills:
 
 ```bash
 purpory embed --status --json

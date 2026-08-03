@@ -25,6 +25,7 @@ from purpory.supervise.identity import resolve_project_id
 DEFAULT_DB_PATH = Path.home() / ".purpory" / "context.db"
 SCHEMA_VERSION = 6
 MEMORY_NAMESPACE = "memory"
+EMBEDDING_PRIORITIES = {"expanded": 60, "remembered": 80, "delivered": 100}
 RESOURCE_NAMESPACE = "resource"
 CONTEXT_NAMESPACE = "context"
 TOPIC_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)*$")
@@ -1349,6 +1350,14 @@ class ContextGraphRepository:
                     timestamp,
                 ),
             )
+            if origin == "human":
+                self._upsert_embedding_target(
+                    connection,
+                    node_id=_stable_id(MEMORY_NAMESPACE, normalized_project, key),
+                    priority=EMBEDDING_PRIORITIES["remembered"],
+                    reason="remembered",
+                    timestamp=timestamp,
+                )
             if normalized_project:
                 project_node = connection.execute(
                     """
@@ -1377,7 +1386,7 @@ class ContextGraphRepository:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT stable_key AS key, value, source, node_type AS kind, origin,
+                SELECT id, stable_key AS key, value, source, node_type AS kind, origin,
                        set_at, external_id AS seed_node_id, source_graph AS seed_graph,
                        project
                 FROM context_nodes
@@ -1585,6 +1594,15 @@ class ContextGraphRepository:
                             timestamp,
                             timestamp,
                         ),
+                    )
+                    self._upsert_embedding_target(
+                        connection,
+                        node_id=_stable_id(
+                            MEMORY_NAMESPACE, normalized_project, change["key"]
+                        ),
+                        priority=EMBEDDING_PRIORITIES["remembered"],
+                        reason="remembered",
+                        timestamp=timestamp,
                     )
                     project_node = connection.execute(
                         """
@@ -2175,6 +2193,13 @@ class ContextGraphRepository:
                             timestamp,
                             timestamp,
                         ),
+                    )
+                    self._upsert_embedding_target(
+                        connection,
+                        node_id=_stable_id(MEMORY_NAMESPACE, "", proposal["key"]),
+                        priority=EMBEDDING_PRIORITIES["remembered"],
+                        reason="remembered",
+                        timestamp=timestamp,
                     )
                     version_id = self._record_memory_version(
                         connection,
@@ -3427,8 +3452,7 @@ class ContextGraphRepository:
         reason: str,
         recorded_at: int | None = None,
     ) -> None:
-        priorities = {"expanded": 60, "delivered": 100}
-        if reason not in priorities:
+        if reason not in EMBEDDING_PRIORITIES:
             raise ValueError(f"unsupported embedding signal: {reason}")
         normalized = list(dict.fromkeys(node_id.strip() for node_id in node_ids if node_id.strip()))
         if not normalized:
@@ -3439,7 +3463,7 @@ class ContextGraphRepository:
                 self._upsert_embedding_target(
                     connection,
                     node_id=node_id,
-                    priority=priorities[reason],
+                    priority=EMBEDDING_PRIORITIES[reason],
                     reason=reason,
                     timestamp=timestamp,
                 )
@@ -3460,7 +3484,10 @@ class ContextGraphRepository:
             VALUES (?, ?, ?, ?, 1)
             ON CONFLICT(node_id) DO UPDATE SET
                 priority = MAX(priority, excluded.priority),
-                reason = excluded.reason,
+                reason = CASE
+                    WHEN excluded.priority >= priority THEN excluded.reason
+                    ELSE reason
+                END,
                 requested_at = excluded.requested_at,
                 usage_count = usage_count + 1
             """,
