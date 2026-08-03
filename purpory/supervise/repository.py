@@ -850,6 +850,53 @@ class ContextGraphRepository:
             raise RuntimeError("created project namespace could not be loaded")
         return project
 
+    def ensure_project_namespace(self, namespace_id: str, *, name: str) -> dict[str, Any]:
+        """Create the implicit project used when a repository is first observed."""
+        normalized_id = _registry_text(namespace_id, field="project id", maximum=255)
+        existing = self.get_project_namespace(normalized_id)
+        if existing is not None:
+            return existing
+        normalized_name = _registry_text(name, field="project name", maximum=120)
+        timestamp = _now()
+        with self.connect() as connection:
+            project_node_id = self._upsert_registry_node(
+                connection,
+                namespace=CONTEXT_NAMESPACE,
+                project=normalized_id,
+                stable_key=normalized_id,
+                node_type="project",
+                label=normalized_name,
+                value=None,
+                source=None,
+                origin="observed",
+                properties={"description": "", "parentId": None},
+                timestamp=timestamp,
+            )
+            for memory in connection.execute(
+                "SELECT id FROM context_nodes WHERE namespace = ? AND project = ?",
+                (MEMORY_NAMESPACE, normalized_id),
+            ).fetchall():
+                self._upsert_edge(
+                    connection,
+                    source_id=project_node_id,
+                    target_id=str(memory["id"]),
+                    relation="contains",
+                    origin="observed",
+                    timestamp=timestamp,
+                )
+            self._record_event(
+                connection,
+                "project.discovered",
+                project=normalized_id,
+                payload={"name": normalized_name},
+                occurred_at=timestamp,
+            )
+            connection.commit()
+        project = self.get_project_namespace(normalized_id)
+        if project is None:  # pragma: no cover - transaction invariant
+            raise RuntimeError("discovered project namespace could not be loaded")
+        return project
+
     def get_project_namespace(self, namespace_id: str) -> dict[str, Any] | None:
         normalized_id = _registry_text(
             namespace_id,

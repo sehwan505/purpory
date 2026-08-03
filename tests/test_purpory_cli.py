@@ -57,6 +57,10 @@ def test_prepare_emits_machine_readable_context_result(monkeypatch, capsys, tmp_
             "--db",
             str(database),
             "--json",
+            "--gate-url",
+            "http://127.0.0.1:9",
+            "--gate-timeout",
+            "0.01",
             "--no-model-start",
         ],
     )
@@ -96,6 +100,36 @@ def test_remember_stores_human_context(monkeypatch, capsys, tmp_path) -> None:
     topic = ContextService(db_path=database, root=tmp_path).topic("decision.database")
     assert topic is not None
     assert topic["value"] == "PostgreSQL"
+
+
+def test_remember_accepts_an_explicit_project(monkeypatch, capsys, tmp_path) -> None:
+    database = tmp_path / "context.db"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "purpory",
+            "remember",
+            "decision.database",
+            "--value",
+            "SQLite",
+            "--kind",
+            "decision",
+            "--project",
+            "product",
+            "--db",
+            str(database),
+            "--json",
+        ],
+    )
+
+    main()
+
+    assert json.loads(capsys.readouterr().out)["action"] == "created"
+    assert ContextGraphRepository(database).get_topic(
+        "decision.database", project="product"
+    )["value"] == "SQLite"
 
 
 def test_remember_global_request_waits_for_human_approval(

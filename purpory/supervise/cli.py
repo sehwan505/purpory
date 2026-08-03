@@ -51,6 +51,7 @@ def _remember_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--root", default=".")
+    parser.add_argument("--project", help="stable project namespace (default: infer from cwd)")
     parser.add_argument("--db")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -136,7 +137,7 @@ def _embed_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--limit", type=int, default=32)
     parser.add_argument("--status", action="store_true")
-    parser.add_argument("--root", default=".")
+    parser.add_argument("--root", default=".", help=argparse.SUPPRESS)
     parser.add_argument("--db")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -190,19 +191,23 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
         if parser_factory is None:
             raise ValueError(f"unsupported product command: {command}")
         options = parser_factory().parse_args(raw)
-        root = Path(options.root).expanduser().resolve()
-
         if command == "embed":
             from purpory.supervise.embeddings import EmbeddingService
+            from purpory.supervise.repository import ContextGraphRepository
 
-            service = ContextService(db_path=options.db, root=root)
-            embeddings = EmbeddingService(service.repository)
+            embeddings = EmbeddingService(ContextGraphRepository(options.db))
             result = embeddings.status() if options.status else embeddings.run(limit=options.limit)
             _emit(result, json_output=options.json)
             return
 
+        root = Path(options.root).expanduser().resolve()
+
         if command == "remember":
-            service = ContextService(db_path=options.db, root=root)
+            service = ContextService(
+                db_path=options.db,
+                root=root,
+                project_id=options.project,
+            )
             if options.list:
                 if (
                     options.key

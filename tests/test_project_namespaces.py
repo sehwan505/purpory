@@ -312,3 +312,25 @@ def test_retrieval_combines_selected_views_from_multiple_git_resources(
     assert any(item["label"] == "secondary_handler" for item in code["candidates"])
     assert any(item["namespace"] == "resource" for item in resources["candidates"])
     assert len(service.view()["graphProjects"]) == 2
+
+
+def test_git_resource_is_discovered_and_reused_across_clones(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for checkout in (first, second):
+        checkout.mkdir()
+        _git(checkout, "init", "-b", "main")
+        _git(checkout, "remote", "add", "origin", "git@github.com:example/product.git")
+    database = tmp_path / "context.db"
+
+    first_service = ContextService(db_path=database, root=first)
+    first_service.set_topic(
+        "decision.shared",
+        value="Keep project memory isolated but available across clones.",
+        kind="decision",
+    )
+    second_service = ContextService(db_path=database, root=second)
+
+    assert second_service.project_id == first_service.project_id
+    assert second_service.topic("decision.shared")["value"].startswith("Keep project memory")
+    assert second_service.view()["resourceBinding"]["locator"] == str(second.resolve())
