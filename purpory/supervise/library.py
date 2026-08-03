@@ -319,11 +319,24 @@ class ContextService:
             session_id=current_session_id(),
         )
         change = result["changes"][0]
+        if change["action"] in {"created", "updated", "unchanged"}:
+            self._materialize_topic_embedding(key, project=self.project_id)
         return {
             "key": key,
             "action": change["action"],
             "versionId": change.get("versionId"),
         }
+
+    def _materialize_topic_embedding(self, key: str, *, project: str) -> None:
+        from purpory.supervise.embeddings import EmbeddingService
+
+        topic = self.repository.get_topic(key, project=project)
+        if topic is None:
+            return
+        try:
+            EmbeddingService(self.repository).run(limit=1, node_ids=[str(topic["id"])])
+        except (OSError, RuntimeError, ValueError):
+            pass
 
     def list_topics(self, *, prefix: str | None = None) -> list[dict[str, Any]]:
         prefixes = [prefix] if prefix else None
@@ -430,6 +443,7 @@ class ContextService:
             if applied["action"] not in {"created", "updated"}:
                 raise ValueError("needs-review change did not create a new memory version")
             version_id = int(applied["versionId"])
+            self._materialize_topic_embedding(key, project=self.project_id)
         return self.repository.resolve_needs_review(
             review_id,
             outcome=outcome,
@@ -482,10 +496,19 @@ class ContextService:
         *,
         decision: str,
     ) -> dict[str, Any] | None:
-        return self.repository.decide_global_memory_request(
+        result = self.repository.decide_global_memory_request(
             request_id,
             decision=decision,
         )
+        if result is not None and result.get("memoryAction") in {
+            "created",
+            "updated",
+            "unchanged",
+        }:
+            proposal = result.get("proposal")
+            if isinstance(proposal, dict):
+                self._materialize_topic_embedding(str(proposal["key"]), project="")
+        return result
 
     def project_memory_report(self, *, since: int | None = None) -> list[dict[str, Any]]:
         return self.repository.project_memory_report(project=self.project_id, since=since)

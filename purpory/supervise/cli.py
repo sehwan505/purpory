@@ -132,7 +132,7 @@ def _dashboard_parser() -> argparse.ArgumentParser:
 def _embed_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="purpory embed",
-        description="Materialize embeddings queued by actual context use.",
+        description="Materialize queued embeddings for bulk imports or backfills.",
     )
     parser.add_argument("--limit", type=int, default=32)
     parser.add_argument("--status", action="store_true")
