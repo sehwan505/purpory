@@ -227,6 +227,25 @@ def test_project_path_routes_to_that_projects_graph(tmp_path):
         assert "Nodes: 2" in _call_tool(client, headers, "graph_stats", {}, rid=4)
 
 
+def test_default_graph_comes_from_context_repository(tmp_path, monkeypatch):
+    from purpory.supervise.identity import resolve_project_id
+    from purpory.supervise.repository import ContextGraphRepository
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("PURPORY_CONTEXT_DB", str(tmp_path / "context.db"))
+    ContextGraphRepository().replace_structural_graph(
+        SAMPLE_GRAPH,
+        project=resolve_project_id(project),
+    )
+
+    app = serve_mod._build_http_app(None, json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        assert "Nodes: 2" in _call_tool(client, headers, "graph_stats", {}, rid=2)
+
+
 def test_bad_project_path_errors_without_killing_server(tmp_path):
     """A missing project graph is a tool error, not a process exit — the server
     keeps serving the default graph."""
@@ -274,6 +293,15 @@ def test_cli_defaults_to_stdio(monkeypatch):
     serve_mod._main(["purpory-out/graph.json"])
     assert calls.get("stdio") == "purpory-out/graph.json"
     assert "http" not in calls
+
+
+def test_cli_without_graph_uses_context_repository(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(serve_mod, "serve", lambda gp: calls.setdefault("stdio", gp))
+
+    serve_mod._main([])
+
+    assert calls["stdio"] is None
 
 
 def test_cli_http_passes_flags(monkeypatch):

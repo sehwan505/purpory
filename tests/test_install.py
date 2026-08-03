@@ -157,6 +157,30 @@ def test_unknown_integration_option_fails_without_writing(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize(
+    ("agent", "environment", "instructions", "settings"),
+    (
+        ("claude", "CLAUDE_CONFIG_DIR", "CLAUDE.md", "settings.json"),
+        ("codex", "CODEX_HOME", "AGENTS.md", "hooks.json"),
+    ),
+)
+def test_default_install_is_user_global(
+    tmp_path, monkeypatch, agent, environment, instructions, settings
+):
+    project = tmp_path / "project"
+    config = tmp_path / "config"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv(environment, str(config))
+
+    _run_main(monkeypatch, agent, "install")
+
+    assert (config / instructions).is_file()
+    assert (config / settings).is_file()
+    assert (config / "skills" / "purpory-reconcile" / "SKILL.md").is_file()
+    assert not any(project.iterdir())
+
+
+@pytest.mark.parametrize(
     ("agent", "instructions", "config_dir"),
     (("claude", "CLAUDE.md", ".claude"), ("codex", "AGENTS.md", ".codex")),
 )

@@ -1,4 +1,4 @@
-"""Claude Code and Codex project integration installers.
+"""Claude Code and Codex integration installers.
 
 Purpory's supported automatic context integrations are intentionally limited to
 the two hosts that expose a prompt-level ``UserPromptSubmit`` lifecycle.  Both
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import shutil
 import sys
@@ -21,6 +22,12 @@ _CLAUDE_MD_MARKER = "## purpory"
 _AGENTS_MD_MARKER = "## purpory"
 _SUPPORTED_AGENTS = ("claude", "codex")
 _RECONCILE_SKILL = "purpory-reconcile"
+
+
+def _user_config_dir(agent: str) -> Path:
+    variable = "CLAUDE_CONFIG_DIR" if agent == "claude" else "CODEX_HOME"
+    default = ".claude" if agent == "claude" else ".codex"
+    return Path(os.environ.get(variable, Path.home() / default)).expanduser()
 
 
 @functools.lru_cache(maxsize=None)
@@ -36,20 +43,28 @@ def _always_on(basename: str) -> str:
         ) from exc
 
 
-def _install_reconcile_skill(project_dir: Path, agent: str) -> None:
+def _install_reconcile_skill(base_dir: Path, agent: str, *, project: bool) -> None:
     source = Path(__file__).parent / "skills" / _RECONCILE_SKILL
     if not (source / "SKILL.md").is_file():
         raise RuntimeError(
             f"purpory integration assets are incomplete: missing '{_RECONCILE_SKILL}' skill"
         )
-    parent = project_dir / (".claude" if agent == "claude" else ".agents") / "skills"
+    parent = (
+        base_dir / (".claude" if agent == "claude" else ".agents") / "skills"
+        if project
+        else base_dir / "skills"
+    )
     target = parent / _RECONCILE_SKILL
     shutil.copytree(source, target, dirs_exist_ok=True)
-    print(f"  {target.relative_to(project_dir)}  ->  durable intent reconciliation skill")
+    print(f"  {target}  ->  durable intent reconciliation skill")
 
 
-def _uninstall_reconcile_skill(project_dir: Path, agent: str) -> bool:
-    parent = project_dir / (".claude" if agent == "claude" else ".agents") / "skills"
+def _uninstall_reconcile_skill(base_dir: Path, agent: str, *, project: bool) -> bool:
+    parent = (
+        base_dir / (".claude" if agent == "claude" else ".agents") / "skills"
+        if project
+        else base_dir / "skills"
+    )
     target = parent / _RECONCILE_SKILL
     if not target.is_dir():
         return False
@@ -59,7 +74,7 @@ def _uninstall_reconcile_skill(project_dir: Path, agent: str) -> bool:
             directory.rmdir()
         except OSError:
             break
-    print(f"  {target.relative_to(project_dir)}  ->  reconciliation skill removed")
+    print(f"  {target}  ->  reconciliation skill removed")
     return True
 
 
@@ -208,11 +223,11 @@ def _remove_purpory_hooks(hooks: dict[str, Any]) -> bool:
     return changed
 
 
-def _install_prompt_hook(project_dir: Path, agent: str) -> None:
+def _install_prompt_hook(base_dir: Path, agent: str, *, project: bool) -> None:
     if agent == "claude":
-        hooks_path = project_dir / ".claude" / "settings.json"
+        hooks_path = base_dir / (Path(".claude") / "settings.json" if project else "settings.json")
     elif agent == "codex":
-        hooks_path = project_dir / ".codex" / "hooks.json"
+        hooks_path = base_dir / (Path(".codex") / "hooks.json" if project else "hooks.json")
     else:  # pragma: no cover - internal invariant
         raise ValueError(f"unsupported agent: {agent}")
 
@@ -222,7 +237,7 @@ def _install_prompt_hook(project_dir: Path, agent: str) -> None:
     _remove_purpory_hooks(hooks)
     hooks.setdefault("UserPromptSubmit", []).append(_preflight_hook(agent))
     hooks_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    print(f"  {hooks_path.relative_to(project_dir)}  ->  UserPromptSubmit preflight registered")
+    print(f"  {hooks_path}  ->  UserPromptSubmit preflight registered")
 
 
 def _uninstall_prompt_hook(path: Path) -> bool:
@@ -245,25 +260,27 @@ def _uninstall_prompt_hook(path: Path) -> bool:
     return True
 
 
-def _install_claude_hook(project_dir: Path) -> None:
-    _install_prompt_hook(project_dir, "claude")
+def _install_claude_hook(base_dir: Path, *, project: bool) -> None:
+    _install_prompt_hook(base_dir, "claude", project=project)
 
 
-def _uninstall_claude_hook(project_dir: Path) -> None:
-    for name in ("settings.json", "settings.local.json"):
-        path = project_dir / ".claude" / name
+def _uninstall_claude_hook(base_dir: Path, *, project: bool) -> None:
+    parent = base_dir / ".claude" if project else base_dir
+    names = ("settings.json", "settings.local.json") if project else ("settings.json",)
+    for name in names:
+        path = parent / name
         if _uninstall_prompt_hook(path):
-            print(f"  {path.relative_to(project_dir)}  ->  Purpory preflight removed")
+            print(f"  {path}  ->  Purpory preflight removed")
 
 
-def _install_codex_hook(project_dir: Path) -> None:
-    _install_prompt_hook(project_dir, "codex")
+def _install_codex_hook(base_dir: Path, *, project: bool) -> None:
+    _install_prompt_hook(base_dir, "codex", project=project)
 
 
-def _uninstall_codex_hook(project_dir: Path) -> None:
-    path = project_dir / ".codex" / "hooks.json"
+def _uninstall_codex_hook(base_dir: Path, *, project: bool) -> None:
+    path = base_dir / ".codex" / "hooks.json" if project else base_dir / "hooks.json"
     if _uninstall_prompt_hook(path):
-        print(f"  {path.relative_to(project_dir)}  ->  Purpory preflight removed")
+        print(f"  {path}  ->  Purpory preflight removed")
 
 
 def _write_instructions(target: Path, marker: str, section: str) -> None:
@@ -278,80 +295,94 @@ def _write_instructions(target: Path, marker: str, section: str) -> None:
 
 def claude_install(project_dir: Path | None = None) -> None:
     """Install Claude Code instructions and mandatory prompt preflight."""
-    project_dir = project_dir or Path(".")
+    project = project_dir is not None
+    base_dir = project_dir or _user_config_dir("claude")
+    base_dir.mkdir(parents=True, exist_ok=True)
     _write_instructions(
-        project_dir / "CLAUDE.md",
+        base_dir / "CLAUDE.md",
         _CLAUDE_MD_MARKER,
         _always_on("claude-md"),
     )
-    _install_reconcile_skill(project_dir, "claude")
-    _install_claude_hook(project_dir)
+    _install_reconcile_skill(base_dir, "claude", project=project)
+    _install_claude_hook(base_dir, project=project)
     print("\nClaude Code will now run Purpory before every user prompt.")
 
 
 def claude_uninstall(project_dir: Path | None = None, *, project: bool = False) -> None:
     """Remove only Purpory-owned Claude Code instructions and hooks."""
-    del project  # retained for source compatibility with older callers
-    project_dir = project_dir or Path(".")
+    if project and project_dir is None:
+        project_dir = Path(".")
+    project = project_dir is not None
+    base_dir = project_dir or _user_config_dir("claude")
     removed = False
-    for relative in (
-        Path("CLAUDE.md"),
-        Path("CLAUDE.local.md"),
-        Path(".claude") / "CLAUDE.md",
-        Path(".claude") / "CLAUDE.local.md",
-    ):
-        target = project_dir / relative
+    relatives = (
+        (
+            Path("CLAUDE.md"),
+            Path("CLAUDE.local.md"),
+            Path(".claude") / "CLAUDE.md",
+            Path(".claude") / "CLAUDE.local.md",
+        )
+        if project
+        else (Path("CLAUDE.md"),)
+    )
+    for relative in relatives:
+        target = base_dir / relative
         if _strip_purpory_md_section(target, _CLAUDE_MD_MARKER):
             print(f"purpory section removed from {target.resolve()}")
             removed = True
-    _uninstall_claude_hook(project_dir)
-    removed = _uninstall_reconcile_skill(project_dir, "claude") or removed
+    _uninstall_claude_hook(base_dir, project=project)
+    removed = _uninstall_reconcile_skill(base_dir, "claude", project=project) or removed
     if not removed:
         print("No Claude Code Purpory instructions found - nothing to do")
 
 
 def codex_install(project_dir: Path | None = None) -> None:
     """Install Codex instructions and mandatory prompt preflight."""
-    project_dir = project_dir or Path(".")
+    project = project_dir is not None
+    base_dir = project_dir or _user_config_dir("codex")
+    base_dir.mkdir(parents=True, exist_ok=True)
     _write_instructions(
-        project_dir / "AGENTS.md",
+        base_dir / "AGENTS.md",
         _AGENTS_MD_MARKER,
         _always_on("agents-md"),
     )
-    _install_reconcile_skill(project_dir, "codex")
-    _install_codex_hook(project_dir)
+    _install_reconcile_skill(base_dir, "codex", project=project)
+    _install_codex_hook(base_dir, project=project)
     print("\nCodex will now run Purpory before every user prompt.")
 
 
 def codex_uninstall(project_dir: Path | None = None) -> None:
     """Remove only Purpory-owned Codex instructions and hooks."""
-    project_dir = project_dir or Path(".")
-    target = project_dir / "AGENTS.md"
+    project = project_dir is not None
+    base_dir = project_dir or _user_config_dir("codex")
+    target = base_dir / "AGENTS.md"
     removed = _strip_purpory_md_section(target, _AGENTS_MD_MARKER)
     if removed:
         print(f"purpory section removed from {target.resolve()}")
-    _uninstall_codex_hook(project_dir)
-    removed = _uninstall_reconcile_skill(project_dir, "codex") or removed
+    _uninstall_codex_hook(base_dir, project=project)
+    removed = _uninstall_reconcile_skill(base_dir, "codex", project=project) or removed
     if not removed:
         print("No Codex Purpory instructions found - nothing to do")
 
 
-def _parse_named_agent_options(args: list[str]) -> None:
-    """Accept the historical ``--project`` flag; reject every other option."""
+def _parse_named_agent_options(args: list[str]) -> bool:
+    """Return whether the integration should be installed in the current project."""
     unknown = [arg for arg in args if arg != "--project"]
     if unknown:
         print(f"error: unknown integration option '{unknown[0]}'", file=sys.stderr)
         raise SystemExit(2)
+    return "--project" in args
 
 
 def _dispatch_agent(agent: str, arguments: list[str]) -> None:
     subcommand = arguments[0] if arguments else ""
-    _parse_named_agent_options(arguments[1:])
+    project = _parse_named_agent_options(arguments[1:])
+    target = Path(".") if project else None
     if subcommand == "install":
-        (claude_install if agent == "claude" else codex_install)(Path("."))
+        (claude_install if agent == "claude" else codex_install)(target)
         return
     if subcommand == "uninstall":
-        (claude_uninstall if agent == "claude" else codex_uninstall)(Path("."))
+        (claude_uninstall if agent == "claude" else codex_uninstall)(target)
         return
     print(f"Usage: purpory {agent} [install|uninstall] [--project]", file=sys.stderr)
     raise SystemExit(1)

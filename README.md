@@ -73,12 +73,14 @@ Local CLI and Claude Code/Codex preflight requests retain their input text in th
 default so feedback can be interpreted. Use `--no-retain-input` for the CLI or set
 `PURPORY_CONTEXT_RETAIN_INPUT=false` for preflight to keep only the SHA-256 hash.
 
-Claude Code and Codex can enforce preparation before every user prompt:
+Claude Code and Codex can enforce preparation before every user prompt. Install once at user scope:
 
 ```bash
-purpory claude install --project
-purpory codex install --project
+purpory claude install
+purpory codex install
 ```
+
+Pass `--project` only when the integration should apply to the current repository.
 
 These are Purpory's only host-specific integrations. Other agents can call the generic `prepare`
 CLI or HTTP API without a dedicated installer.
@@ -89,7 +91,7 @@ confirmed fact, previews changes, and applies them in conflict-checked batches. 
 fixed item count or persist an opaque importance score. The hook calls the same
 `ContextService.prepare` operation as the CLI and HTTP API, then either injects retrieved context,
 instructs the agent to ask one clarification, or passes the prompt through. Codex requires the user
-to review and trust project hooks with `/hooks`. See
+to review and trust installed hooks with `/hooks`. See
 [`docs/AGENT_PREFLIGHT.md`](docs/AGENT_PREFLIGHT.md).
 
 ## Agent API

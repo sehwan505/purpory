@@ -37,13 +37,15 @@ class ContextService:
         *,
         db_path: str | Path | None = None,
         root: str | Path | None = None,
+        project_id: str | None = None,
         graph_path: str | Path | None = None,
         stale_after_days: int = DEFAULT_STALE_DAYS,
         gate_provider: "GateProvider | None" = None,
     ) -> None:
         self.repository = ContextGraphRepository(db_path)
         self.root = resolve_project_root(root or Path.cwd())
-        self._default_project_id = resolve_project_id(self.root)
+        self._explicit_project_id = project_id.strip() if project_id and project_id.strip() else None
+        self._default_project_id = resolve_project_id(self.root, project_id)
         output_directory = os.environ.get("PURPORY_OUT", "purpory-out")
         self.output_directory = output_directory
         self._graph_path_explicit = graph_path is not None
@@ -56,7 +58,7 @@ class ContextService:
 
     @property
     def project_id(self) -> str:
-        return str(self._context_selection()["project"])
+        return str(self._context_selection(refresh_git=True)["project"])
 
     def _selected_project(self, project: str | None = None) -> str:
         return project.strip() if project and project.strip() else self.project_id
@@ -80,18 +82,30 @@ class ContextService:
                     provider="git",
                     external_identity=str(discovered["externalIdentity"]),
                 )
-                if resource is not None:
-                    self.repository.attach_resource(
-                        str(resource["namespaceId"]),
-                        provider="git",
-                        resource_kind=str(discovered["resourceKind"]),
-                        external_identity=str(discovered["externalIdentity"]),
-                        label=str(discovered["resourceLabel"]),
-                        properties=discovered["resourceProperties"],
-                        views=[discovered["view"]],
+                namespace_id = (
+                    str(resource["namespaceId"])
+                    if resource is not None
+                    else self._default_project_id
+                )
+                if resource is None:
+                    identity = str(discovered["externalIdentity"])
+                    self.repository.ensure_project_namespace(
+                        namespace_id,
+                        name=identity[-120:],
                     )
-                    binding = self.repository.resolve_resource_view(directory)
-        selected_project = project.strip() if project and project.strip() else None
+                self.repository.attach_resource(
+                    namespace_id,
+                    provider="git",
+                    resource_kind=str(discovered["resourceKind"]),
+                    external_identity=str(discovered["externalIdentity"]),
+                    label=str(discovered["resourceLabel"]),
+                    properties=discovered["resourceProperties"],
+                    views=[discovered["view"]],
+                )
+                binding = self.repository.resolve_resource_view(directory)
+        selected_project = (
+            project.strip() if project and project.strip() else self._explicit_project_id
+        )
         active_binding = (
             binding
             if binding is not None

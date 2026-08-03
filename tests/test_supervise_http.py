@@ -109,10 +109,12 @@ def test_project_api_creates_namespace_and_attaches_git_resource(
 
 def test_model_status_api_reports_managed_runtime_state(
     context_server: ContextHTTPServer,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("PURPORY_HOME", str(tmp_path / "purpory-home"))
+    monkeypatch.setattr(
+        "purpory.supervise.gate.runtime.GateModelManager.status",
+        lambda _self: {"installed": False, "endpoint": None},
+    )
 
     status, body = _request(context_server, "GET", "/api/model/status?t=read-secret")
 
