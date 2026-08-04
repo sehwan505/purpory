@@ -131,7 +131,7 @@ def test_gate_retrieves_structural_nodes_without_seed_topics(tmp_path: Path) -> 
         encoding="utf-8",
     )
     provider = StubGateProvider(
-        _proposal("search", query="TokenService", scopes=["code"], keywords=["TokenService"])
+        _proposal("search", query="TokenService", scopes=["material"], keywords=["TokenService"])
     )
     service = ContextService(db_path=tmp_path / "context.db", root=tmp_path, gate_provider=provider)
     service.sync_graph()
@@ -394,7 +394,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
 
     assert result.proposal.action == "search"
     assert result.proposal.query == "전에 정한 인증 정책"
-    assert result.proposal.scopes == ("code", "human", "resource", "session")
+    assert result.proposal.scopes == ("human", "material", "resource", "session")
     assert result.proposal.reason_code == "CONTEXT_SEARCH_REQUIRED"
     assert "response_format" not in captured["body"]
     assert "temperature" not in captured["body"]

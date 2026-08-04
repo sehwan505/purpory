@@ -134,10 +134,10 @@ SEARCH_TERM_ALIASES: dict[str, tuple[str, ...]] = {
 }
 # A deliberately permissive relative floor preserves one strong result for a
 # distinct concept in short queries while eliminating the long tail created by
-# incidental matches in large code graphs.
+# incidental matches in large material graphs.
 RELATIVE_SCORE_FLOOR = 0.05
 RRF_K = 60
-ALLOWED_SCOPES = frozenset({"human", "resource", "code", "session"})
+ALLOWED_SCOPES = frozenset({"human", "resource", "material", "session"})
 MAX_QUERY_CHARS = 4_096
 MAX_KEYWORDS = 12
 MAX_ACTIVE_PATHS = 32
@@ -203,11 +203,19 @@ def _paths_related(left: str, right: str) -> bool:
 
 
 def _clean_scopes(scopes: Sequence[str]) -> tuple[str, ...]:
-    cleaned = tuple(sorted({scope.strip().lower() for scope in scopes if scope.strip()}))
+    cleaned = tuple(
+        sorted(
+            {
+                "material" if scope.strip().lower() == "code" else scope.strip().lower()
+                for scope in scopes
+                if scope.strip()
+            }
+        )
+    )
     unsupported = sorted(set(cleaned) - ALLOWED_SCOPES)
     if unsupported:
         raise ValueError(f"unsupported context scopes: {', '.join(unsupported)}")
-    return cleaned or ("code", "human", "resource", "session")
+    return cleaned or ("human", "material", "resource", "session")
 
 
 def _clean_strings(
@@ -232,7 +240,7 @@ def _public_node(node: dict[str, Any]) -> dict[str, Any]:
     properties = node.get("properties") or {}
     return {
         "id": node["id"],
-        "namespace": node["namespace"],
+        "namespace": _public_namespace(node),
         "project": node["project"],
         "stableKey": node["stableKey"],
         "type": node["type"],
@@ -251,7 +259,7 @@ def _public_node(node: dict[str, Any]) -> dict[str, Any]:
 def _public_endpoint(node: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": node["id"],
-        "namespace": node["namespace"],
+        "namespace": _public_namespace(node),
         "project": sanitize_label(str(node.get("project") or "")),
         "stableKey": sanitize_label(str(node["stableKey"])),
         "type": sanitize_label(str(node["type"])),
@@ -274,6 +282,10 @@ def _public_edge(edge: dict[str, Any]) -> dict[str, Any]:
         "source": _public_endpoint(edge["source"]),
         "target": _public_endpoint(edge["target"]),
     }
+
+
+def _public_namespace(node: dict[str, Any]) -> str:
+    return "material" if node["namespace"] == "code" else str(node["namespace"])
 
 
 class ContextProvisioningService:
@@ -349,7 +361,7 @@ class ContextProvisioningService:
             "graphProjects": list(self.graph_projects),
             "counts": {
                 "human": namespace_counts.get("memory", 0),
-                "code": namespace_counts.get("code", 0),
+                "material": namespace_counts.get("code", 0),
                 "resource": namespace_counts.get("resource", 0),
                 "previousDeliveries": len(previous),
                 "openRequests": len(self.repository.list_requests("open")),
@@ -360,7 +372,7 @@ class ContextProvisioningService:
                     prefix_counts.items(), key=lambda item: (-item[1], item[0])
                 )[:32]
             ],
-            "codeTypes": [dict(item) for item in inventory["codeTypes"]],
+            "materialTypes": [dict(item) for item in inventory["codeTypes"]],
             "graphSnapshot": snapshots[0] if snapshots else None,
             "graphSnapshots": snapshots,
             "resourceTypes": [dict(item) for item in inventory["resourceTypes"]],
@@ -415,7 +427,7 @@ class ContextProvisioningService:
                 code_projects=self.graph_projects,
                 resource_node_ids=self.resource_node_ids,
                 include_memory=("human" in selected_scopes or "session" in selected_scopes),
-                include_code="code" in selected_scopes,
+                include_code="material" in selected_scopes,
                 include_resources="resource" in selected_scopes,
                 limit=min(200, max(32, parsed_limit * 4)),
             )
@@ -433,14 +445,14 @@ class ContextProvisioningService:
                 terms=expanded_input_terms,
                 active_paths=sorted(active),
                 include_memory=("human" in selected_scopes or "session" in selected_scopes),
-                include_code="code" in selected_scopes,
+                include_code="material" in selected_scopes,
                 include_resources="resource" in selected_scopes,
             )
             if (
                 node["namespace"] == "memory"
                 and ("human" in selected_scopes or "session" in selected_scopes)
             )
-            or (node["namespace"] == "code" and "code" in selected_scopes)
+            or (node["namespace"] == "code" and "material" in selected_scopes)
             or (node["namespace"] in {"resource", "context"} and "resource" in selected_scopes)
         ]
         known_ids = {str(node["id"]) for node in nodes}
@@ -940,7 +952,7 @@ class ContextProvisioningService:
         if node["namespace"] == "memory":
             lookup_key = str(node["stableKey"])
         elif node["namespace"] == "code":
-            lookup_key = f"code.{str(node['id'])[:20]}"
+            lookup_key = f"material.{str(node['id'])[:20]}"
         else:
             lookup_key = f"{node['namespace']}.{str(node['stableKey'])}"
         if lookup_key in recall_scores:
@@ -980,7 +992,7 @@ class ContextProvisioningService:
         return {
             "key": lookup_key,
             "nodeId": node["id"],
-            "namespace": node["namespace"],
+            "namespace": _public_namespace(node),
             "label": sanitize_label(str(node["label"])),
             "kind": node["type"],
             "origin": node["origin"],
@@ -1137,7 +1149,7 @@ class ContextProvisioningService:
             if packet is None:
                 return None
             return {
-                "key": f"code.{str(node['id'])[:20]}",
+                "key": f"material.{str(node['id'])[:20]}",
                 "kind": node["type"],
                 "mode": "context-graph",
                 "stale": False,

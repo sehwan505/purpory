@@ -229,7 +229,7 @@ export type ContextAction = "skip" | "retrieve" | "ask"
 export type ContextProposal = {
   action: "skip" | "search" | "ask"
   query: string | null
-  scopes: Array<"human" | "resource" | "code" | "session">
+  scopes: Array<"human" | "resource" | "material" | "session">
   keywords: string[]
   reasonCode: string
   clarification: string | null

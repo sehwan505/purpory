@@ -283,7 +283,7 @@ def test_project_memory_is_shared_while_worktree_graphs_stay_separate(
     } == {"feature_handler"}
 
     search = main_service._provisioner().search(
-        "main_handler", session_id="main-agent", scopes=("code",), connect=False
+        "main_handler", session_id="main-agent", scopes=("material",), connect=False
     )
     main_service._provisioner().deliver(
         [search["candidates"][0]["nodeId"]], session_id="main-agent"
@@ -312,7 +312,7 @@ def test_retrieval_combines_selected_views_from_multiple_git_resources(
     code = service._provisioner().search(
         "secondary_handler",
         session_id="multi-resource",
-        scopes=("code",),
+        scopes=("material",),
     )
     resources = service._provisioner().search(
         "Secondary service",

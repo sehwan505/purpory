@@ -131,8 +131,8 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
   },
   graph: {
     eyebrow: "Structural intelligence",
-    title: "Code graph",
-    description: "Explore code structure, dependencies, communities, and call relationships.",
+    title: "Material graph",
+    description: "Explore structural relationships across code, documents, and other project material.",
   },
 }
 
@@ -179,12 +179,12 @@ function shortSession(id: string) {
 }
 
 function readableContextKey(key: string) {
-  const words = key.replace(/^(intent|knowledge|reference|code)\./, "").split(/[._-]+/)
+  const words = key.replace(/^(intent|knowledge|reference|material|code)\./, "").split(/[._-]+/)
   return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
 }
 
 function contextKind(item: Session["items"][number]) {
-  if (item.namespace === "code") return { label: "Code", variant: "blue" as const }
+  if (item.namespace === "code") return { label: "Material", variant: "blue" as const }
   if (item.kind === "decision") return { label: "Intent", variant: "violet" as const }
   if (item.kind === "doc-ref" || item.kind === "code-area") return { label: "Reference", variant: "teal" as const }
   return { label: "Knowledge", variant: "default" as const }
@@ -1150,7 +1150,7 @@ function GraphPanel() {
     <Card className="flex min-h-[740px] flex-col overflow-hidden">
       <CardHeader className="border-b border-line pb-5">
         <div>
-          <CardTitle>Code graph</CardTitle>
+          <CardTitle>Material graph</CardTitle>
           <CardDescription>Structural relationships from the canonical context graph.</CardDescription>
         </div>
       </CardHeader>
@@ -1902,7 +1902,7 @@ export function Dashboard() {
       icon: <AlertCircle />,
       count: requests.filter((item) => item.status === "open").length,
     },
-    { id: "graph", label: "Code graph", icon: <Network /> },
+    { id: "graph", label: "Material graph", icon: <Network /> },
   ]
   const meta = pageMeta[page]
   const openRequests = requests.filter((request) => request.status === "open")

@@ -10,7 +10,7 @@ PROMPT_VERSION = "purpory-gate-v3"
 
 MODEL_ACTIONS = frozenset({"skip", "search", "ask"})
 FINAL_ACTIONS = frozenset({"skip", "retrieve", "ask"})
-GATE_SCOPES = frozenset({"human", "resource", "code", "session"})
+GATE_SCOPES = frozenset({"human", "resource", "material", "session"})
 REASON_CODES = frozenset(
     {
         "SELF_CONTAINED",
@@ -187,6 +187,7 @@ class GateProposal:
         scopes = _string_tuple(
             raw_scopes, field="scopes", limit=len(GATE_SCOPES), item_maximum=16
         )
+        scopes = tuple(dict.fromkeys("material" if scope == "code" else scope for scope in scopes))
         unsupported_scopes = sorted(set(scopes) - GATE_SCOPES)
         if unsupported_scopes:
             raise ValueError(f"unsupported gate scopes: {', '.join(unsupported_scopes)}")
