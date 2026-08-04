@@ -321,10 +321,12 @@ def test_deliver_records_exact_context_and_deduplicates_per_session(
     assert second["omitted"] == [
         {"key": first["delivery"][0]["key"], "reason": "already-delivered"}
     ]
-    assert (
-        service.repository.session_view()[0]["items"][0]["valueHash"]
-        == first["delivery"][0]["valueHash"]
-    )
+    session = service.repository.session_view()[0]
+    assert session["items"][0]["valueHash"] == first["delivery"][0]["valueHash"]
+    assert session["items"][0]["label"] == "AuthService"
+    assert session["items"][0]["source"] == "src/auth/service.py"
+    assert "AuthService" in session["items"][0]["preview"]
+    assert session["context"]["graphProject"] == str(tmp_path)
 
 
 def test_prepare_includes_ready_context_without_public_primitives(

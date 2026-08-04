@@ -83,11 +83,35 @@ export type Injection = {
   key: string
   valueHash: string
   deliveredAt: number
+  label?: string
+  namespace?: string
+  kind?: string
+  origin?: string
+  source?: string | null
+  preview?: string | null
 }
 
 export type Session = {
   id: string
   project: string | null
+  context?: {
+    graphProject?: string
+    graphProjects?: string[]
+    resource?: {
+      resourceId?: string
+      resourceLabel?: string
+      externalIdentity?: string
+      provider?: string
+      viewId?: string
+      locator?: string
+      revision?: string | null
+      stateHash?: string | null
+      properties?: Record<string, unknown> & {
+        branch?: string | null
+        dirty?: boolean
+      }
+    } | null
+  }
   items: Injection[]
 }
 

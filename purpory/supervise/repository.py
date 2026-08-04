@@ -1257,6 +1257,7 @@ class ContextGraphRepository:
                 "provider": resource_properties.get("provider"),
                 "resourceKind": resource_properties.get("resourceKind"),
                 "resourceLabel": row["resource_label"],
+                "externalIdentity": resource_properties.get("externalIdentity"),
                 "viewId": row["view_id"],
                 "locator": str(locator.resolve()),
                 "revision": view_properties.get("revision"),
@@ -3421,6 +3422,7 @@ class ContextGraphRepository:
         delivered_value: str,
         *,
         project: str,
+        session_context: dict[str, Any] | None = None,
         delivered_at: int | None = None,
     ) -> str:
         """Record the latest rendered delivery for any canonical context node."""
@@ -3458,6 +3460,7 @@ class ContextGraphRepository:
                 label=normalized_session,
                 origin="experiential",
                 timestamp=timestamp,
+                properties=session_context,
             )
             self._upsert_edge(
                 connection,
@@ -3630,7 +3633,10 @@ class ContextGraphRepository:
                 node_type = excluded.node_type,
                 label = excluded.label,
                 origin = excluded.origin,
-                properties_json = excluded.properties_json,
+                properties_json = CASE
+                    WHEN excluded.properties_json = '{}' THEN context_nodes.properties_json
+                    ELSE excluded.properties_json
+                END,
                 set_at = excluded.set_at,
                 updated_at = excluded.updated_at
             """,
@@ -3802,12 +3808,57 @@ class ContextGraphRepository:
         query += " ORDER BY delivered_at DESC, session_id ASC, key ASC"
         with self.connect() as connection:
             rows = connection.execute(query, params).fetchall()
+            session_rows = connection.execute(
+                """
+                SELECT stable_key, project, properties_json
+                FROM context_nodes
+                WHERE namespace = 'session' AND node_type = 'session'
+                """
+            ).fetchall()
+            event_rows = connection.execute(
+                """
+                SELECT event.session_id, event.payload_json,
+                       node.namespace, node.node_type, node.label, node.source, node.origin
+                FROM context_events event
+                LEFT JOIN context_nodes node ON node.id = event.object_id
+                WHERE event.event_type = 'context.delivered'
+                ORDER BY event.id DESC
+                """
+            ).fetchall()
+
+        contexts = {
+            (str(row["stable_key"]), str(row["project"])): _json_object(row["properties_json"])
+            for row in session_rows
+        }
+        details: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in event_rows:
+            payload = _json_object(row["payload_json"])
+            key = str(payload.get("key") or "")
+            identity = (str(row["session_id"]), key)
+            if not key or identity in details:
+                continue
+            rendered = str(payload.get("rendered") or "").strip()
+            details[identity] = {
+                "label": row["label"] or key,
+                "namespace": row["namespace"],
+                "kind": row["node_type"],
+                "origin": row["origin"],
+                "source": row["source"],
+                "preview": rendered[:400].rstrip() if rendered else None,
+            }
 
         sessions: dict[str, dict[str, Any]] = {}
         for row in rows:
             entry = sessions.setdefault(
                 row["session_id"],
-                {"id": row["session_id"], "project": row["project"], "items": []},
+                {
+                    "id": row["session_id"],
+                    "project": row["project"],
+                    "context": contexts.get(
+                        (str(row["session_id"]), str(row["project"] or ""))
+                    ),
+                    "items": [],
+                },
             )
             if entry["project"] is None and row["project"] is not None:
                 entry["project"] = row["project"]
@@ -3816,6 +3867,7 @@ class ContextGraphRepository:
                     "key": row["key"],
                     "valueHash": row["value_hash"],
                     "deliveredAt": row["delivered_at"],
+                    **details.get((str(row["session_id"]), str(row["key"])), {}),
                 }
             )
         return sorted(

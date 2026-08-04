@@ -303,6 +303,29 @@ class ContextProvisioningService:
             raise ValueError("graph_project cannot be empty")
         if not self.project:
             raise ValueError("project cannot be empty")
+        binding = repository.resolve_resource_view(self.root)
+        self.session_context = {
+            "graphProject": self.graph_project,
+            "graphProjects": list(self.graph_projects),
+            "resource": (
+                {
+                    key: binding.get(key)
+                    for key in (
+                        "resourceId",
+                        "resourceLabel",
+                        "externalIdentity",
+                        "provider",
+                        "viewId",
+                        "locator",
+                        "revision",
+                        "stateHash",
+                        "properties",
+                    )
+                }
+                if binding is not None
+                else None
+            ),
+        }
 
     def catalog(self, *, session_id: str | None = None) -> dict[str, Any]:
         inventory = self.repository.retrieval_inventory(
@@ -801,6 +824,7 @@ class ContextProvisioningService:
                 delivery_key,
                 rendered,
                 project=self.project,
+                session_context=self.session_context,
             )
             candidate = candidate_by_id.get(node_id, {})
             delivery.append(
