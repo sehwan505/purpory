@@ -282,6 +282,17 @@ def test_project_memory_is_shared_while_worktree_graphs_stay_separate(
         if node["namespace"] == "code"
     } == {"feature_handler"}
 
+    search = main_service._provisioner().search(
+        "main_handler", session_id="main-agent", scopes=("code",), connect=False
+    )
+    main_service._provisioner().deliver(
+        [search["candidates"][0]["nodeId"]], session_id="main-agent"
+    )
+    session = main_service.repository.session_view(session_id="main-agent")[0]
+    assert session["context"]["resource"]["externalIdentity"].endswith("repository/.git")
+    assert session["context"]["resource"]["locator"] == str(repository.resolve())
+    assert session["context"]["resource"]["properties"]["branch"] == "main"
+
 
 def test_retrieval_combines_selected_views_from_multiple_git_resources(
     tmp_path: Path,

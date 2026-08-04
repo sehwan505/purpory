@@ -178,6 +178,18 @@ function shortSession(id: string) {
   return id.length > 24 ? `${id.slice(0, 11)}…${id.slice(-8)}` : id
 }
 
+function readableContextKey(key: string) {
+  const words = key.replace(/^(intent|knowledge|reference|code)\./, "").split(/[._-]+/)
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+}
+
+function contextKind(item: Session["items"][number]) {
+  if (item.namespace === "code") return { label: "Code", variant: "blue" as const }
+  if (item.kind === "decision") return { label: "Intent", variant: "violet" as const }
+  if (item.kind === "doc-ref" || item.kind === "code-area") return { label: "Reference", variant: "teal" as const }
+  return { label: "Knowledge", variant: "default" as const }
+}
+
 function actionVariant(action: ContextAction) {
   if (action === "retrieve") return "success" as const
   if (action === "ask") return "warning" as const
@@ -553,48 +565,112 @@ function SessionList({ sessions }: { sessions: Session[] }) {
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>Session delivery</CardTitle>
-          <CardDescription>Exactly what each agent received, pinned to its content hash.</CardDescription>
+          <CardTitle>Session context map</CardTitle>
+          <CardDescription>Which repository view each agent saw and the human-readable context it carried away.</CardDescription>
         </div>
-        <Badge variant="success"><CircleDot className="mr-1 size-2.5" /> Live</Badge>
+        <Badge variant="success"><CircleDot className="mr-1 size-2.5" /> Provenance</Badge>
       </CardHeader>
       <CardContent>
-        <div className="space-y-2">
-          {sessions.map((session) => {
+        <div className="space-y-3">
+          {sessions.map((session, index) => {
             const latest = session.items.length
               ? Math.max(...session.items.map((item) => item.deliveredAt))
               : null
+            const resource = session.context?.resource
+            const branch = typeof resource?.properties?.branch === "string"
+              ? resource.properties.branch
+              : null
+            const agent = session.id.split(":", 1)[0]
             return (
-              <article key={session.id} className="surface-row rounded-[13px] px-4 py-4">
-                <div className="flex items-start justify-between gap-5">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="size-1.5 shrink-0 rounded-full bg-positive" />
-                      <p className="truncate font-mono text-xs font-medium text-ink">{shortSession(session.id)}</p>
+              <details key={session.id} open={index === 0} className="group overflow-hidden rounded-[16px] border border-line bg-panel-raised/45">
+                <summary className="cursor-pointer list-none px-5 py-4 [&::-webkit-details-marker]:hidden">
+                  <div className="flex items-start justify-between gap-5">
+                    <div className="flex min-w-0 items-start gap-3.5">
+                      <div className="grid size-10 shrink-0 place-items-center rounded-[12px] border border-accent-blue/20 bg-accent-blue-soft text-accent-blue">
+                        <GitFork className="size-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-sm font-semibold text-ink">
+                            {resource?.resourceLabel ?? "Legacy session"}
+                          </p>
+                          {branch && <Badge variant="blue">{branch}</Badge>}
+                          {resource?.properties?.dirty === true && <Badge variant="warning">Dirty</Badge>}
+                        </div>
+                        <p className="mt-1 truncate font-mono text-[10px] text-dim">
+                          {resource?.externalIdentity ?? session.project ?? "Repository view was not recorded"}
+                        </p>
+                      </div>
                     </div>
-                    <p className="ml-3.5 mt-1.5 text-[11px] text-muted">
-                      {session.project ?? "Unscoped session"} · {session.items.length} delivered
-                    </p>
+                    <div className="flex shrink-0 items-center gap-3 text-right">
+                      <div>
+                        <p className="mono-number text-lg font-semibold text-ink">{session.items.length}</p>
+                        <p className="text-[10px] text-dim">context items</p>
+                      </div>
+                      <ChevronRight className="size-4 text-dim transition-transform group-open:rotate-90" />
+                    </div>
                   </div>
-                  <time className="shrink-0 text-[11px] text-dim">{latest ? relativeTime(latest) : "No deliveries"}</time>
+
+                  <div className="mt-4 grid items-center gap-2 sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
+                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
+                      <span className="fine-label block">Repository view</span>
+                      <span className="mt-1 block truncate text-xs font-medium text-ink">{branch ?? resource?.resourceLabel ?? "Unknown"}</span>
+                    </div>
+                    <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
+                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
+                      <span className="fine-label block">Agent session</span>
+                      <span className="mt-1 block truncate text-xs font-medium capitalize text-ink">{agent} · {shortSession(session.id)}</span>
+                    </div>
+                    <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
+                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
+                      <span className="fine-label block">Last delivery</span>
+                      <span className="mt-1 block text-xs font-medium text-ink">{latest ? relativeTime(latest) : "No deliveries"}</span>
+                    </div>
+                  </div>
+                </summary>
+
+                <div className="border-t border-line bg-panel px-5 py-5">
+                  {resource?.locator && (
+                    <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-[10px] bg-canvas/70 px-3 py-2 font-mono text-[10px] text-muted">
+                      <span className="truncate">{resource.locator}</span>
+                      {resource.revision && <span className="text-dim">commit {resource.revision.slice(0, 10)}</span>}
+                    </div>
+                  )}
+                  <div className="grid gap-2.5 xl:grid-cols-2">
+                    {session.items.map((item) => {
+                      const kind = contextKind(item)
+                      const label = item.label && item.label !== item.key
+                        ? item.label
+                        : readableContextKey(item.key)
+                      return (
+                        <article key={item.key} className="rounded-[12px] border border-line bg-canvas/45 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Badge variant={kind.variant}>{kind.label}</Badge>
+                                <time className="text-[10px] text-dim">{relativeTime(item.deliveredAt)}</time>
+                              </div>
+                              <h4 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-5 text-ink">{label}</h4>
+                            </div>
+                            <span title={item.valueHash} className="shrink-0 font-mono text-[9px] text-dim">
+                              {item.valueHash.slice(0, 8)}
+                            </span>
+                          </div>
+                          {item.preview && (
+                            <p className="mt-2.5 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-muted">
+                              {item.preview}
+                            </p>
+                          )}
+                          <div className="mt-3 flex items-center justify-between gap-3 border-t border-line/70 pt-2.5">
+                            <span className="truncate font-mono text-[9px] text-dim">{item.source ?? item.key}</span>
+                            <span className="shrink-0 text-[9px] text-dim">exact delivery</span>
+                          </div>
+                        </article>
+                      )
+                    })}
+                  </div>
                 </div>
-                {!!session.items.length && (
-                  <div className="mt-3.5 flex flex-wrap gap-1.5 border-t border-line/70 pt-3">
-                    {session.items.slice(0, 8).map((item) => (
-                      <span
-                        key={item.key}
-                        title={item.valueHash}
-                        className="rounded-md bg-signal-soft px-2 py-1 font-mono text-[10px] text-signal"
-                      >
-                        {item.key}
-                      </span>
-                    ))}
-                    {session.items.length > 8 && (
-                      <span className="px-2 py-1 text-[10px] text-dim">+{session.items.length - 8} more</span>
-                    )}
-                  </div>
-                )}
-              </article>
+              </details>
             )
           })}
         </div>
