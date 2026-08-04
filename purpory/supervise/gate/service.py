@@ -48,7 +48,7 @@ def _fallback_proposal(request: GateRequest) -> GateProposal:
         {
             "action": "search",
             "query": request.message,
-            "scopes": ["human", "resource", "code", "session"],
+            "scopes": ["human", "resource", "material", "session"],
             "keywords": [],
             "reasonCode": "GATE_UNAVAILABLE",
             "clarification": None,
@@ -150,7 +150,7 @@ class GatewayService:
             search_scopes = (
                 proposal.scopes
                 if proposal.action == "search"
-                else ("human", "resource", "code", "session")
+                else ("human", "resource", "material", "session")
             )
             search_result = provisioner.search(
                 proposal.query or message,

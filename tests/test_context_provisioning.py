@@ -69,7 +69,7 @@ def test_catalog_is_compact_and_never_copies_memory_values(tmp_path: Path) -> No
     catalog = service._provisioner().catalog(session_id="agent-a")
 
     assert catalog["counts"]["human"] == 1
-    assert catalog["counts"]["code"] == 3
+    assert catalog["counts"]["material"] == 3
     assert catalog["topicNamespaces"] == [{"name": "decision", "count": 1}]
     assert catalog["graphSnapshot"]["nodeCount"] == 3
     assert "Access tokens" not in json.dumps(catalog)
@@ -88,9 +88,11 @@ def test_search_connects_distinct_concepts_through_the_context_graph(
     )
 
     labels = [candidate["label"] for candidate in result["candidates"]]
+    assert result["scopes"] == ["material"]
     assert "AuthService" in labels
     assert "DatabasePool" in labels
     assert result["connections"][0]["found"] is True
+    assert {node["namespace"] for node in result["connections"][0]["nodes"]} == {"material"}
     connection_labels = [node["label"] for node in result["connections"][0]["nodes"]]
     assert connection_labels in (
         ["AuthService", "TokenRepository", "DatabasePool"],
@@ -106,7 +108,7 @@ def test_search_uses_only_terms_present_in_the_context_vocabulary(
     result = service._provisioner().search(
         "인증과 데이터베이스 연결",
         session_id="agent-a",
-        scopes=["code"],
+        scopes=["material"],
         keywords=["auth", "database"],
         connect=False,
     )
@@ -129,7 +131,7 @@ def test_generic_service_term_does_not_select_unrelated_context(tmp_path: Path) 
     result = service._provisioner().search(
         "service",
         session_id="agent-a",
-        scopes=["code"],
+        scopes=["material"],
         connect=False,
     )
 
@@ -151,7 +153,7 @@ def test_search_expands_korean_developer_terms_without_an_llm(
     result = service._provisioner().search(
         "인증과 데이터베이스를 찾아줘",
         session_id="agent-a",
-        scopes=["code"],
+        scopes=["material"],
         connect=False,
     )
 
@@ -269,7 +271,7 @@ def test_search_result_covers_distinct_terms_before_filling_by_score(
     result = service._provisioner().search(
         "auth token database",
         session_id="agent-a",
-        scopes=["human", "code"],
+        scopes=["human", "material"],
         limit=3,
         connect=False,
     )
@@ -281,13 +283,15 @@ def test_search_result_covers_distinct_terms_before_filling_by_score(
     }
     assert {item["namespace"] for item in result["candidates"]} == {
         "memory",
-        "code",
+        "material",
     }
 
 
 def test_expand_is_relation_filtered_and_bounded(tmp_path: Path) -> None:
     service = _service_with_graph(tmp_path)
-    search = service._provisioner().search("AuthService", session_id="agent-a", scopes=["code"], connect=False)
+    search = service._provisioner().search(
+        "AuthService", session_id="agent-a", scopes=["material"], connect=False
+    )
     auth_id = next(
         candidate["nodeId"]
         for candidate in search["candidates"]
@@ -308,7 +312,9 @@ def test_deliver_records_exact_context_and_deduplicates_per_session(
     tmp_path: Path,
 ) -> None:
     service = _service_with_graph(tmp_path)
-    search = service._provisioner().search("AuthService", session_id="agent-a", scopes=["code"], connect=False)
+    search = service._provisioner().search(
+        "AuthService", session_id="agent-a", scopes=["material"], connect=False
+    )
     auth_id = search["candidates"][0]["nodeId"]
 
     first = service._provisioner().deliver([auth_id], session_id="agent-a", token_budget=512)
@@ -336,13 +342,13 @@ def test_prepare_includes_ready_context_without_public_primitives(
 
     class Provider:
         def propose(self, request: GateRequest) -> ProviderResult:
-            assert request.model_payload()["contextCatalog"]["counts"]["code"] == 3
+            assert request.model_payload()["contextCatalog"]["counts"]["material"] == 3
             return ProviderResult(
                 proposal=GateProposal.from_mapping(
                     {
                         "action": "search",
                         "query": "auth database",
-                        "scopes": ["code"],
+                        "scopes": ["material"],
                         "keywords": ["auth", "database"],
                         "reasonCode": "CODE_CONTEXT_REQUIRED",
                         "clarification": None,
@@ -363,7 +369,7 @@ def test_prepare_includes_ready_context_without_public_primitives(
     )
 
     assert result["action"] == "retrieve"
-    assert result["context"]["manifest"]["counts"]["code"] == 3
+    assert result["context"]["manifest"]["counts"]["material"] == 3
     assert result["context"]["search"]["connections"][0]["found"] is True
     assert result["context"]["rendered"]
     assert "continuation" not in result["context"]

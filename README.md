@@ -54,7 +54,7 @@ The dashboard can also create explicit Project contexts and attach Resources to 
 intent, knowledge, Resources, and Resource Views are first-class nodes in the same context graph;
 provider registry tables remain operational projections. Git is the first resource provider: a
 remote URL identifies one repository Resource, while each local checkout or worktree is a separate
-Resource View with its own revision and code graph. One Project may select Views from several
+Resource View with its own revision and material graph. One Project may select Views from several
 Resources, and one Resource may participate in several Projects. This lets agents combine durable
 project decisions with multiple current materials without allowing one worktree's structural
 snapshot to overwrite another. The model is provider-neutral and can also represent document
