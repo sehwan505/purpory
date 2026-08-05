@@ -154,11 +154,45 @@ class GatewayService:
                 previous_deliveries=previous,
             )
             if search_result["candidates"]:
+                delivery_candidates = list(search_result["candidates"])
+                seen_ids = {item["nodeId"] for item in delivery_candidates}
+                previously_delivered_ids = self.repository.session_delivered_node_ids(session_id)
+                graph_candidates = [
+                    (
+                        node,
+                        ["graph-bridge"],
+                    )
+                    for connection in search_result["connections"]
+                    for node in connection["nodes"]
+                ] + [
+                    (
+                        lead["node"],
+                        [
+                            "graph-lead",
+                            f"relation:{lead['via']['relation']}",
+                        ],
+                    )
+                    for lead in search_result["exploration"]["frontier"]
+                ]
+                for node, signals in graph_candidates:
+                    node_id = str(node["id"])
+                    if node_id in seen_ids or node_id in previously_delivered_ids:
+                        continue
+                    delivery_candidates.append(
+                        {
+                            "nodeId": node_id,
+                            "score": None,
+                            "signals": signals,
+                        }
+                    )
+                    seen_ids.add(node_id)
+                    if len(delivery_candidates) >= 32:
+                        break
                 delivery_result = provisioner.deliver(
-                    [candidate["nodeId"] for candidate in search_result["candidates"]],
+                    [candidate["nodeId"] for candidate in delivery_candidates],
                     session_id=session_id,
                     token_budget=token_budget,
-                    candidates=search_result["candidates"],
+                    candidates=delivery_candidates,
                 )
             delivery = delivery_result["delivery"]
             omitted = delivery_result["omitted"]

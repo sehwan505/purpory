@@ -34,6 +34,12 @@ def _service_with_graph(tmp_path: Path) -> ContextService:
                         "source_file": "src/database/pool.py",
                         "community": 2,
                     },
+                    {
+                        "id": "typing-any",
+                        "label": "Any",
+                        "type": "code",
+                        "community": 1,
+                    },
                 ],
                 "links": [
                     {
@@ -46,6 +52,12 @@ def _service_with_graph(tmp_path: Path) -> ContextService:
                         "source": "token-repository",
                         "target": "database-pool",
                         "relation": "uses",
+                        "confidence": "EXTRACTED",
+                    },
+                    {
+                        "source": "auth-service",
+                        "target": "typing-any",
+                        "relation": "references",
                         "confidence": "EXTRACTED",
                     },
                 ],
@@ -69,9 +81,9 @@ def test_catalog_is_compact_and_never_copies_memory_values(tmp_path: Path) -> No
     catalog = service._provisioner().catalog(session_id="agent-a")
 
     assert catalog["counts"]["human"] == 1
-    assert catalog["counts"]["material"] == 3
+    assert catalog["counts"]["material"] == 4
     assert catalog["topicNamespaces"] == [{"name": "decision", "count": 1}]
-    assert catalog["graphSnapshot"]["nodeCount"] == 3
+    assert catalog["graphSnapshot"]["nodeCount"] == 4
     assert "Access tokens" not in json.dumps(catalog)
 
 
@@ -136,6 +148,50 @@ def test_generic_service_term_does_not_select_unrelated_context(tmp_path: Path) 
     )
 
     assert result["candidates"] == []
+
+
+def test_search_returns_grounded_graph_frontier_without_forcing_a_match(
+    tmp_path: Path,
+) -> None:
+    service = _service_with_graph(tmp_path)
+    provisioner = service._provisioner()
+
+    found = provisioner.search(
+        "AuthService",
+        session_id="agent-a",
+        scopes=["material"],
+        connect=False,
+    )
+    missed = provisioner.search(
+        "missing deployment policy",
+        session_id="agent-a",
+        scopes=["material"],
+        connect=False,
+    )
+
+    frontier = found["exploration"]
+    assert frontier["status"] == "continue"
+    assert frontier["hasMore"] is True
+    assert frontier["frontier"][0]["node"]["label"] == "TokenRepository"
+    assert {item["node"]["label"] for item in frontier["frontier"]} == {"TokenRepository"}
+    assert frontier["frontier"][0]["via"]["relation"] == "calls"
+    assert frontier["frontier"][0]["provenance"] == "graph-lead"
+    assert missed["candidates"] == []
+    assert missed["exploration"]["status"] == "incomplete"
+    assert missed["exploration"]["hasMore"] is False
+    assert missed["exploration"]["frontier"] == []
+    assert missed["exploration"]["gaps"]
+
+    lead_id = frontier["frontier"][0]["node"]["id"]
+    provisioner.deliver([lead_id], session_id="agent-a", token_budget=512)
+    repeated = provisioner.search(
+        "AuthService",
+        session_id="agent-a",
+        scopes=["material"],
+        connect=False,
+    )
+    assert repeated["exploration"]["frontier"] == []
+    assert repeated["exploration"]["hasMore"] is False
 
 
 def test_context_steps_are_internal_to_prepare(tmp_path: Path) -> None:
@@ -306,6 +362,8 @@ def test_expand_is_relation_filtered_and_bounded(tmp_path: Path) -> None:
     }
     assert [edge["relation"] for edge in expanded["edges"]] == ["calls"]
     assert expanded["truncated"] is False
+    assert expanded["exploration"]["frontier"][0]["node"]["label"] == "DatabasePool"
+    assert expanded["exploration"]["frontier"][0]["via"]["relation"] == "uses"
 
 
 def test_deliver_records_exact_context_and_deduplicates_per_session(
@@ -342,7 +400,7 @@ def test_prepare_includes_ready_context_without_public_primitives(
 
     class Provider:
         def propose(self, request: GateRequest) -> ProviderResult:
-            assert request.model_payload()["contextCatalog"]["counts"]["material"] == 3
+            assert request.model_payload()["contextCatalog"]["counts"]["material"] == 4
             return ProviderResult(
                 proposal=GateProposal.from_mapping(
                     {
@@ -369,10 +427,17 @@ def test_prepare_includes_ready_context_without_public_primitives(
     )
 
     assert result["action"] == "retrieve"
-    assert result["context"]["manifest"]["counts"]["material"] == 3
+    assert result["context"]["manifest"]["counts"]["material"] == 4
     assert result["context"]["search"]["connections"][0]["found"] is True
     assert result["context"]["rendered"]
-    assert "continuation" not in result["context"]
+    bridge = next(item for item in result["delivery"] if item["signals"] == ["graph-bridge"])
+    assert bridge["nodeId"] not in {
+        candidate["nodeId"] for candidate in result["context"]["search"]["candidates"]
+    }
+    assert "TokenRepository" in bridge["rendered"]
+    assert bridge["rendered"].startswith(
+        "[retrieval=graph-bridge; exploratory graph context]"
+    )
 
 
 def test_view_reports_explicitly_imported_structural_graph(

@@ -15,7 +15,7 @@ from purpory.supervise.repository import ContextGraphRepository, stable_json, va
 from purpory.supervise.recall import recall_summary
 from purpory.supervise.resolve import rendered_injection, resolve_topic
 
-CONTEXT_SCHEMA_VERSION = 1
+CONTEXT_SCHEMA_VERSION = 2
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[가-힣]{2,}")
 SEARCH_STOPWORDS = frozenset(
     {
@@ -148,6 +148,7 @@ MAX_EXPAND_NODES = 200
 MAX_EXPAND_EDGES = 1_000
 MAX_PATH_VISITS = 2_000
 MAX_PATH_FRONTIER = 400
+MAX_FRONTIER_PREVIEW = 4
 TRUNCATION_MARKER = "\n\n[truncated by Purpory context budget]\n"
 
 
@@ -521,9 +522,31 @@ class ContextProvisioningService:
             active_path=active_ranked,
         )
         candidates = self._select_candidates(fused, terms, parsed_limit)
-        self._add_relation_counts(candidates)
+        candidate_edges = self._add_relation_counts(candidates)
         connections = (
             self._connect_candidates(candidates, terms) if connect and len(candidates) > 1 else []
+        )
+        connected_ids = {
+            str(node["id"]) for connection in connections for node in connection["nodes"]
+        }
+        covered_terms = {term for candidate in candidates for term in candidate["matchedTerms"]}
+        gaps = [
+            {
+                "input": term,
+                "terms": expansion_by_input.get(term, [term]),
+            }
+            for term in raw_input_terms
+            if term not in SEARCH_STOPWORDS
+            and not covered_terms.intersection(expansion_by_input.get(term, [term]))
+        ]
+        exploration = self._exploration(
+            [candidate["nodeId"] for candidate in candidates],
+            excluded_ids={candidate["nodeId"] for candidate in candidates}
+            | connected_ids
+            | self.repository.session_delivered_node_ids(session_id),
+            gaps=gaps,
+            limit=min(parsed_limit, MAX_FRONTIER_PREVIEW),
+            adjacent=candidate_edges,
         )
         return {
             "schemaVersion": CONTEXT_SCHEMA_VERSION,
@@ -554,6 +577,7 @@ class ContextProvisioningService:
             },
             "candidates": candidates,
             "connections": connections,
+            "exploration": exploration,
             "hasEvidence": bool(candidates),
         }
 
@@ -565,6 +589,7 @@ class ContextProvisioningService:
         relations: Sequence[str] = (),
         node_limit: int = 100,
         include_experiential: bool = False,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         seeds = _clean_strings(node_ids, field="node_ids", maximum_items=32, maximum_chars=128)
         if not seeds:
@@ -645,6 +670,12 @@ class ContextProvisioningService:
                 nodes[loaded["id"]] = loaded
                 next_frontier.append(loaded["id"])
             frontier = sorted(set(next_frontier))
+        exploration = self._exploration(
+            frontier or list(nodes),
+            excluded_ids=set(nodes)
+            | (self.repository.session_delivered_node_ids(session_id) if session_id else set()),
+            limit=min(parsed_limit, MAX_FRONTIER_PREVIEW),
+        )
         return {
             "schemaVersion": CONTEXT_SCHEMA_VERSION,
             "seedNodeIds": list(seeds),
@@ -654,6 +685,7 @@ class ContextProvisioningService:
             "memoryHistory": memory_history,
             "needsReviews": needs_reviews,
             "truncated": frontier_truncated or len(nodes) >= parsed_limit,
+            "exploration": exploration,
         }
 
     def path(
@@ -664,6 +696,7 @@ class ContextProvisioningService:
         max_depth: int = 4,
         relations: Sequence[str] = (),
         include_experiential: bool = False,
+        explore: bool = True,
     ) -> dict[str, Any]:
         source = source_id.strip()
         target = target_id.strip()
@@ -686,6 +719,11 @@ class ContextProvisioningService:
                 "edges": [],
                 "hops": 0,
                 "truncated": False,
+                "exploration": self._exploration(
+                    [source], excluded_ids={source}, limit=MAX_FRONTIER_PREVIEW
+                )
+                if explore
+                else None,
             }
         endpoints = self.repository.get_context_nodes([source, target])
         if len(endpoints) != 2 or any(not self._visible(node) for node in endpoints):
@@ -741,6 +779,13 @@ class ContextProvisioningService:
                 "edges": [],
                 "hops": None,
                 "truncated": truncated,
+                "exploration": self._exploration(
+                    [source, target],
+                    excluded_ids={source, target},
+                    limit=MAX_FRONTIER_PREVIEW,
+                )
+                if explore
+                else None,
             }
 
         node_ids = [target]
@@ -757,7 +802,7 @@ class ContextProvisioningService:
         node_ids.reverse()
         path_edges.reverse()
         path_nodes = {node["id"]: node for node in self.repository.get_context_nodes(node_ids)}
-        return {
+        result = {
             "schemaVersion": CONTEXT_SCHEMA_VERSION,
             "found": True,
             "nodes": [_public_node(path_nodes[node_id]) for node_id in node_ids],
@@ -765,6 +810,11 @@ class ContextProvisioningService:
             "hops": len(path_edges),
             "truncated": truncated,
         }
+        if explore:
+            result["exploration"] = self._exploration(
+                [target], excluded_ids=set(node_ids), limit=MAX_FRONTIER_PREVIEW
+            )
+        return result
 
     def deliver(
         self,
@@ -800,6 +850,7 @@ class ContextProvisioningService:
             if prepared is None:
                 omitted.append({"nodeId": node_id, "reason": "unsupported"})
                 continue
+            candidate = candidate_by_id.get(node_id, {})
             needs_reviews: list[dict[str, Any]] = []
             if node["namespace"] == "memory":
                 self.repository.record_memory_usage(node_id, event="selected")
@@ -808,7 +859,18 @@ class ContextProvisioningService:
                     status="open",
                     key=str(node["stableKey"]),
                 )
+            signals = candidate.get("signals", [])
+            graph_signals = [
+                sanitize_label(str(signal))
+                for signal in signals
+                if str(signal).startswith(("graph-", "relation:"))
+            ]
             rendered = prepared["rendered"]
+            if graph_signals:
+                rendered = (
+                    f"[retrieval={','.join(graph_signals)}; exploratory graph context]\n\n"
+                    f"{rendered}"
+                )
             delivery_key = prepared["key"]
             rendered_hash = value_hash(rendered)
             if delivered_hashes.get(delivery_key) == rendered_hash:
@@ -838,7 +900,6 @@ class ContextProvisioningService:
                 project=self.project,
                 session_context=self.session_context,
             )
-            candidate = candidate_by_id.get(node_id, {})
             delivery.append(
                 {
                     "nodeId": node_id,
@@ -849,7 +910,7 @@ class ContextProvisioningService:
                     "stale": prepared["stale"],
                     "truncated": truncated,
                     "score": candidate.get("score"),
-                    "signals": candidate.get("signals", []),
+                    "signals": signals,
                     "estimatedTokens": tokens,
                     "valueHash": digest,
                     "rendered": rendered,
@@ -1063,9 +1124,9 @@ class ContextProvisioningService:
                 )
         return scores
 
-    def _add_relation_counts(self, candidates: list[dict[str, Any]]) -> None:
+    def _add_relation_counts(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not candidates:
-            return
+            return []
         edges = self.repository.adjacent_context_edges(
             [candidate["nodeId"] for candidate in candidates],
             limit=MAX_EXPAND_EDGES,
@@ -1076,6 +1137,141 @@ class ContextProvisioningService:
             counts[edge["targetId"]] += 1
         for candidate in candidates:
             candidate["relationCount"] = counts[candidate["nodeId"]]
+        return edges
+
+    def _exploration(
+        self,
+        anchor_ids: Sequence[str],
+        *,
+        excluded_ids: set[str],
+        gaps: Sequence[dict[str, Any]] = (),
+        limit: int,
+        adjacent: Sequence[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        anchors = list(dict.fromkeys(anchor_ids))
+        if not anchors:
+            return {
+                "status": "incomplete" if gaps else "complete",
+                "gaps": list(gaps),
+                "frontier": [],
+                "hasMore": False,
+                "next": [],
+            }
+
+        edges = (
+            list(adjacent)
+            if adjacent is not None
+            else self.repository.adjacent_context_edges(anchors, limit=max(64, limit * 16))
+        )
+        anchor_set = set(anchors)
+        by_neighbor: dict[str, dict[str, Any]] = {}
+        truncated = False
+        for edge in edges:
+            truncated = truncated or bool(edge.get("frontierTruncated"))
+            if edge["origin"] == "experiential":
+                continue
+            source = edge["source"]
+            target = edge["target"]
+            source_is_anchor = source["id"] in anchor_set
+            target_is_anchor = target["id"] in anchor_set
+            if source_is_anchor == target_is_anchor:
+                continue
+            anchor = source if source_is_anchor else target
+            neighbor = target if source_is_anchor else source
+            if neighbor["id"] in excluded_ids or not self._visible(neighbor):
+                continue
+            entry = by_neighbor.setdefault(
+                neighbor["id"],
+                {"anchors": set(), "edges": []},
+            )
+            entry["anchors"].add(anchor["id"])
+            entry["edges"].append(edge)
+
+        nodes = {node["id"]: node for node in self.repository.get_context_nodes(list(by_neighbor))}
+        ranked: list[tuple[tuple[Any, ...], str, dict[str, Any]]] = []
+        for node_id, entry in by_neighbor.items():
+            node = nodes.get(node_id)
+            if node is None:
+                continue
+            if node["origin"] not in {"human", "structural"}:
+                continue
+            if node["namespace"] == "code" and not node.get("source"):
+                continue
+            edge = min(
+                entry["edges"],
+                key=lambda item: (
+                    item.get("confidence") != "EXTRACTED",
+                    -float(item.get("weight") or 0),
+                    str(item["relation"]),
+                    str(item["id"]),
+                ),
+            )
+            ranked.append(
+                (
+                    (
+                        edge.get("confidence") != "EXTRACTED",
+                        -len(entry["anchors"]),
+                        -float(edge.get("weight") or 0),
+                        str(edge["relation"]),
+                        str(node["stableKey"]),
+                    ),
+                    node_id,
+                    edge,
+                )
+            )
+        ranked.sort(key=lambda item: item[0])
+
+        # Preserve relation diversity before taking more nodes from a large
+        # structural fan-out such as `contains`.
+        selected: list[tuple[tuple[Any, ...], str, dict[str, Any]]] = []
+        seen_relations: set[str] = set()
+        for item in ranked:
+            relation = str(item[2]["relation"])
+            if relation not in seen_relations:
+                selected.append(item)
+                seen_relations.add(relation)
+            if len(selected) >= limit:
+                break
+        if len(selected) < limit:
+            selected_ids = {item[1] for item in selected}
+            selected.extend(item for item in ranked if item[1] not in selected_ids)
+            selected = selected[:limit]
+
+        frontier = []
+        for _, node_id, edge in selected:
+            node = nodes[node_id]
+            preview = None
+            if node.get("value"):
+                preview = sanitize_label(str(node["value"]).replace("\n", " ").strip()[:240])
+            frontier.append(
+                {
+                    "node": _public_node(node),
+                    "via": _public_edge(edge),
+                    "fromNodeIds": sorted(by_neighbor[node_id]["anchors"]),
+                    "preview": preview,
+                    "provenance": "graph-lead",
+                }
+            )
+
+        has_more = bool(frontier)
+        next_actions: list[dict[str, Any]] = []
+        if gaps:
+            next_actions.append({"action": "refine-search", "gaps": list(gaps)})
+        if frontier:
+            next_actions.append(
+                {
+                    "action": "expand",
+                    "nodeIds": [item["node"]["id"] for item in frontier],
+                }
+            )
+        return {
+            "status": "continue" if has_more else "incomplete" if gaps else "complete",
+            "gaps": list(gaps),
+            "frontier": frontier,
+            "hasMore": has_more,
+            "frontierTruncated": truncated or len(ranked) > len(frontier),
+            "next": next_actions,
+        }
 
     @staticmethod
     def _select_candidates(
@@ -1138,6 +1334,7 @@ class ContextProvisioningService:
                 target["nodeId"],
                 max_depth=3,
                 include_experiential=False,
+                explore=False,
             )
             if result["found"]:
                 connections.append(result)

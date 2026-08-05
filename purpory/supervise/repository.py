@@ -3900,6 +3900,23 @@ class ContextGraphRepository:
             ).fetchall()
         return {str(row["key"]): str(row["value_hash"]) for row in rows}
 
+    def session_delivered_node_ids(self, session_id: str) -> set[str]:
+        normalized = session_id.strip()
+        if not normalized:
+            raise ValueError("session_id cannot be empty")
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT object_id
+                FROM context_events
+                WHERE session_id = ?
+                  AND event_type = 'context.delivered'
+                  AND object_id IS NOT NULL
+                """,
+                (normalized,),
+            ).fetchall()
+        return {str(row["object_id"]) for row in rows}
+
     def create_request(
         self,
         session_id: str,
