@@ -182,7 +182,7 @@ def test_direct_ask_records_a_deduplicated_gap(tmp_path: Path) -> None:
     assert len(service.requests(status="open")) == 1
 
 
-def test_direct_ask_searches_memory_before_interrupting_user(tmp_path: Path) -> None:
+def test_direct_ask_never_injects_search_results(tmp_path: Path) -> None:
     provider = StubGateProvider(
         _proposal(
             "ask",
@@ -204,10 +204,11 @@ def test_direct_ask_searches_memory_before_interrupting_user(tmp_path: Path) -> 
     result = service.prepare("What is Purpory's ultimate product goal?", session_id="session-a")
 
     assert result["proposal"]["action"] == "ask"
-    assert result["action"] == "retrieve"
-    assert [item["key"] for item in result["delivery"]] == ["intent.product.ultimate"]
-    assert result["requestId"] is None
-    assert result["clarification"] is None
+    assert result["action"] == "ask"
+    assert result["delivery"] == []
+    assert result["context"]["search"] is None
+    assert result["requestId"] is not None
+    assert result["clarification"] == "What goal do you mean?"
 
 
 def test_scope_alone_never_selects_an_unrelated_human_topic(tmp_path: Path) -> None:

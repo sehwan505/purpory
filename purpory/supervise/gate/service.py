@@ -142,20 +142,13 @@ class GatewayService:
         }
         if proposal.action == "skip":
             final_action = "skip"
+        elif proposal.action == "ask":
+            final_action = "ask"
         else:
-            # ASK is only a proposal that user input may be required. Search
-            # first because the missing target or constraint may already be
-            # present in durable project memory. This keeps the small gate
-            # model from manufacturing interruptions when Purpory has evidence.
-            search_scopes = (
-                proposal.scopes
-                if proposal.action == "search"
-                else ("human", "resource", "material", "session")
-            )
             search_result = provisioner.search(
                 proposal.query or message,
                 session_id=session_id,
-                scopes=search_scopes,
+                scopes=proposal.scopes,
                 keywords=proposal.keywords,
                 active_paths=active_paths,
                 previous_deliveries=previous,
@@ -173,8 +166,6 @@ class GatewayService:
                 final_action = "retrieve"
             elif any(item.get("reason") == "already-delivered" for item in omitted):
                 final_action = "skip"
-            elif proposal.action == "ask":
-                final_action = "ask"
             elif proposal.reason_code == "GATE_UNAVAILABLE":
                 # The prompt hook must remain useful before the optional model
                 # is installed. Retrieval and auditing still run, but a fallback
