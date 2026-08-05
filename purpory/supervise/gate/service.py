@@ -142,30 +142,57 @@ class GatewayService:
         }
         if proposal.action == "skip":
             final_action = "skip"
+        elif proposal.action == "ask":
+            final_action = "ask"
         else:
-            # ASK is only a proposal that user input may be required. Search
-            # first because the missing target or constraint may already be
-            # present in durable project memory. This keeps the small gate
-            # model from manufacturing interruptions when Purpory has evidence.
-            search_scopes = (
-                proposal.scopes
-                if proposal.action == "search"
-                else ("human", "resource", "material", "session")
-            )
             search_result = provisioner.search(
                 proposal.query or message,
                 session_id=session_id,
-                scopes=search_scopes,
+                scopes=proposal.scopes,
                 keywords=proposal.keywords,
                 active_paths=active_paths,
                 previous_deliveries=previous,
             )
             if search_result["candidates"]:
+                delivery_candidates = list(search_result["candidates"])
+                seen_ids = {item["nodeId"] for item in delivery_candidates}
+                previously_delivered_ids = self.repository.session_delivered_node_ids(session_id)
+                graph_candidates = [
+                    (
+                        node,
+                        ["graph-bridge"],
+                    )
+                    for connection in search_result["connections"]
+                    for node in connection["nodes"]
+                ] + [
+                    (
+                        lead["node"],
+                        [
+                            "graph-lead",
+                            f"relation:{lead['via']['relation']}",
+                        ],
+                    )
+                    for lead in search_result["exploration"]["frontier"]
+                ]
+                for node, signals in graph_candidates:
+                    node_id = str(node["id"])
+                    if node_id in seen_ids or node_id in previously_delivered_ids:
+                        continue
+                    delivery_candidates.append(
+                        {
+                            "nodeId": node_id,
+                            "score": None,
+                            "signals": signals,
+                        }
+                    )
+                    seen_ids.add(node_id)
+                    if len(delivery_candidates) >= 32:
+                        break
                 delivery_result = provisioner.deliver(
-                    [candidate["nodeId"] for candidate in search_result["candidates"]],
+                    [candidate["nodeId"] for candidate in delivery_candidates],
                     session_id=session_id,
                     token_budget=token_budget,
-                    candidates=search_result["candidates"],
+                    candidates=delivery_candidates,
                 )
             delivery = delivery_result["delivery"]
             omitted = delivery_result["omitted"]
@@ -173,8 +200,6 @@ class GatewayService:
                 final_action = "retrieve"
             elif any(item.get("reason") == "already-delivered" for item in omitted):
                 final_action = "skip"
-            elif proposal.action == "ask":
-                final_action = "ask"
             elif proposal.reason_code == "GATE_UNAVAILABLE":
                 # The prompt hook must remain useful before the optional model
                 # is installed. Retrieval and auditing still run, but a fallback

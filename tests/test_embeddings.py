@@ -6,7 +6,7 @@ from typing import Sequence
 
 import pytest
 
-from purpory.supervise.embeddings import EmbeddingService
+from purpory.supervise.embeddings import EmbeddingService, search_embeddings
 from purpory.supervise.cli import dispatch_product_command
 from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
 from purpory.supervise.library import ContextService
@@ -168,6 +168,39 @@ def test_embedding_status_cli_never_calls_the_model(
     result = json.loads(capsys.readouterr().out)
     assert result["targets"] == 0
     assert result["model"] == "qwen3-embedding:0.6b"
+
+
+def test_semantic_search_abstains_on_weak_similarity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PURPORY_EMBEDDING_DIMENSIONS", "2")
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    node_id = _memory(repository, "knowledge.weak", "weak semantic candidate")
+    repository.record_embedding_targets([node_id], reason="delivered")
+
+    class Provider:
+        name = "test"
+
+        def embed(
+            self, texts: Sequence[str], *, model: str, dimensions: int
+        ) -> list[list[float]]:
+            return [[1.0, 0.0] if text.startswith("Instruct:") else [0.5, 0.866] for text in texts]
+
+    provider = Provider()
+    EmbeddingService(repository, provider=provider).run()
+
+    assert search_embeddings(
+        repository,
+        "unrelated request",
+        memory_project="project",
+        code_projects=[],
+        resource_node_ids=[],
+        include_memory=True,
+        include_code=False,
+        include_resources=False,
+        limit=10,
+        provider=provider,
+    ) == []
 
 
 def test_search_fuses_lexical_and_semantic_results_and_keeps_fts_fallback(

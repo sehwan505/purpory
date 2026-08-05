@@ -20,7 +20,7 @@ DEFAULT_MODEL = "qwen3-embedding:0.6b"
 DEFAULT_DIMENSIONS = 512
 DEFAULT_MAX_BYTES = 128 * 1024 * 1024
 POLICY_VERSION = "used-node-v1"
-MIN_SEMANTIC_SIMILARITY = 0.4
+MIN_SEMANTIC_SIMILARITY = 0.6
 QUERY_INSTRUCTION = "Instruct: Retrieve project context relevant to the user request\nQuery: "
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 

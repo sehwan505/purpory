@@ -65,9 +65,12 @@ again with the new need and the same session ID. The delivery history suppresses
 that session has already received, so the protocol does not require public catalog, search, expand,
 path, pull, or push stages.
 
-Retrieval is deterministic and explainable. It records raw observed-use counters, applies a
-90-day review signal rather than expiration, and exposes Korean/English developer-memory term
-expansions in search metadata instead of relying on an LLM-generated utility score.
+Retrieval is deterministic and explainable. Direct lexical, semantic, and active-path matches are
+anchors; the graph then exposes short connecting paths, novel one-hop leads, uncovered query gaps,
+and whether a real frontier remains. Anchors are delivered first, followed by budget-permitting
+bridge and lead context marked with graph provenance. Session delivery history prevents the same
+frontier from cycling back into later searches. No fixed search-iteration limit or LLM-generated
+utility score is used.
 
 Local CLI and Claude Code/Codex preflight requests retain their input text in the decision audit by
 default so feedback can be interpreted. Use `--no-retain-input` for the CLI or set
