@@ -22,10 +22,15 @@ if TYPE_CHECKING:
 def current_session_id(explicit: str | None = None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
-    for name in ("PURPORY_SESSION", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID"):
+    for name, prefix in (
+        ("PURPORY_SESSION", ""),
+        ("CODEX_THREAD_ID", "codex:"),
+        ("CLAUDE_SESSION_ID", "claude:"),
+    ):
         value = os.environ.get(name)
         if value and value.strip():
-            return value.strip()
+            normalized = value.strip()
+            return normalized if not prefix or normalized.startswith(prefix) else prefix + normalized
     return "anon"
 
 

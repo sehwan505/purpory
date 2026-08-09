@@ -294,12 +294,12 @@ def test_deliver_records_project_local_reconciled_memory(tmp_path: Path) -> None
     assert received["project"] == service.project_id
 
 
-def test_candidate_pool_reserves_space_for_memory_and_active_paths(
+def test_candidate_pool_uses_identifiers_and_active_paths_not_memory_body_text(
     tmp_path: Path,
 ) -> None:
     service = _service_with_graph(tmp_path)
     service.set_topic(
-        "decision.shared-token",
+        "decision.shared-policy",
         value="shared token policy",
         kind="decision",
     )
@@ -315,8 +315,31 @@ def test_candidate_pool_reserves_space_for_memory_and_active_paths(
     )
 
     assert len(candidates) <= 4
-    assert any(node["namespace"] == "memory" for node in candidates)
+    assert not any(node["namespace"] == "memory" for node in candidates)
     assert any(node["source"] == "src/database/pool.py" for node in candidates)
+
+
+def test_memory_body_text_requires_semantic_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = _service_with_graph(tmp_path)
+    service.set_topic(
+        "knowledge.release-process",
+        value="The database deployment requires a manual release review.",
+    )
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings",
+        lambda *args, **kwargs: [],
+    )
+
+    result = service._provisioner().search(
+        "database deployment",
+        session_id="agent-a",
+        scopes=["human"],
+        connect=False,
+    )
+
+    assert result["candidates"] == []
 
 
 def test_search_result_covers_distinct_terms_before_filling_by_score(
@@ -401,13 +424,14 @@ def test_prepare_includes_ready_context_without_public_primitives(
     class Provider:
         def propose(self, request: GateRequest) -> ProviderResult:
             assert request.model_payload()["contextCatalog"]["counts"]["material"] == 4
+            follow_up = request.message == "TokenRepository"
             return ProviderResult(
                 proposal=GateProposal.from_mapping(
                     {
                         "action": "search",
-                        "query": "auth database",
+                        "query": "TokenRepository" if follow_up else "auth database",
                         "scopes": ["material"],
-                        "keywords": ["auth", "database"],
+                        "keywords": [] if follow_up else ["auth", "database"],
                         "reasonCode": "CODE_CONTEXT_REQUIRED",
                         "clarification": None,
                     }
@@ -430,13 +454,111 @@ def test_prepare_includes_ready_context_without_public_primitives(
     assert result["context"]["manifest"]["counts"]["material"] == 4
     assert result["context"]["search"]["connections"][0]["found"] is True
     assert result["context"]["rendered"]
-    bridge = next(item for item in result["delivery"] if item["signals"] == ["graph-bridge"])
-    assert bridge["nodeId"] not in {
-        candidate["nodeId"] for candidate in result["context"]["search"]["candidates"]
-    }
-    assert "TokenRepository" in bridge["rendered"]
-    assert bridge["rendered"].startswith(
-        "[retrieval=graph-bridge; exploratory graph context]"
+    assert len(result["delivery"]) == 2
+    assert all(
+        not any(signal.startswith("graph-") for signal in item["signals"])
+        for item in result["delivery"]
+    )
+    assert "TokenRepository" not in result["context"]["rendered"]
+    assert any(
+        item["label"] == "TokenRepository" and item["reason"] == "graph-bridge"
+        for item in result["awareness"]
+    )
+    assert all("preview" not in item and "value" not in item for item in result["awareness"])
+    token_hint = next(item for item in result["awareness"] if item["label"] == "TokenRepository")
+
+    follow_up = service.prepare(
+        "TokenRepository",
+        session_id="agent-a",
+        token_budget=512,
+    )
+    assert follow_up["action"] == "retrieve"
+    assert [item["nodeId"] for item in follow_up["delivery"]] == [token_hint["nodeId"]]
+    assert "TokenRepository" in follow_up["context"]["rendered"]
+    counts = service.repository.diagnostics()["counts"]
+    assert counts["awarenessExposures"] == 1
+    assert counts["awarenessFollowUps"] == 1
+
+    repeated = service.prepare(
+        "인증 흐름이 DB와 어떻게 연결돼?",
+        session_id="agent-a",
+        token_budget=1_000,
+    )
+    assert repeated["awareness"] == []
+    with service.repository.connect() as connection:
+        exposure = connection.execute(
+            """
+            SELECT reason FROM awareness_exposures
+            WHERE session_id = 'agent-a' AND node_id = ?
+            """,
+            (token_hint["nodeId"],),
+        ).fetchone()
+    assert exposure is not None
+    assert exposure["reason"] == "graph-bridge"
+
+
+def test_search_surfaces_cross_session_associations_as_awareness_not_evidence(
+    tmp_path: Path,
+) -> None:
+    service = _service_with_graph(tmp_path)
+    service.set_topic(
+        "knowledge.audit-constraint",
+        value="Every authentication change needs an audit record.",
+    )
+    auth = service.repository.get_topic("decision.auth.ttl", project=service.project_id)
+    audit = service.repository.get_topic(
+        "knowledge.audit-constraint", project=service.project_id
+    )
+    assert auth is not None and audit is not None
+    service._provisioner().deliver(
+        [auth["id"], audit["id"]], session_id="past-session", token_budget=1_000
+    )
+
+    result = service._provisioner().search(
+        "auth",
+        session_id="new-session",
+        scopes=["human", "session"],
+        connect=False,
+    )
+
+    assert [candidate["key"] for candidate in result["candidates"]] == [
+        "decision.auth.ttl"
+    ]
+    assert any(
+        item["key"] == "knowledge.audit-constraint"
+        and item["reason"] == "session-association"
+        for item in result["awareness"]
+    )
+    assert "Every authentication change" not in json.dumps(result["awareness"])
+
+
+def test_search_surfaces_source_linked_memory_as_awareness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = _service_with_graph(tmp_path)
+    service.set_topic(
+        "intent.auth-review",
+        source="@repo/src/auth",
+        kind="decision",
+    )
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings",
+        lambda *args, **kwargs: [],
+    )
+
+    result = service._provisioner().search(
+        "AuthService",
+        session_id="agent-a",
+        scopes=["human", "material"],
+        active_paths=["src/auth/service.py"],
+        connect=False,
+    )
+
+    assert any(candidate["label"] == "AuthService" for candidate in result["candidates"])
+    assert any(
+        item["key"] == "intent.auth-review"
+        and item["reason"] == "active-path-context"
+        for item in result["awareness"]
     )
 
 

@@ -292,7 +292,14 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
             if options.json:
                 _emit(result, json_output=True)
             elif result["action"] == "retrieve":
-                _emit(result["context"]["rendered"], json_output=False)
+                from purpory.supervise.gate.service import render_awareness
+
+                awareness = render_awareness(result.get("awareness") or [])
+                rendered = result["context"]["rendered"].rstrip()
+                _emit(
+                    rendered + ("\n\n" + awareness if awareness else ""),
+                    json_output=False,
+                )
             elif result["action"] == "ask":
                 _emit(result["clarification"], json_output=False)
             return

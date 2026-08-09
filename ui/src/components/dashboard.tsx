@@ -2022,6 +2022,11 @@ export function Dashboard() {
   const meta = pageMeta[page]
   const openRequests = requests.filter((request) => request.status === "open")
   const totalDeliveries = view.sessions.reduce((sum, session) => sum + session.items.length, 0)
+  const awarenessExposures = view.diagnostics.counts.awarenessExposures ?? 0
+  const awarenessFollowUps = view.diagnostics.counts.awarenessFollowUps ?? 0
+  const awarenessConversion = awarenessExposures
+    ? Math.round((awarenessFollowUps / awarenessExposures) * 100)
+    : 0
 
   return (
     <div className="min-h-screen text-ink">
@@ -2166,9 +2171,9 @@ export function Dashboard() {
                   />
                   <StatCard
                     icon={<BrainCircuit />}
-                    label="Recalled"
-                    value={recall.preferred.length}
-                    detail="cross-session preferred"
+                    label="Explored hints"
+                    value={awarenessFollowUps}
+                    detail={`${awarenessExposures} shown · ${awarenessConversion}% followed up`}
                     tone="teal"
                   />
                 </section>

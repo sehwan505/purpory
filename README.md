@@ -65,12 +65,18 @@ again with the new need and the same session ID. The delivery history suppresses
 that session has already received, so the protocol does not require public catalog, search, expand,
 path, pull, or push stages.
 
-Retrieval is deterministic and explainable. Direct lexical, semantic, and active-path matches are
-anchors; the graph then exposes short connecting paths, novel one-hop leads, uncovered query gaps,
-and whether a real frontier remains. Anchors are delivered first, followed by budget-permitting
-bridge and lead context marked with graph provenance. Session delivery history prevents the same
-frontier from cycling back into later searches. No fixed search-iteration limit or LLM-generated
-utility score is used.
+Retrieval is precision-first and explainable. Semantic matches retrieve human knowledge, while
+exact identifiers and active paths locate named material without treating incidental body words as
+evidence. A preparation delivers at most two direct anchors. Short graph connections, one-hop
+leads, source-linked project memory, and context repeatedly co-delivered in earlier sessions are
+returned only as compact awareness hints: their labels are visible, but their content is not loaded.
+An agent can follow a useful hint with a narrower `prepare` call and ignore the rest. Session
+delivery history prevents the same evidence or hint from cycling back into later searches. No fixed
+search-iteration limit, full-text fallback, or LLM-generated utility score is used.
+
+Codex and Claude environment session IDs are normalized to the same identities used by preflight,
+so a plain follow-up `purpory prepare "<specific need>"` continues the active search session. This
+loop is built into the existing command and does not require an additional search skill.
 
 Local CLI and Claude Code/Codex preflight requests retain their input text in the decision audit by
 default so feedback can be interpreted. Use `--no-retain-input` for the CLI or set
@@ -115,9 +121,9 @@ X-Purpory-Agent-Token: <token>
 ```
 
 The response contains the final `skip | retrieve | ask` action, deterministic evidence metadata,
-ready rendered context, omissions, audit identity, and optional clarification. Internal catalog,
-search, graph connection, expansion, path, rendering, budgeting, hashing, and deduplication remain
-domain primitives rather than public protocol steps.
+ready rendered context, unloaded awareness hints, omissions, audit identity, and optional
+clarification. Internal catalog, search, graph connection, expansion, path, rendering, budgeting,
+hashing, and deduplication remain domain primitives rather than public protocol steps.
 
 Agents may also raise non-authoritative `POST /api/global-memory/requests` and
 `POST /api/memory/reviews` proposals. They cannot edit, approve, reject, or resolve them. Project

@@ -18,6 +18,71 @@ from purpory.supervise.gate.provider import GateProvider, GateProviderError
 from purpory.supervise.provisioning import ContextProvisioningService
 from purpory.supervise.repository import ContextGraphRepository
 
+MAX_DIRECT_EVIDENCE = 2
+MAX_AWARENESS_HINTS = 6
+
+
+def render_awareness(hints: Sequence[dict[str, Any]]) -> str:
+    if not hints:
+        return ""
+    lines = [
+        "[PURPORY RELATED CONTEXT AVAILABLE — NOT LOADED]",
+        "These are discovery hints, not evidence. Do not assume they are relevant. "
+        'Run `purpory prepare "<specific need>"` only if the task reveals a matching gap.',
+    ]
+    for hint in hints[:MAX_AWARENESS_HINTS]:
+        key = str(hint.get("key") or "").replace("\n", " ").strip()
+        label = str(hint.get("label") or key).replace("\n", " ").strip()
+        relation = str(hint.get("relation") or "").replace("\n", " ").strip()
+        source = str(hint.get("source") or "").replace("\n", " ").strip()
+        details = []
+        if relation:
+            details.append(f"via {relation}")
+        if source:
+            details.append(source)
+        suffix = f" ({'; '.join(details)})" if details else ""
+        if key:
+            lines.append(f"- {key}: {label}{suffix}")
+    return "\n".join(lines)
+
+
+def _awareness_hints(
+    search_result: dict[str, Any],
+    *,
+    delivered_ids: set[str],
+    previously_delivered_ids: set[str],
+) -> list[dict[str, Any]]:
+    hints: list[dict[str, Any]] = []
+    seen = set(delivered_ids) | set(previously_delivered_ids)
+
+    for candidate in search_result["candidates"][MAX_DIRECT_EVIDENCE:]:
+        node_id = str(candidate["nodeId"])
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        hints.append(
+            {
+                "nodeId": node_id,
+                "key": candidate["key"],
+                "namespace": candidate["namespace"],
+                "label": candidate["label"],
+                "kind": candidate["kind"],
+                "source": candidate.get("source"),
+                "reason": "additional-anchor",
+                "relation": None,
+            }
+        )
+
+    for hint in search_result.get("awareness") or []:
+        node_id = str(hint["nodeId"])
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        hints.append(hint)
+        if len(hints) >= MAX_AWARENESS_HINTS:
+            break
+    return hints[:MAX_AWARENESS_HINTS]
+
 
 def _fallback_proposal(request: GateRequest) -> GateProposal:
     normalized = request.message.strip().lower().rstrip("!?. ")
@@ -137,6 +202,7 @@ class GatewayService:
         request_id = None
         clarification = proposal.clarification
         search_result: dict[str, Any] | None = None
+        awareness: list[dict[str, Any]] = []
         delivery_result: dict[str, Any] = {
             "delivery": [],
             "omitted": [],
@@ -159,42 +225,20 @@ class GatewayService:
                 previous_deliveries=previous,
             )
             if search_result["candidates"]:
-                delivery_candidates = list(search_result["candidates"])
-                seen_ids = {item["nodeId"] for item in delivery_candidates}
                 previously_delivered_ids = self.repository.session_delivered_node_ids(
                     session_id, project=project
                 )
-                graph_candidates = [
-                    (
-                        node,
-                        ["graph-bridge"],
-                    )
-                    for connection in search_result["connections"]
-                    for node in connection["nodes"]
-                ] + [
-                    (
-                        lead["node"],
-                        [
-                            "graph-lead",
-                            f"relation:{lead['via']['relation']}",
-                        ],
-                    )
-                    for lead in search_result["exploration"]["frontier"]
-                ]
-                for node, signals in graph_candidates:
-                    node_id = str(node["id"])
-                    if node_id in seen_ids or node_id in previously_delivered_ids:
-                        continue
-                    delivery_candidates.append(
-                        {
-                            "nodeId": node_id,
-                            "score": None,
-                            "signals": signals,
-                        }
-                    )
-                    seen_ids.add(node_id)
-                    if len(delivery_candidates) >= 32:
-                        break
+                delivery_candidates = list(
+                    search_result["candidates"][:MAX_DIRECT_EVIDENCE]
+                )
+                delivered_ids = {
+                    str(candidate["nodeId"]) for candidate in delivery_candidates
+                }
+                awareness = _awareness_hints(
+                    search_result,
+                    delivered_ids=delivered_ids,
+                    previously_delivered_ids=previously_delivered_ids,
+                )
                 delivery_result = provisioner.deliver(
                     [candidate["nodeId"] for candidate in delivery_candidates],
                     session_id=session_id,
@@ -232,6 +276,12 @@ class GatewayService:
             )
         if final_action != "ask":
             clarification = None
+        if awareness:
+            self.repository.record_awareness(
+                session_id,
+                awareness,
+                project=project,
+            )
 
         decision = GateDecision(
             action=final_action,
@@ -264,9 +314,11 @@ class GatewayService:
         return {
             **decision_payload,
             "decisionId": decision_id,
+            "awareness": awareness,
             "context": {
                 "manifest": catalog,
                 "search": search_result,
+                "awareness": awareness,
                 "rendered": delivery_result["rendered"],
                 "estimatedTokens": delivery_result["estimatedTokens"],
                 "valueHash": delivery_result["valueHash"],

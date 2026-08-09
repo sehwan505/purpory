@@ -270,6 +270,17 @@ export type ContextPreparation = {
   clarification: string | null
   model: { id: string | null; revision: string | null; latencyMs: number | null }
   fallback: string | null
+  awareness: Array<{
+    nodeId: string
+    key: string
+    namespace: string
+    label: string
+    kind: string
+    source: string | null
+    reason: "active-path-context" | "additional-anchor" | "graph-bridge" | "graph-lead" | "session-association"
+    relation: string | null
+    observations?: number
+  }>
 }
 
 export type ContextDecision = {
