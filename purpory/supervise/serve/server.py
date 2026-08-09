@@ -473,6 +473,15 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             )
             self.server.events.publish("context", {"id": decision_id, "feedback": True})
             self._json(result)
+        elif method == "POST" and path == "/api/model/select":
+            model = str(payload.get("model", "")).strip()
+            role = str(payload.get("role", "gate")).strip()
+            if not model:
+                self._error(HTTPStatus.BAD_REQUEST, "model parameter is required")
+                return
+            result = service.select_model(model, role=role)
+            self.server.events.publish("model", {"model": model, "role": role})
+            self._json(result)
         else:
             self._error(HTTPStatus.NOT_FOUND, "API endpoint not found")
 

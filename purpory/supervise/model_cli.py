@@ -8,23 +8,35 @@ import sys
 from typing import Any, Sequence
 
 from purpory.supervise.embeddings import DEFAULT_MODEL as DEFAULT_EMBEDDING_MODEL
-from purpory.supervise.gate.qwen import DEFAULT_MODEL
+from purpory.supervise.gate.qwen import (
+    DEFAULT_MODEL,
+    DEFAULT_RECONCILE_MODEL,
+    RECOMMENDED_GATE_MODELS,
+    RECOMMENDED_RECONCILE_MODELS,
+)
 from purpory.supervise.gate.runtime import GateModelManager
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="purpory model",
-        description="Manage the local gate model in the shared Ollama runtime.",
+        description="Manage the local gate and reconcile models in the shared Ollama runtime.",
         epilog="Global option accepted anywhere: --json",
     )
     subparsers = parser.add_subparsers(dest="verb", required=True)
 
-    install = subparsers.add_parser("install", help="pull the gate model into Ollama")
-    install.add_argument("--role", choices=("all", "gate", "embedding"), default="all")
-    install.add_argument("--model")
+    install = subparsers.add_parser("install", help="pull models into Ollama")
+    install.add_argument(
+        "--role",
+        choices=("all", "gate", "reconcile", "embedding"),
+        default="all",
+        help="role to install (default: all)",
+    )
+    install.add_argument("--model", help="specific model tag to install")
     install.add_argument("--revision")
     install.add_argument("--force", action="store_true")
+
+    subparsers.add_parser("list", help="list installed and recommended models")
 
     start = subparsers.add_parser("start", help="verify the shared Ollama runtime")
     start.add_argument("--port", type=int, default=0)
@@ -67,9 +79,10 @@ def dispatch_model(arguments: Sequence[str] | None = None) -> None:
     try:
         if options.verb == "install":
             if options.model and options.role == "all":
-                raise ValueError("--model requires --role gate or --role embedding")
+                raise ValueError("--model requires specific --role (gate, reconcile, or embedding)")
             role_models = {
                 "gate": DEFAULT_MODEL,
+                "reconcile": DEFAULT_RECONCILE_MODEL,
                 "embedding": DEFAULT_EMBEDDING_MODEL,
             }
             roles = tuple(role_models) if options.role == "all" else (options.role,)
@@ -90,6 +103,15 @@ def dispatch_model(arguments: Sequence[str] | None = None) -> None:
                 "runtime": "ollama",
                 "models": models,
             }
+        elif options.verb == "list":
+            installed = manager.list_installed_models()
+            result = {
+                "installed": installed,
+                "gatePresets": RECOMMENDED_GATE_MODELS,
+                "reconcilePresets": RECOMMENDED_RECONCILE_MODELS,
+                "defaultGate": DEFAULT_MODEL,
+                "defaultReconcile": DEFAULT_RECONCILE_MODEL,
+            }
         elif options.verb == "start":
             result = manager.start(port=options.port, wait_seconds=options.wait)
         elif options.verb == "stop":
@@ -98,6 +120,7 @@ def dispatch_model(arguments: Sequence[str] | None = None) -> None:
             result = manager.status()
             result["models"] = {
                 "gate": result.copy(),
+                "reconcile": manager.status(model=DEFAULT_RECONCILE_MODEL),
                 "embedding": manager.status(model=DEFAULT_EMBEDDING_MODEL),
             }
         elif options.verb == "logs":

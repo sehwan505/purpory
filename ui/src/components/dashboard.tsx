@@ -61,6 +61,7 @@ import {
   prepareContext,
   resolveRequest,
   resolveNeedsReview,
+  selectModel,
   submitContextFeedback,
   subscribeToEvents,
 } from "@/lib/api"
@@ -866,6 +867,34 @@ function PreparationPanel({
     }
   }
 
+  const [switchingModel, setSwitchingModel] = useState(false)
+  const currentModel = modelStatus.providerModel ?? modelStatus.model ?? "qwen3.6:1.5b"
+  const modelOptions = useMemo(() => {
+    const installed = modelStatus.installedModels ?? []
+    const presets = modelStatus.availablePresets ?? [
+      "qwen3.6:1.5b",
+      "qwen3.6:3b",
+      "qwen3.6:7b",
+      "qwen3.6-coder:3b",
+      "qwen3.6-coder:7b",
+      "qwen3.5:0.8b",
+    ]
+    return Array.from(new Set([...installed, ...presets]))
+  }, [modelStatus.installedModels, modelStatus.availablePresets])
+
+  async function handleModelChange(selected: string) {
+    if (!selected || selected === currentModel) return
+    setSwitchingModel(true)
+    try {
+      await selectModel({ model: selected, role: "gate" })
+      await onRefresh()
+    } catch (caught) {
+      console.error("Failed to select model:", caught)
+    } finally {
+      setSwitchingModel(false)
+    }
+  }
+
   async function feedback(decision: ContextDecision, expected: ContextAction) {
     await submitContextFeedback(decision.id, {
       verdict: expected === decision.action ? "correct" : "incorrect",
@@ -905,16 +934,37 @@ function PreparationPanel({
                 </Badge>
               </div>
               <p className="mt-1.5 font-mono text-[10px] text-dim">
-                {modelStatus.providerModel ?? modelStatus.model ?? "Qwen/Qwen3.5-0.8B"}
+                {currentModel}
                 {modelStatus.revision ? ` @ ${modelStatus.revision.slice(0, 12)}` : ""}
               </p>
             </div>
           </div>
-          <div className="border-l-2 border-line pl-4 sm:text-right">
-            <p className="text-[11px] text-muted">Provider · {modelStatus.providerSource}</p>
-            <p className="mt-1 max-w-md truncate font-mono text-[10px] text-dim">
-              {modelStatus.endpoint ?? "purpory model install && purpory model start"}
-            </p>
+          <div className="flex flex-col gap-2 sm:items-end">
+            <div className="flex items-center gap-2">
+              <label htmlFor="model-select" className="text-[11px] font-medium text-muted">
+                Model:
+              </label>
+              <select
+                id="model-select"
+                value={currentModel}
+                onChange={(e) => void handleModelChange(e.target.value)}
+                disabled={switchingModel}
+                className="h-8 rounded-lg border border-line bg-panel-raised px-2.5 py-1 font-mono text-xs text-ink shadow-sm transition hover:border-signal/50 focus:border-signal focus:outline-none focus:ring-1 focus:ring-signal disabled:opacity-50"
+              >
+                {modelOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt} {modelStatus.installedModels?.includes(opt) ? "✓" : "(preset)"}
+                  </option>
+                ))}
+              </select>
+              {switchingModel && <RefreshCw className="size-3.5 animate-spin text-signal" />}
+            </div>
+            <div className="border-l-2 border-line pl-4 sm:border-l-0 sm:pl-0 sm:text-right">
+              <p className="text-[11px] text-muted">Provider · {modelStatus.providerSource}</p>
+              <p className="mt-0.5 max-w-md truncate font-mono text-[10px] text-dim">
+                {modelStatus.endpoint ?? "purpory model install && purpory model start"}
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>

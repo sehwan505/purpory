@@ -643,6 +643,17 @@ class ContextService:
     def context_decisions(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.repository.list_gate_decisions(limit=limit)
 
+    def select_model(self, model: str, *, role: str = "gate") -> dict[str, Any]:
+        from purpory.supervise.gate.runtime import GateModelManager
+
+        manager = GateModelManager()
+        manager.select_model(model, role=role)
+        if role == "gate" and self.gate_provider is not None:
+            from purpory.supervise.gate.qwen import QwenGateProvider
+            if isinstance(self.gate_provider, QwenGateProvider):
+                self.gate_provider.model = model
+        return self.model_status()
+
     def model_status(self) -> dict[str, Any]:
         from purpory.supervise.gate.provider import UnavailableGateProvider
         from purpory.supervise.gate.runtime import GateModelManager

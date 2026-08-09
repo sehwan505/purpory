@@ -301,4 +301,7 @@ export type ModelStatus = {
   providerConfigured: boolean
   providerSource: "managed" | "explicit" | "environment" | "unavailable" | "none"
   providerModel: string | null
+  installedModels?: string[]
+  availablePresets?: string[]
+  reconcilePresets?: string[]
 }

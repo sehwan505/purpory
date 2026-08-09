@@ -1,4 +1,4 @@
-"""Qwen 3.5 gate adapter for OpenAI-compatible runtimes."""
+"""Qwen 3.6 gate adapter for OpenAI-compatible runtimes."""
 
 from __future__ import annotations
 
@@ -21,12 +21,30 @@ from purpory.supervise.gate.contract import (
 )
 from purpory.supervise.gate.provider import GateProviderError
 
-DEFAULT_MODEL = "qwen3.5:0.8b"
+DEFAULT_MODEL = "qwen3.6:1.5b"
+DEFAULT_RECONCILE_MODEL = "qwen3.6:7b"
+DEFAULT_RECONCILE_KEEP_ALIVE_SECONDS = 120.0
 DEFAULT_TIMEOUT_SECONDS = 2.0
 DEFAULT_MAX_INPUT_TOKENS = 20_000
 DEFAULT_MAX_CONTEXT_TOKENS = 262_144
 MAX_RESPONSE_TOKENS = 8
 MAX_RESPONSE_BYTES = 65_536
+
+RECOMMENDED_GATE_MODELS = [
+    "qwen3.6:1.5b",
+    "qwen3.6:3b",
+    "qwen3.6:7b",
+    "qwen3.6-coder:3b",
+    "qwen3.6-coder:7b",
+    "qwen3.5:0.8b",
+]
+
+RECOMMENDED_RECONCILE_MODELS = [
+    "qwen3.6:7b",
+    "qwen3.6:3b",
+    "qwen3.6-coder:7b",
+    "qwen3.6:1.5b",
+]
 
 SYSTEM_PROMPT = """You are Purpory's memory gate classifier. Decide only whether the current request:
 - skip: general conversation, direct questions, or requests answered without durable project memory;
