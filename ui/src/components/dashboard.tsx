@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  ArrowLeft,
   ArrowRight,
   BrainCircuit,
   Check,
@@ -58,6 +59,7 @@ import {
   getRecall,
   getRequests,
   getView,
+  installModel,
   prepareContext,
   resolveRequest,
   resolveNeedsReview,
@@ -84,15 +86,7 @@ import type {
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-type Page =
-  | "overview"
-  | "projects"
-  | "delivery"
-  | "context"
-  | "memory"
-  | "sessions"
-  | "requests"
-  | "graph"
+type Page = "overview" | "workspace" | "delivery" | "context" | "memory" | "requests" | "graph"
 
 const pageMeta: Record<Page, { eyebrow: string; title: string; description: string }> = {
   overview: {
@@ -100,40 +94,35 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
     title: "Overview",
     description: "The context plane at a glance—what exists, what moved, and what still needs you.",
   },
-  projects: {
+  workspace: {
     eyebrow: "Work context",
-    title: "Projects",
-    description: "Group intent, knowledge, and resources under a durable work context.",
+    title: "Workspace",
+    description: "Manage project resources and inspect agent sessions from one connected workspace.",
   },
   delivery: {
     eyebrow: "Routing intelligence",
     title: "Delivery",
-    description: "Inspect every context decision, its input, rationale, and final delivery.",
+    description: "Inspect context decisions and manage the local model used to prepare them.",
   },
   context: {
     eyebrow: "Durable memory",
     title: "Context library",
-    description: "Human intent and live references stored at stable logical addresses.",
+    description: "Manage durable intent, knowledge, and references at stable logical addresses.",
   },
   memory: {
     eyebrow: "Memory governance",
     title: "Memory review",
     description: "Approve global writes, resolve evidence conflicts, and audit project memory changes.",
   },
-  sessions: {
-    eyebrow: "Exact provenance",
-    title: "Sessions",
-    description: "A content-addressed record of the context delivered to every agent.",
-  },
   requests: {
     eyebrow: "Human attention",
     title: "Context gaps",
-    description: "Questions that need a durable answer before an agent can move with confidence.",
+    description: "Resolve questions that need durable answers before an agent can move confidently.",
   },
   graph: {
     eyebrow: "Structural intelligence",
     title: "Material graph",
-    description: "Explore structural relationships across code, documents, and other project material.",
+    description: "Explore structural relationships across code, documents, and project material.",
   },
 }
 
@@ -561,7 +550,138 @@ function CreateTopicDialog({ onCreated }: { onCreated: () => Promise<void> }) {
   )
 }
 
-function SessionList({ sessions }: { sessions: Session[] }) {
+function SessionList({ sessions, embedded = false }: { sessions: Session[]; embedded?: boolean }) {
+  const content = (
+    <>
+      <div className="space-y-3">
+        {sessions.map((session, index) => {
+          const latest = session.items.length
+            ? Math.max(...session.items.map((item) => item.deliveredAt))
+            : null
+          const resource = session.context?.resource
+          const branch = typeof resource?.properties?.branch === "string"
+            ? resource.properties.branch
+            : null
+          const agent = session.id.split(":", 1)[0]
+          return (
+            <details key={`${session.project ?? "unassigned"}:${session.id}`} open={!embedded && index === 0} className="group overflow-hidden rounded-[16px] border border-line bg-panel-raised/45">
+              <summary className="cursor-pointer list-none px-5 py-4 [&::-webkit-details-marker]:hidden">
+                <div className="flex items-start justify-between gap-5">
+                  <div className="flex min-w-0 items-start gap-3.5">
+                    <div className="grid size-10 shrink-0 place-items-center rounded-[12px] border border-accent-blue/20 bg-accent-blue-soft text-accent-blue">
+                      <GitFork className="size-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="truncate text-sm font-semibold text-ink">
+                          {resource?.resourceLabel ?? "Legacy session"}
+                        </p>
+                        {branch && <Badge variant="blue">{branch}</Badge>}
+                        {resource?.properties?.dirty === true && <Badge variant="warning">Dirty</Badge>}
+                      </div>
+                      <p className="mt-1 truncate font-mono text-[10px] text-dim">
+                        {resource?.externalIdentity ?? session.project ?? "Repository view was not recorded"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3 text-right">
+                    <div>
+                      <p className="mono-number text-lg font-semibold text-ink">{session.items.length}</p>
+                      <p className="text-[10px] text-dim">context items</p>
+                    </div>
+                    <ChevronRight className="size-4 text-dim transition-transform group-open:rotate-90" />
+                  </div>
+                </div>
+
+                <div className="mt-4 grid items-center gap-2 sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
+                  <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
+                    <span className="fine-label block">Repository view</span>
+                    <span className="mt-1 block truncate text-xs font-medium text-ink">{branch ?? resource?.resourceLabel ?? "Unknown"}</span>
+                  </div>
+                  <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
+                  <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
+                    <span className="fine-label block">Agent session</span>
+                    <span className="mt-1 block truncate text-xs font-medium capitalize text-ink">{agent} · {shortSession(session.id)}</span>
+                  </div>
+                  <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
+                  <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
+                    <span className="fine-label block">Last delivery</span>
+                    <span className="mt-1 block text-xs font-medium text-ink">{latest ? relativeTime(latest) : "No deliveries"}</span>
+                  </div>
+                </div>
+              </summary>
+
+              <div className="border-t border-line bg-panel px-5 py-5">
+                {resource?.locator && (
+                  <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-[10px] bg-canvas/70 px-3 py-2 font-mono text-[10px] text-muted">
+                    <span className="truncate">{resource.locator}</span>
+                    {resource.revision && <span className="text-dim">commit {resource.revision.slice(0, 10)}</span>}
+                  </div>
+                )}
+                <div className="grid gap-2.5 xl:grid-cols-2">
+                  {session.items.map((item) => {
+                    const kind = contextKind(item)
+                    const label = item.label && item.label !== item.key
+                      ? item.label
+                      : readableContextKey(item.key)
+                    return (
+                      <article key={item.key} className="rounded-[12px] border border-line bg-canvas/45 p-4">
+                        <div className="flex items-start gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={kind.variant}>{kind.label}</Badge>
+                              <time className="text-[10px] text-dim">{relativeTime(item.deliveredAt)}</time>
+                            </div>
+                            <h4 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-5 text-ink">{label}</h4>
+                          </div>
+                        </div>
+                        {item.preview && (
+                          <p className="mt-2.5 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-muted">
+                            {item.preview}
+                          </p>
+                        )}
+                        <div className="mt-3 flex items-center justify-between gap-3 border-t border-line/70 pt-2.5">
+                          <span className="truncate text-[9px] text-dim">{item.source ?? "Delivered context"}</span>
+                          <span className="shrink-0 text-[9px] text-dim">exact delivery</span>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              </div>
+            </details>
+          )
+        })}
+      </div>
+      {!sessions.length && (
+        <EmptyState
+          icon={<Users />}
+          title="No agent sessions yet"
+          detail="Sessions appear after Purpory prepares context for an agent."
+        />
+      )}
+    </>
+  )
+
+  if (embedded) {
+    return (
+      <section className="mt-5 border-t border-line pt-5">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold text-ink">Agent sessions</p>
+            <p className="mt-1 text-[11px] text-muted">The exact view and context used by this project.</p>
+          </div>
+          <Badge variant="neutral">{sessions.length} sessions</Badge>
+        </div>
+        {sessions.length ? content : (
+          <p className="rounded-[12px] border border-dashed border-line px-4 py-5 text-center text-[11px] text-muted">
+            No sessions have received context from this project yet.
+          </p>
+        )}
+      </section>
+    )
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -572,116 +692,7 @@ function SessionList({ sessions }: { sessions: Session[] }) {
         <Badge variant="success"><CircleDot className="mr-1 size-2.5" /> Provenance</Badge>
       </CardHeader>
       <CardContent>
-        <div className="space-y-3">
-          {sessions.map((session, index) => {
-            const latest = session.items.length
-              ? Math.max(...session.items.map((item) => item.deliveredAt))
-              : null
-            const resource = session.context?.resource
-            const branch = typeof resource?.properties?.branch === "string"
-              ? resource.properties.branch
-              : null
-            const agent = session.id.split(":", 1)[0]
-            return (
-              <details key={session.id} open={index === 0} className="group overflow-hidden rounded-[16px] border border-line bg-panel-raised/45">
-                <summary className="cursor-pointer list-none px-5 py-4 [&::-webkit-details-marker]:hidden">
-                  <div className="flex items-start justify-between gap-5">
-                    <div className="flex min-w-0 items-start gap-3.5">
-                      <div className="grid size-10 shrink-0 place-items-center rounded-[12px] border border-accent-blue/20 bg-accent-blue-soft text-accent-blue">
-                        <GitFork className="size-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="truncate text-sm font-semibold text-ink">
-                            {resource?.resourceLabel ?? "Legacy session"}
-                          </p>
-                          {branch && <Badge variant="blue">{branch}</Badge>}
-                          {resource?.properties?.dirty === true && <Badge variant="warning">Dirty</Badge>}
-                        </div>
-                        <p className="mt-1 truncate font-mono text-[10px] text-dim">
-                          {resource?.externalIdentity ?? session.project ?? "Repository view was not recorded"}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-3 text-right">
-                      <div>
-                        <p className="mono-number text-lg font-semibold text-ink">{session.items.length}</p>
-                        <p className="text-[10px] text-dim">context items</p>
-                      </div>
-                      <ChevronRight className="size-4 text-dim transition-transform group-open:rotate-90" />
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid items-center gap-2 sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
-                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                      <span className="fine-label block">Repository view</span>
-                      <span className="mt-1 block truncate text-xs font-medium text-ink">{branch ?? resource?.resourceLabel ?? "Unknown"}</span>
-                    </div>
-                    <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
-                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                      <span className="fine-label block">Agent session</span>
-                      <span className="mt-1 block truncate text-xs font-medium capitalize text-ink">{agent} · {shortSession(session.id)}</span>
-                    </div>
-                    <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
-                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                      <span className="fine-label block">Last delivery</span>
-                      <span className="mt-1 block text-xs font-medium text-ink">{latest ? relativeTime(latest) : "No deliveries"}</span>
-                    </div>
-                  </div>
-                </summary>
-
-                <div className="border-t border-line bg-panel px-5 py-5">
-                  {resource?.locator && (
-                    <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-[10px] bg-canvas/70 px-3 py-2 font-mono text-[10px] text-muted">
-                      <span className="truncate">{resource.locator}</span>
-                      {resource.revision && <span className="text-dim">commit {resource.revision.slice(0, 10)}</span>}
-                    </div>
-                  )}
-                  <div className="grid gap-2.5 xl:grid-cols-2">
-                    {session.items.map((item) => {
-                      const kind = contextKind(item)
-                      const label = item.label && item.label !== item.key
-                        ? item.label
-                        : readableContextKey(item.key)
-                      return (
-                        <article key={item.key} className="rounded-[12px] border border-line bg-canvas/45 p-4">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <Badge variant={kind.variant}>{kind.label}</Badge>
-                                <time className="text-[10px] text-dim">{relativeTime(item.deliveredAt)}</time>
-                              </div>
-                              <h4 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-5 text-ink">{label}</h4>
-                            </div>
-                            <span title={item.valueHash} className="shrink-0 font-mono text-[9px] text-dim">
-                              {item.valueHash.slice(0, 8)}
-                            </span>
-                          </div>
-                          {item.preview && (
-                            <p className="mt-2.5 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-muted">
-                              {item.preview}
-                            </p>
-                          )}
-                          <div className="mt-3 flex items-center justify-between gap-3 border-t border-line/70 pt-2.5">
-                            <span className="truncate font-mono text-[9px] text-dim">{item.source ?? item.key}</span>
-                            <span className="shrink-0 text-[9px] text-dim">exact delivery</span>
-                          </div>
-                        </article>
-                      )
-                    })}
-                  </div>
-                </div>
-              </details>
-            )
-          })}
-        </div>
-        {!sessions.length && (
-          <EmptyState
-            icon={<Users />}
-            title="No agent sessions yet"
-            detail="Sessions appear after Purpory prepares context for an agent."
-          />
-        )}
+        {content}
       </CardContent>
     </Card>
   )
@@ -868,30 +879,50 @@ function PreparationPanel({
   }
 
   const [switchingModel, setSwitchingModel] = useState(false)
-  const currentModel = modelStatus.providerModel ?? modelStatus.model ?? "qwen3.6:1.5b"
+  const [installingModel, setInstallingModel] = useState(false)
+  const [modelError, setModelError] = useState("")
+  const activeModel = modelStatus.model ?? modelStatus.providerModel ?? "qwen3.5:0.8b"
+  const [selectedModel, setSelectedModel] = useState(activeModel)
+  useEffect(() => setSelectedModel(activeModel), [activeModel])
   const modelOptions = useMemo(() => {
     const installed = modelStatus.installedModels ?? []
     const presets = modelStatus.availablePresets ?? [
-      "qwen3.6:1.5b",
-      "qwen3.6:3b",
-      "qwen3.6:7b",
-      "qwen3.6-coder:3b",
-      "qwen3.6-coder:7b",
       "qwen3.5:0.8b",
+      "qwen3.5:2b",
+      "qwen3.5:4b",
+      "qwen3.5:9b",
     ]
     return Array.from(new Set([...installed, ...presets]))
   }, [modelStatus.installedModels, modelStatus.availablePresets])
 
   async function handleModelChange(selected: string) {
-    if (!selected || selected === currentModel) return
+    if (!selected) return
+    setSelectedModel(selected)
+    setModelError("")
+    if (!modelStatus.installedModels?.includes(selected) || selected === activeModel) return
     setSwitchingModel(true)
     try {
       await selectModel({ model: selected, role: "gate" })
       await onRefresh()
     } catch (caught) {
-      console.error("Failed to select model:", caught)
+      setSelectedModel(activeModel)
+      setModelError(caught instanceof Error ? caught.message : "Could not select the model")
     } finally {
       setSwitchingModel(false)
+    }
+  }
+
+  async function handleModelInstall() {
+    setInstallingModel(true)
+    setModelError("")
+    try {
+      await installModel({ model: selectedModel })
+      await selectModel({ model: selectedModel, role: "gate" })
+      await onRefresh()
+    } catch (caught) {
+      setModelError(caught instanceof Error ? caught.message : "Could not install the model")
+    } finally {
+      setInstallingModel(false)
     }
   }
 
@@ -934,7 +965,7 @@ function PreparationPanel({
                 </Badge>
               </div>
               <p className="mt-1.5 font-mono text-[10px] text-dim">
-                {currentModel}
+                {activeModel}
                 {modelStatus.revision ? ` @ ${modelStatus.revision.slice(0, 12)}` : ""}
               </p>
             </div>
@@ -946,7 +977,7 @@ function PreparationPanel({
               </label>
               <select
                 id="model-select"
-                value={currentModel}
+                value={selectedModel}
                 onChange={(e) => void handleModelChange(e.target.value)}
                 disabled={switchingModel}
                 className="h-8 rounded-lg border border-line bg-panel-raised px-2.5 py-1 font-mono text-xs text-ink shadow-sm transition hover:border-signal/50 focus:border-signal focus:outline-none focus:ring-1 focus:ring-signal disabled:opacity-50"
@@ -958,7 +989,18 @@ function PreparationPanel({
                 ))}
               </select>
               {switchingModel && <RefreshCw className="size-3.5 animate-spin text-signal" />}
+              {!modelStatus.installedModels?.includes(selectedModel) && (
+                <Button
+                  size="sm"
+                  onClick={() => void handleModelInstall()}
+                  disabled={installingModel || !modelStatus.running}
+                >
+                  {installingModel ? <RefreshCw className="animate-spin" /> : null}
+                  Install
+                </Button>
+              )}
             </div>
+            {modelError && <p className="text-[11px] text-red-700">{modelError}</p>}
             <div className="border-l-2 border-line pl-4 sm:border-l-0 sm:pl-0 sm:text-right">
               <p className="text-[11px] text-muted">Provider · {modelStatus.providerSource}</p>
               <p className="mt-0.5 max-w-md truncate font-mono text-[10px] text-dim">
@@ -1683,29 +1725,38 @@ function GitResourceForm({
 
 function ProjectPanel({
   projects,
+  sessions,
   activeProject,
   activeView,
+  onOpenSessions,
   onRefresh,
 }: {
   projects: ProjectNamespace[]
+  sessions: Session[]
   activeProject: string
   activeView: string
+  onOpenSessions: () => void
   onRefresh: () => Promise<void>
 }) {
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
+  const [section, setSection] = useState<"overview" | "repositories">("overview")
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState("")
+  const selectedProject = projects.find((project) => project.id === selectedProjectId)
 
   async function create(event: FormEvent) {
     event.preventDefault()
     setPending(true)
     setError("")
     try {
-      await createProject({ name, description })
+      const created = await createProject({ name, description })
       setName("")
       setDescription("")
       await onRefresh()
+      setSelectedProjectId(created.id)
+      setSection("repositories")
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create project")
     } finally {
@@ -1713,21 +1764,189 @@ function ProjectPanel({
     }
   }
 
+  if (selectedProject) {
+    const projectSessions = sessions.filter((session) => session.project === selectedProject.id)
+    const viewCount = selectedProject.resources.reduce((sum, resource) => sum + resource.views.length, 0)
+    return (
+      <div className="space-y-5">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setSelectedProjectId(null)}
+          className="-ml-2"
+        >
+          <ArrowLeft /> All projects
+        </Button>
+
+        <Card className={cn(selectedProject.id === activeProject && "border-signal/35")}>
+          <CardHeader className="items-start gap-5 sm:flex-row sm:items-center">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <CardTitle className="text-xl">{selectedProject.name}</CardTitle>
+                {selectedProject.id === activeProject && <Badge variant="success">Active context</Badge>}
+              </div>
+              <CardDescription>{selectedProject.description || "No description yet."}</CardDescription>
+              <p className="mt-2 truncate font-mono text-[10px] text-dim">{selectedProject.id}</p>
+            </div>
+            <Button onClick={() => setSection("repositories")}>
+              <Plus /> Add repository
+            </Button>
+          </CardHeader>
+        </Card>
+
+        <div className="flex gap-1 overflow-x-auto rounded-[14px] border border-line bg-panel p-1.5">
+          {([
+            ["overview", "Overview", <FolderKanban key="overview" />],
+            ["repositories", `Repositories · ${selectedProject.resources.length}`, <GitFork key="repositories" />],
+          ] as const).map(([id, label, icon]) => (
+            <Button
+              key={id}
+              variant={section === id ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setSection(id)}
+              className={cn("shrink-0", section === id && "border-signal/20 text-signal")}
+            >
+              {icon} {label}
+            </Button>
+          ))}
+        </div>
+
+        {section === "overview" && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-2 items-stretch gap-2 rounded-[16px] border border-line bg-panel p-3 xl:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr]">
+              <div className="rounded-[12px] border border-signal/25 bg-signal-soft px-4 py-3">
+                <FolderKanban className="size-4 text-signal" />
+                <p className="mt-3 truncate text-xs font-semibold text-ink">{selectedProject.name}</p>
+                <p className="mt-1 text-[10px] text-muted">Project context</p>
+              </div>
+              <ArrowRight className="m-auto hidden size-4 text-line-strong xl:block" />
+              <button type="button" onClick={() => setSection("repositories")} className="rounded-[12px] border border-accent-blue/20 bg-accent-blue-soft px-4 py-3 text-left transition hover:border-accent-blue/40">
+                <GitFork className="size-4 text-accent-blue" />
+                <p className="mono-number mt-3 text-xl font-semibold text-ink">{selectedProject.resources.length}</p>
+                <p className="mt-1 text-[10px] text-muted">Repositories · manage</p>
+              </button>
+              <ArrowRight className="m-auto hidden size-4 text-line-strong xl:block" />
+              <button type="button" onClick={() => setSection("repositories")} className="rounded-[12px] border border-accent-teal/20 bg-accent-teal-soft px-4 py-3 text-left transition hover:border-accent-teal/40">
+                <CircleDot className="size-4 text-accent-teal" />
+                <p className="mono-number mt-3 text-xl font-semibold text-ink">{viewCount}</p>
+                <p className="mt-1 text-[10px] text-muted">Worktree views · inspect</p>
+              </button>
+              <ArrowRight className="m-auto hidden size-4 text-line-strong xl:block" />
+              <button type="button" onClick={onOpenSessions} className="rounded-[12px] border border-accent-violet/20 bg-accent-violet-soft px-4 py-3 text-left transition hover:border-accent-violet/40">
+                <Users className="size-4 text-accent-violet" />
+                <p className="mono-number mt-3 text-xl font-semibold text-ink">{projectSessions.length}</p>
+                <p className="mt-1 text-[10px] text-muted">Agent sessions · manage</p>
+              </button>
+            </div>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <div>
+                    <CardTitle>Repositories</CardTitle>
+                    <CardDescription>Material registered to this project context.</CardDescription>
+                  </div>
+                  <Button variant="secondary" size="sm" onClick={() => setSection("repositories")}>Open</Button>
+                </CardHeader>
+                <CardContent>
+                  <p className="mono-number text-3xl font-semibold text-ink">{selectedProject.resources.length}</p>
+                  <p className="mt-2 text-[11px] text-muted">{viewCount} discovered worktree views</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <div>
+                    <CardTitle>Sessions</CardTitle>
+                    <CardDescription>Agents currently associated with this project.</CardDescription>
+                  </div>
+                  <Button variant="secondary" size="sm" onClick={onOpenSessions}>Open</Button>
+                </CardHeader>
+                <CardContent>
+                  <p className="mono-number text-3xl font-semibold text-ink">{projectSessions.length}</p>
+                  <p className="mt-2 text-[11px] text-muted">{projectSessions.reduce((sum, session) => sum + session.items.length, 0)} delivered context items</p>
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        )}
+
+        {section === "repositories" && (
+          <div className="space-y-4">
+            <GitResourceForm project={selectedProject} onRefresh={onRefresh} />
+            {selectedProject.resources.map((resource) => {
+              const containsActiveView = resource.views.some((view) => view.id === activeView)
+              return (
+                <details key={resource.id} open={containsActiveView} className="group/resource surface-row overflow-hidden rounded-[14px]">
+                  <summary className="cursor-pointer list-none p-5 [&::-webkit-details-marker]:hidden">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <GitFork className="size-4 text-signal" />
+                          <span className="text-sm font-semibold text-ink">{resource.alias || resource.label}</span>
+                          <Badge variant="blue">{resource.provider}</Badge>
+                          <Badge variant="neutral">{resource.views.length} views</Badge>
+                        </div>
+                        <p className="mt-2 break-all font-mono text-[10px] text-dim">{resource.externalIdentity}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] text-dim">{relativeTime(resource.updatedAt)}</span>
+                        <ChevronRight className="size-4 text-dim transition-transform group-open/resource:rotate-90" />
+                      </div>
+                    </div>
+                  </summary>
+                  <div className="grid gap-2 border-t border-line px-5 py-4 xl:grid-cols-2">
+                    {resource.views.map((view) => {
+                      const branch = typeof view.properties.branch === "string" ? view.properties.branch : "detached"
+                      const viewSessionCount = projectSessions.filter(
+                        (session) => session.context?.activeViewId === view.id || session.context?.resource?.viewId === view.id,
+                      ).length
+                      return (
+                        <div key={view.id} className={cn("relative rounded-[11px] border border-line bg-panel px-4 py-3 pl-8", view.id === activeView && "border-signal/35 bg-signal-soft/40")}>
+                          <span className="absolute left-3 top-4 size-2 rounded-full bg-accent-teal" />
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-[11px] font-semibold text-ink">{branch}</span>
+                            {view.properties.dirty === true && <Badge variant="warning">Dirty</Badge>}
+                            {view.role && <Badge variant="neutral">{view.role}</Badge>}
+                            {view.id === activeView && <Badge variant="success">Active</Badge>}
+                            <Badge variant="neutral">{viewSessionCount} sessions</Badge>
+                          </div>
+                          <p className="mt-2 break-all font-mono text-[10px] leading-5 text-muted">{view.locator}</p>
+                        </div>
+                      )
+                    })}
+                    {!resource.views.length && (
+                      <div className="rounded-[11px] border border-dashed border-line bg-panel px-4 py-3 text-[11px] leading-5 text-muted">
+                        Remote repository registered. Attach a local checkout to expose worktree views.
+                      </div>
+                    )}
+                  </div>
+                </details>
+              )
+            })}
+            {!selectedProject.resources.length && (
+              <Card><EmptyState icon={<GitFork />} title="No repositories attached" detail="Add a remote URL or local checkout above to connect the first repository." /></Card>
+            )}
+          </div>
+        )}
+
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-5">
       <Card>
-        <CardHeader>
-          <div>
-            <CardTitle>Create a project context</CardTitle>
-            <CardDescription>
-              A project is a durable namespace for intent and knowledge. Resources provide the changing
-              material an agent works with.
-            </CardDescription>
-          </div>
-          <FolderKanban className="size-5 text-signal" />
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={create} className="grid gap-3 lg:grid-cols-[18rem_minmax(0,1fr)_auto]">
+        <details open={!projects.length} className="group/create">
+          <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+            <CardHeader>
+              <div>
+                <CardTitle>Create a project context</CardTitle>
+                <CardDescription>Add another durable boundary only when the work needs one.</CardDescription>
+              </div>
+              <ChevronRight className="size-5 text-signal transition-transform group-open/create:rotate-90" />
+            </CardHeader>
+          </summary>
+          <CardContent>
+            <form onSubmit={create} className="grid gap-3 lg:grid-cols-[18rem_minmax(0,1fr)_auto]">
             <Input
               value={name}
               onChange={(event) => setName(event.target.value)}
@@ -1745,105 +1964,42 @@ function ProjectPanel({
               {pending ? <RefreshCw className="animate-spin" /> : <Plus />}
               Create project
             </Button>
-          </form>
-          {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
-        </CardContent>
+            </form>
+            {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+          </CardContent>
+        </details>
       </Card>
 
+      <div className="grid gap-3 xl:grid-cols-2">
       {projects.map((project) => {
         const resourceCount = project.resources.length
         const viewCount = project.resources.reduce((sum, resource) => sum + resource.views.length, 0)
+        const projectSessions = sessions.filter((session) => session.project === project.id)
         return (
-          <Card key={project.id} className={cn(project.id === activeProject && "border-signal/35")}>
-            <CardHeader>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <CardTitle>{project.name}</CardTitle>
-                  {project.id === activeProject && <Badge variant="success">Active context</Badge>}
-                  <Badge variant="neutral">{resourceCount} resources</Badge>
-                  <Badge variant="neutral">{viewCount} views</Badge>
+          <Card key={project.id} className={cn("transition hover:-translate-y-0.5 hover:border-signal/35 hover:shadow-sm", project.id === activeProject && "border-signal/35")}>
+            <button type="button" onClick={() => { setSelectedProjectId(project.id); setSection("overview") }} className="w-full text-left">
+              <CardHeader>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <CardTitle>{project.name}</CardTitle>
+                    {project.id === activeProject && <Badge variant="success">Active context</Badge>}
+                  </div>
+                  <CardDescription>{project.description || "No description yet."}</CardDescription>
                 </div>
-                <CardDescription>
-                  {project.description || "No description yet."}
-                </CardDescription>
-                <p className="mt-2 truncate font-mono text-[10px] text-dim">{project.id}</p>
-              </div>
-              <FolderKanban className="size-5 text-signal" />
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {project.resources.map((resource) => (
-                  <article key={resource.id} className="surface-row rounded-[14px] p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <GitFork className="size-4 text-signal" />
-                          <span className="text-sm font-semibold text-ink">
-                            {resource.alias || resource.label}
-                          </span>
-                          <Badge variant="blue">{resource.provider}</Badge>
-                          <Badge variant="neutral">{resource.kind}</Badge>
-                        </div>
-                        <p className="mt-2 break-all font-mono text-[10px] text-dim">
-                          {resource.externalIdentity}
-                        </p>
-                      </div>
-                      <span className="text-[10px] text-dim">{relativeTime(resource.updatedAt)}</span>
-                    </div>
-                    <div className="mt-4 grid gap-2 xl:grid-cols-2">
-                      {resource.views.map((view) => {
-                        const branch =
-                          typeof view.properties.branch === "string"
-                            ? view.properties.branch
-                            : "detached"
-                        const dirty = view.properties.dirty === true
-                        return (
-                          <div
-                            key={view.id}
-                            className={cn(
-                              "rounded-[11px] border border-line bg-panel px-4 py-3",
-                              view.id === activeView && "border-signal/35 bg-signal-soft/40",
-                            )}
-                          >
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-mono text-[11px] font-semibold text-ink">
-                                {branch}
-                              </span>
-                              {dirty && <Badge variant="warning">Dirty</Badge>}
-                              {view.id === activeView && <Badge variant="success">Active view</Badge>}
-                              {view.revision && (
-                                <span className="font-mono text-[10px] text-dim">
-                                  {view.revision.slice(0, 10)}
-                                </span>
-                              )}
-                            </div>
-                            <p className="mt-2 break-all font-mono text-[10px] leading-5 text-muted">
-                              {view.locator}
-                            </p>
-                          </div>
-                        )
-                      })}
-                      {!resource.views.length && (
-                        <div className="rounded-[11px] border border-dashed border-line bg-panel px-4 py-3 text-[11px] leading-5 text-muted">
-                          Remote Resource registered. Attach a local checkout with the same origin URL when structural or file context is needed.
-                        </div>
-                      )}
-                    </div>
-                  </article>
-                ))}
-                {!project.resources.length && (
-                  <EmptyState
-                    icon={<GitFork />}
-                    title="No resources attached"
-                    detail="The project namespace already exists. Attach material only when it should inform this work context."
-                  />
-                )}
-              </div>
-              <GitResourceForm project={project} onRefresh={onRefresh} />
-            </CardContent>
+                <ChevronRight className="size-5 shrink-0 text-signal" />
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-3 gap-2 border-t border-line pt-4 text-center">
+                  <div><p className="mono-number text-lg font-semibold text-ink">{resourceCount}</p><p className="text-[10px] text-dim">Repositories</p></div>
+                  <div><p className="mono-number text-lg font-semibold text-ink">{viewCount}</p><p className="text-[10px] text-dim">Views</p></div>
+                  <div><p className="mono-number text-lg font-semibold text-ink">{projectSessions.length}</p><p className="text-[10px] text-dim">Sessions</p></div>
+                </div>
+              </CardContent>
+            </button>
           </Card>
         )
       })}
+      </div>
 
       {!projects.length && (
         <Card>
@@ -1870,6 +2026,7 @@ function EmptyState({ icon, title, detail }: { icon: ReactNode; title: string; d
 
 export function Dashboard() {
   const [page, setPage] = useState<Page>("overview")
+  const [workspaceSection, setWorkspaceSection] = useState<"projects" | "sessions">("projects")
   const [view, setView] = useState(emptyView)
   const [projects, setProjects] = useState<ProjectNamespace[]>([])
   const [recall, setRecall] = useState(emptyRecall)
@@ -1934,7 +2091,7 @@ export function Dashboard() {
 
   const navigation: Array<{ id: Page; label: string; icon: ReactNode; count?: number }> = [
     { id: "overview", label: "Overview", icon: <LayoutDashboard /> },
-    { id: "projects", label: "Projects", icon: <FolderKanban />, count: projects.length },
+    { id: "workspace", label: "Workspace", icon: <FolderKanban />, count: projects.length },
     { id: "delivery", label: "Delivery", icon: <Route />, count: contextDecisions.length },
     { id: "context", label: "Context", icon: <Database />, count: view.topics.length },
     {
@@ -1945,7 +2102,6 @@ export function Dashboard() {
         needsReviews.filter((item) => item.status === "open").length
         + globalMemoryRequests.filter((item) => item.status === "pending").length,
     },
-    { id: "sessions", label: "Sessions", icon: <Users />, count: view.sessions.length },
     {
       id: "requests",
       label: "Requests",
@@ -2107,22 +2263,45 @@ export function Dashboard() {
                     tone="teal"
                   />
                 </section>
-                <section className="grid items-start gap-5 xl:grid-cols-[1.2fr_.8fr]">
-                  <SessionList sessions={view.sessions.slice(0, 5)} />
-                  <div className="space-y-5">
-                    <RecallPanel recall={recall} />
-                    <RequestQueue requests={openRequests.slice(0, 3)} topics={view.topics} onRefresh={refresh} />
-                  </div>
+                <section className="grid items-start gap-5 xl:grid-cols-2">
+                  <RequestQueue requests={openRequests.slice(0, 3)} topics={view.topics} onRefresh={refresh} />
+                  <RecallPanel recall={recall} />
                 </section>
               </div>
             )}
-            {page === "projects" && (
-              <ProjectPanel
-                projects={projects}
-                activeProject={view.project}
-                activeView={view.graphProject}
-                onRefresh={refresh}
-              />
+            {page === "workspace" && (
+              <div className="space-y-5">
+                <div className="flex gap-1 rounded-[14px] border border-line bg-panel p-1.5">
+                  <Button
+                    variant={workspaceSection === "projects" ? "secondary" : "ghost"}
+                    size="sm"
+                    onClick={() => setWorkspaceSection("projects")}
+                    className={cn(workspaceSection === "projects" && "border-signal/20 text-signal")}
+                  >
+                    <FolderKanban /> Projects <Badge variant="neutral">{projects.length}</Badge>
+                  </Button>
+                  <Button
+                    variant={workspaceSection === "sessions" ? "secondary" : "ghost"}
+                    size="sm"
+                    onClick={() => setWorkspaceSection("sessions")}
+                    className={cn(workspaceSection === "sessions" && "border-signal/20 text-signal")}
+                  >
+                    <Users /> Sessions <Badge variant="neutral">{view.sessions.length}</Badge>
+                  </Button>
+                </div>
+                {workspaceSection === "projects" ? (
+                  <ProjectPanel
+                    projects={projects}
+                    sessions={view.sessions}
+                    activeProject={view.project}
+                    activeView={view.resourceBinding?.viewId ?? ""}
+                    onOpenSessions={() => setWorkspaceSection("sessions")}
+                    onRefresh={refresh}
+                  />
+                ) : (
+                  <SessionList sessions={view.sessions} />
+                )}
+              </div>
             )}
             {page === "delivery" && (
               <PreparationPanel
@@ -2142,7 +2321,6 @@ export function Dashboard() {
                 onRefresh={refresh}
               />
             )}
-            {page === "sessions" && <SessionList sessions={view.sessions} />}
             {page === "requests" && (
               <RequestQueue requests={requests} topics={view.topics} onRefresh={refresh} />
             )}

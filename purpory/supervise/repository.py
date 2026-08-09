@@ -23,7 +23,7 @@ from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 from purpory.supervise.identity import resolve_project_id
 
 DEFAULT_DB_PATH = Path.home() / ".purpory" / "context.db"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MEMORY_NAMESPACE = "memory"
 EMBEDDING_PRIORITIES = {"expanded": 60, "remembered": 80, "delivered": 100}
 RESOURCE_NAMESPACE = "resource"
@@ -52,6 +52,14 @@ def default_db_path() -> Path:
 
 def value_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _delivery_label(key: str, rendered: str) -> str:
+    for line in rendered.splitlines():
+        match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if match:
+            return match.group(1).strip()[:160]
+    return key
 
 
 def topic_hash(topic: dict[str, Any]) -> str:
@@ -221,11 +229,11 @@ class ContextGraphRepository:
                 CREATE TABLE IF NOT EXISTS deliveries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL,
-                    project TEXT,
+                    project TEXT NOT NULL DEFAULT '',
                     key TEXT NOT NULL,
                     value_hash TEXT NOT NULL,
                     delivered_at INTEGER NOT NULL,
-                    UNIQUE(session_id, key)
+                    UNIQUE(session_id, project, key)
                 );
 
                 CREATE TABLE IF NOT EXISTS requests (
@@ -385,6 +393,8 @@ class ContextGraphRepository:
                     "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
                 )
             self._migrate_registry_tables(connection)
+            self._migrate_delivery_scope(connection)
+            self._initialize_project_view_bindings(connection)
             self._initialize_views(connection)
             self._initialize_fts(connection)
             connection.executescript(
@@ -546,6 +556,91 @@ class ContextGraphRepository:
             WHERE namespace = 'memory' AND project = ''
             """
         )
+
+    @classmethod
+    def _initialize_project_view_bindings(cls, connection: sqlite3.Connection) -> None:
+        """Give legacy views one deterministic home project."""
+        timestamp = _now()
+        rows = connection.execute(
+            """
+            SELECT project.id AS project_id, view.id AS view_id
+            FROM context_edges resource_view
+            JOIN context_nodes view ON view.id = resource_view.target_id
+            JOIN context_edges project_resource
+              ON project_resource.target_id = resource_view.source_id
+            JOIN context_nodes project ON project.id = project_resource.source_id
+            WHERE resource_view.relation = 'has-view'
+              AND project_resource.relation = 'contains'
+              AND view.node_type = 'resource-view'
+              AND project.node_type = 'project'
+              AND NOT EXISTS (
+                  SELECT 1 FROM context_edges project_view
+                  WHERE project_view.target_id = view.id
+                    AND project_view.relation = 'uses-view'
+              )
+            ORDER BY project_resource.created_at, project.stable_key
+            """
+        ).fetchall()
+        bound: set[str] = set()
+        for row in rows:
+            view_id = str(row["view_id"])
+            if view_id in bound:
+                continue
+            cls._upsert_edge(
+                connection,
+                source_id=str(row["project_id"]),
+                target_id=view_id,
+                relation="uses-view",
+                origin="registered",
+                properties={"role": "home"},
+                timestamp=timestamp,
+            )
+            bound.add(view_id)
+
+    @staticmethod
+    def _migrate_delivery_scope(connection: sqlite3.Connection) -> None:
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'deliveries'"
+        ).fetchone()
+        normalized = " ".join(str(schema["sql"] or "").split()) if schema else ""
+        if "UNIQUE(session_id, project, key)" in normalized:
+            return
+        rows = connection.execute(
+            "SELECT session_id, project, key, value_hash, delivered_at "
+            "FROM deliveries ORDER BY delivered_at"
+        ).fetchall()
+        connection.executescript(
+            """
+            CREATE TABLE deliveries_v7 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                project TEXT NOT NULL DEFAULT '',
+                key TEXT NOT NULL,
+                value_hash TEXT NOT NULL,
+                delivered_at INTEGER NOT NULL,
+                UNIQUE(session_id, project, key)
+            );
+            DROP TABLE deliveries;
+            ALTER TABLE deliveries_v7 RENAME TO deliveries;
+            """
+        )
+        for row in rows:
+            connection.execute(
+                """
+                INSERT INTO deliveries(session_id, project, key, value_hash, delivered_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, project, key) DO UPDATE SET
+                    value_hash = excluded.value_hash,
+                    delivered_at = excluded.delivered_at
+                """,
+                (
+                    row["session_id"],
+                    row["project"] or "",
+                    row["key"],
+                    row["value_hash"],
+                    row["delivered_at"],
+                ),
+            )
 
     @staticmethod
     def _upsert_registry_node(
@@ -850,53 +945,6 @@ class ContextGraphRepository:
             raise RuntimeError("created project namespace could not be loaded")
         return project
 
-    def ensure_project_namespace(self, namespace_id: str, *, name: str) -> dict[str, Any]:
-        """Create the implicit project used when a repository is first observed."""
-        normalized_id = _registry_text(namespace_id, field="project id", maximum=255)
-        existing = self.get_project_namespace(normalized_id)
-        if existing is not None:
-            return existing
-        normalized_name = _registry_text(name, field="project name", maximum=120)
-        timestamp = _now()
-        with self.connect() as connection:
-            project_node_id = self._upsert_registry_node(
-                connection,
-                namespace=CONTEXT_NAMESPACE,
-                project=normalized_id,
-                stable_key=normalized_id,
-                node_type="project",
-                label=normalized_name,
-                value=None,
-                source=None,
-                origin="observed",
-                properties={"description": "", "parentId": None},
-                timestamp=timestamp,
-            )
-            for memory in connection.execute(
-                "SELECT id FROM context_nodes WHERE namespace = ? AND project = ?",
-                (MEMORY_NAMESPACE, normalized_id),
-            ).fetchall():
-                self._upsert_edge(
-                    connection,
-                    source_id=project_node_id,
-                    target_id=str(memory["id"]),
-                    relation="contains",
-                    origin="observed",
-                    timestamp=timestamp,
-                )
-            self._record_event(
-                connection,
-                "project.discovered",
-                project=normalized_id,
-                payload={"name": normalized_name},
-                occurred_at=timestamp,
-            )
-            connection.commit()
-        project = self.get_project_namespace(normalized_id)
-        if project is None:  # pragma: no cover - transaction invariant
-            raise RuntimeError("discovered project namespace could not be loaded")
-        return project
-
     def get_project_namespace(self, namespace_id: str) -> dict[str, Any] | None:
         normalized_id = _registry_text(
             namespace_id,
@@ -947,13 +995,17 @@ class ContextGraphRepository:
         for resource in resource_rows:
             view_rows = connection.execute(
                 """
-                SELECT view.* FROM context_edges relation
+                SELECT view.*, project_view.properties_json AS binding_properties
+                FROM context_edges relation
                 JOIN context_nodes view ON view.id = relation.target_id
+                JOIN context_edges project_view ON project_view.target_id = view.id
+                  AND project_view.source_id = ?
+                  AND project_view.relation = 'uses-view'
                 WHERE relation.source_id = ? AND relation.relation = 'has-view'
                   AND view.namespace = ? AND view.node_type = 'resource-view'
                 ORDER BY view.source
                 """,
-                (resource["id"], RESOURCE_NAMESPACE),
+                (row["id"], resource["id"], RESOURCE_NAMESPACE),
             ).fetchall()
             resource_properties = _json_object(resource["properties_json"])
             binding_properties = _json_object(resource["binding_properties"])
@@ -974,6 +1026,7 @@ class ContextGraphRepository:
                             "locator": properties.get("locator", view["source"]),
                             "revision": properties.get("revision"),
                             "stateHash": properties.get("stateHash"),
+                            "role": _json_object(view["binding_properties"]).get("role"),
                             "properties": properties,
                             "observedAt": view["set_at"],
                         }
@@ -1004,6 +1057,7 @@ class ContextGraphRepository:
         label: str,
         properties: dict[str, Any] | None = None,
         views: Sequence[dict[str, Any]] = (),
+        home_view_locator: str | None = None,
         alias: str | None = None,
         observed_at: int | None = None,
     ) -> dict[str, Any]:
@@ -1164,6 +1218,45 @@ class ContextGraphRepository:
                     properties={"revision": revision, "stateHash": state_hash},
                     timestamp=timestamp,
                 )
+                existing_view_binding = connection.execute(
+                    """
+                    SELECT source_id, properties_json FROM context_edges
+                    WHERE target_id = ? AND relation = 'uses-view'
+                    ORDER BY CASE json_extract(properties_json, '$.role')
+                                 WHEN 'home' THEN 0 ELSE 1 END,
+                             created_at, source_id
+                    LIMIT 1
+                    """,
+                    (view_node_id,),
+                ).fetchone()
+                make_home = existing_view_binding is None or (
+                    home_view_locator is not None
+                    and Path(locator).expanduser().resolve()
+                    == Path(home_view_locator).expanduser().resolve()
+                )
+                if make_home:
+                    if (
+                        existing_view_binding is not None
+                        and str(existing_view_binding["source_id"]) != project_node_id
+                    ):
+                        self._upsert_edge(
+                            connection,
+                            source_id=str(existing_view_binding["source_id"]),
+                            target_id=view_node_id,
+                            relation="uses-view",
+                            origin="registered",
+                            properties={"role": "shared"},
+                            timestamp=timestamp,
+                        )
+                    self._upsert_edge(
+                        connection,
+                        source_id=project_node_id,
+                        target_id=view_node_id,
+                        relation="uses-view",
+                        origin="registered",
+                        properties={"role": "home"},
+                        timestamp=timestamp,
+                    )
             connection.execute(
                 "UPDATE context_nodes SET updated_at = ? WHERE id = ?",
                 (timestamp, project_node_id),
@@ -1209,6 +1302,17 @@ class ContextGraphRepository:
                   AND resource.node_type LIKE 'resource.%'
                   AND json_extract(resource.properties_json, '$.provider') = ?
                   AND binding.relation = 'contains' AND project.node_type = 'project'
+                ORDER BY CASE WHEN EXISTS (
+                    SELECT 1 FROM context_edges resource_view
+                    JOIN context_edges project_view
+                      ON project_view.target_id = resource_view.target_id
+                    WHERE resource_view.source_id = resource.id
+                      AND resource_view.relation = 'has-view'
+                      AND project_view.source_id = project.id
+                      AND project_view.relation = 'uses-view'
+                      AND json_extract(project_view.properties_json, '$.role') = 'home'
+                ) THEN 0 ELSE 1 END,
+                binding.created_at, project.stable_key
                 LIMIT 1
                 """,
                 (RESOURCE_NAMESPACE, normalized_identity, normalized_provider),
@@ -1228,17 +1332,21 @@ class ContextGraphRepository:
                        resource.label AS resource_label,
                        resource.properties_json AS resource_properties,
                        view.stable_key AS view_id, view.source AS locator,
-                       view.properties_json AS view_properties
+                       view.properties_json AS view_properties,
+                       project_view.properties_json AS binding_properties
                 FROM context_nodes view
                 JOIN context_edges view_edge ON view_edge.target_id = view.id
                     AND view_edge.relation = 'has-view'
                 JOIN context_nodes resource ON resource.id = view_edge.source_id
-                JOIN context_edges binding ON binding.target_id = resource.id
-                    AND binding.relation = 'contains'
-                JOIN context_nodes project ON project.id = binding.source_id
+                JOIN context_edges project_view ON project_view.target_id = view.id
+                    AND project_view.relation = 'uses-view'
+                JOIN context_nodes project ON project.id = project_view.source_id
                 WHERE view.namespace = ? AND view.node_type = 'resource-view'
                   AND project.node_type = 'project'
-                ORDER BY length(view.source) DESC, view.source
+                ORDER BY length(view.source) DESC,
+                         CASE json_extract(project_view.properties_json, '$.role')
+                             WHEN 'home' THEN 0 ELSE 1 END,
+                         view.source, project.stable_key
                 """
                 , (RESOURCE_NAMESPACE,)
             ).fetchall()
@@ -1263,6 +1371,7 @@ class ContextGraphRepository:
                 "revision": view_properties.get("revision"),
                 "stateHash": view_properties.get("stateHash"),
                 "properties": view_properties,
+                "role": _json_object(row["binding_properties"]).get("role"),
             }
         return None
 
@@ -3436,7 +3545,11 @@ class ContextGraphRepository:
         digest = value_hash(delivered_value)
         with self.connect() as connection:
             node = connection.execute(
-                "SELECT id FROM context_nodes WHERE id = ?", (node_id,)
+                """
+                SELECT id, namespace, node_type, label, source, origin
+                FROM context_nodes WHERE id = ?
+                """,
+                (node_id,),
             ).fetchone()
             if node is None:
                 raise KeyError(f"context node not found: {node_id}")
@@ -3444,8 +3557,7 @@ class ContextGraphRepository:
                 """
                 INSERT INTO deliveries(session_id, project, key, value_hash, delivered_at)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, key) DO UPDATE SET
-                    project = excluded.project,
+                ON CONFLICT(session_id, project, key) DO UPDATE SET
                     value_hash = excluded.value_hash,
                     delivered_at = excluded.delivered_at
                 """,
@@ -3482,6 +3594,11 @@ class ContextGraphRepository:
                     "key": normalized_key,
                     "valueHash": digest,
                     "rendered": delivered_value,
+                    "label": node["label"],
+                    "namespace": node["namespace"],
+                    "kind": node["node_type"],
+                    "origin": node["origin"],
+                    "source": node["source"],
                 },
                 occurred_at=timestamp,
             )
@@ -3736,7 +3853,7 @@ class ContextGraphRepository:
         with self.connect() as connection:
             topic = connection.execute(
                 """
-                SELECT id FROM context_nodes
+                SELECT id, namespace, node_type, label, source, origin FROM context_nodes
                 WHERE namespace = ? AND project = '' AND stable_key = ?
                 """,
                 (MEMORY_NAMESPACE, key),
@@ -3747,12 +3864,11 @@ class ContextGraphRepository:
                 """
                 INSERT INTO deliveries(session_id, project, key, value_hash, delivered_at)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, key) DO UPDATE SET
-                    project = excluded.project,
+                ON CONFLICT(session_id, project, key) DO UPDATE SET
                     value_hash = excluded.value_hash,
                     delivered_at = excluded.delivered_at
                 """,
-                (normalized_session, project, key, digest, timestamp),
+                (normalized_session, normalized_project, key, digest, timestamp),
             )
             session_node_id = self._upsert_activity_node(
                 connection,
@@ -3780,7 +3896,16 @@ class ContextGraphRepository:
                 object_id=topic["id"],
                 session_id=normalized_session,
                 project=project,
-                payload={"key": key, "valueHash": digest, "rendered": delivered_value},
+                payload={
+                    "key": key,
+                    "valueHash": digest,
+                    "rendered": delivered_value,
+                    "label": topic["label"],
+                    "namespace": topic["namespace"],
+                    "kind": topic["node_type"],
+                    "origin": topic["origin"],
+                    "source": topic["source"],
+                },
                 occurred_at=timestamp,
             )
             connection.commit()
@@ -3817,7 +3942,7 @@ class ContextGraphRepository:
             ).fetchall()
             event_rows = connection.execute(
                 """
-                SELECT event.session_id, event.payload_json,
+                SELECT event.session_id, event.project, event.payload_json,
                        node.namespace, node.node_type, node.label, node.source, node.origin
                 FROM context_events event
                 LEFT JOIN context_nodes node ON node.id = event.object_id
@@ -3830,27 +3955,28 @@ class ContextGraphRepository:
             (str(row["stable_key"]), str(row["project"])): _json_object(row["properties_json"])
             for row in session_rows
         }
-        details: dict[tuple[str, str], dict[str, Any]] = {}
+        details: dict[tuple[str, str, str], dict[str, Any]] = {}
         for row in event_rows:
             payload = _json_object(row["payload_json"])
             key = str(payload.get("key") or "")
-            identity = (str(row["session_id"]), key)
+            identity = (str(row["session_id"]), str(row["project"] or ""), key)
             if not key or identity in details:
                 continue
             rendered = str(payload.get("rendered") or "").strip()
             details[identity] = {
-                "label": row["label"] or key,
-                "namespace": row["namespace"],
-                "kind": row["node_type"],
-                "origin": row["origin"],
-                "source": row["source"],
+                "label": row["label"] or payload.get("label") or _delivery_label(key, rendered),
+                "namespace": row["namespace"] or payload.get("namespace"),
+                "kind": row["node_type"] or payload.get("kind"),
+                "origin": row["origin"] or payload.get("origin"),
+                "source": row["source"] or payload.get("source"),
                 "preview": rendered[:400].rstrip() if rendered else None,
             }
 
-        sessions: dict[str, dict[str, Any]] = {}
+        sessions: dict[tuple[str, str], dict[str, Any]] = {}
         for row in rows:
+            identity = (str(row["session_id"]), str(row["project"] or ""))
             entry = sessions.setdefault(
-                row["session_id"],
+                identity,
                 {
                     "id": row["session_id"],
                     "project": row["project"],
@@ -3867,7 +3993,7 @@ class ContextGraphRepository:
                     "key": row["key"],
                     "valueHash": row["value_hash"],
                     "deliveredAt": row["delivered_at"],
-                    **details.get((str(row["session_id"]), str(row["key"])), {}),
+                    **details.get((*identity, str(row["key"])), {}),
                 }
             )
         return sorted(
@@ -3878,29 +4004,37 @@ class ContextGraphRepository:
             ),
         )
 
-    def session_topic_keys(self, session_id: str) -> list[str]:
+    def session_topic_keys(self, session_id: str, *, project: str | None = None) -> list[str]:
         normalized = session_id.strip()
         if not normalized:
             raise ValueError("session_id cannot be empty")
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT key FROM deliveries WHERE session_id = ? ORDER BY key ASC",
-                (normalized,),
+                "SELECT key FROM deliveries WHERE session_id = ?"
+                + (" AND project = ?" if project is not None else "")
+                + " ORDER BY key ASC",
+                (normalized, project) if project is not None else (normalized,),
             ).fetchall()
         return [str(row["key"]) for row in rows]
 
-    def session_delivery_hashes(self, session_id: str) -> dict[str, str]:
+    def session_delivery_hashes(
+        self, session_id: str, *, project: str | None = None
+    ) -> dict[str, str]:
         normalized = session_id.strip()
         if not normalized:
             raise ValueError("session_id cannot be empty")
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT key, value_hash FROM deliveries WHERE session_id = ? ORDER BY key ASC",
-                (normalized,),
+                "SELECT key, value_hash FROM deliveries WHERE session_id = ?"
+                + (" AND project = ?" if project is not None else "")
+                + " ORDER BY key ASC",
+                (normalized, project) if project is not None else (normalized,),
             ).fetchall()
         return {str(row["key"]): str(row["value_hash"]) for row in rows}
 
-    def session_delivered_node_ids(self, session_id: str) -> set[str]:
+    def session_delivered_node_ids(
+        self, session_id: str, *, project: str | None = None
+    ) -> set[str]:
         normalized = session_id.strip()
         if not normalized:
             raise ValueError("session_id cannot be empty")
@@ -3912,8 +4046,9 @@ class ContextGraphRepository:
                 WHERE session_id = ?
                   AND event_type = 'context.delivered'
                   AND object_id IS NOT NULL
-                """,
-                (normalized,),
+                """
+                + (" AND project = ?" if project is not None else ""),
+                (normalized, project) if project is not None else (normalized,),
             ).fetchall()
         return {str(row["object_id"]) for row in rows}
 

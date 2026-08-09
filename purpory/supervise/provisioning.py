@@ -301,6 +301,7 @@ class ContextProvisioningService:
         project: str,
         graph_projects: Sequence[str] = (),
         resource_node_ids: Sequence[str] = (),
+        selected_views: Sequence[dict[str, Any]] = (),
         stale_after_days: int = DEFAULT_STALE_DAYS,
     ) -> None:
         self.repository = repository
@@ -311,6 +312,7 @@ class ContextProvisioningService:
         )
         self.project = project.strip()
         self.resource_node_ids = tuple(dict.fromkeys(resource_node_ids))
+        self.selected_views = tuple(selected_views)
         self.stale_after_days = stale_after_days
         if not self.graph_project:
             raise ValueError("graph_project cannot be empty")
@@ -318,8 +320,17 @@ class ContextProvisioningService:
             raise ValueError("project cannot be empty")
         binding = repository.resolve_resource_view(self.root)
         self.session_context = {
+            "projectId": self.project,
             "graphProject": self.graph_project,
             "graphProjects": list(self.graph_projects),
+            "activeViewId": binding.get("viewId") if binding is not None else None,
+            "selectedViews": [
+                {
+                    key: view.get(key)
+                    for key in ("id", "locator", "revision", "stateHash", "role")
+                }
+                for view in self.selected_views
+            ],
             "resource": (
                 {
                     key: binding.get(key)
@@ -349,7 +360,11 @@ class ContextProvisioningService:
         )
         namespace_counts = inventory["namespaces"]
         prefix_counts = Counter(key.split(".", 1)[0] for key in inventory["topicKeys"])
-        previous = self.repository.session_topic_keys(session_id)[:1_000] if session_id else []
+        previous = (
+            self.repository.session_topic_keys(session_id, project=self.project)[:1_000]
+            if session_id
+            else []
+        )
         snapshots = [
             snapshot
             for graph_project in self.graph_projects
@@ -478,7 +493,7 @@ class ContextProvisioningService:
             [node["id"] for node in nodes if node["namespace"] == "memory"]
         )
         previous = set(previous_deliveries) or set(
-            self.repository.session_topic_keys(session_id)[:1_000]
+            self.repository.session_topic_keys(session_id, project=self.project)[:1_000]
         )
 
         ranked: list[dict[str, Any]] = []
@@ -543,7 +558,7 @@ class ContextProvisioningService:
             [candidate["nodeId"] for candidate in candidates],
             excluded_ids={candidate["nodeId"] for candidate in candidates}
             | connected_ids
-            | self.repository.session_delivered_node_ids(session_id),
+            | self.repository.session_delivered_node_ids(session_id, project=self.project),
             gaps=gaps,
             limit=min(parsed_limit, MAX_FRONTIER_PREVIEW),
             adjacent=candidate_edges,
@@ -673,7 +688,13 @@ class ContextProvisioningService:
         exploration = self._exploration(
             frontier or list(nodes),
             excluded_ids=set(nodes)
-            | (self.repository.session_delivered_node_ids(session_id) if session_id else set()),
+            | (
+                self.repository.session_delivered_node_ids(
+                    session_id, project=self.project
+                )
+                if session_id
+                else set()
+            ),
             limit=min(parsed_limit, MAX_FRONTIER_PREVIEW),
         )
         return {
@@ -837,7 +858,9 @@ class ContextProvisioningService:
             raise ValueError("token_budget must be between 128 and 32768")
         nodes = {node["id"]: node for node in self.repository.get_context_nodes(selected_ids)}
         candidate_by_id = {item.get("nodeId"): item for item in candidates}
-        delivered_hashes = self.repository.session_delivery_hashes(session)
+        delivered_hashes = self.repository.session_delivery_hashes(
+            session, project=self.project
+        )
         remaining = parsed_budget
         delivery: list[dict[str, Any]] = []
         omitted: list[dict[str, Any]] = []

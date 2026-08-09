@@ -217,6 +217,10 @@ export function selectModel(input: { model: string; role?: "gate" | "reconcile" 
   return mutate<ModelStatus>("/api/model/select", "POST", input)
 }
 
+export function installModel(input: { model: string }) {
+  return mutate<ModelStatus & { action: "installed" | "kept" }>("/api/model/install", "POST", input)
+}
+
 export function subscribeToEvents(onEvent: () => void) {
   const source = new EventSource(readUrl("/api/stream"))
   for (const event of ["topic", "seed", "request", "context", "memory", "global-memory", "project", "model"]) {

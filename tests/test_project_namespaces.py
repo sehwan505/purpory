@@ -86,7 +86,11 @@ def test_project_namespace_accepts_provider_neutral_resources(tmp_path: Path) ->
     nodes = repository.get_context_nodes(selection["nodeIds"])
     assert {node["namespace"] for node in nodes} == {"context", "resource"}
     edges = repository.adjacent_context_edges(selection["nodeIds"])
-    assert {edge["relation"] for edge in edges} == {"contains", "has-view"}
+    assert {edge["relation"] for edge in edges} == {
+        "contains",
+        "has-view",
+        "uses-view",
+    }
 
 
 def test_same_resource_can_participate_in_multiple_projects(tmp_path: Path) -> None:
@@ -106,6 +110,41 @@ def test_same_resource_can_participate_in_multiple_projects(tmp_path: Path) -> N
     assert repository.get_project_namespace(first["id"])["resources"][0]["id"] == (
         repository.get_project_namespace(second["id"])["resources"][0]["id"]
     )
+
+
+def test_view_has_one_home_project_even_when_resource_is_shared(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    first = repository.create_project_namespace("Product")
+    second = repository.create_project_namespace("Release")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    view = {"locator": str(checkout)}
+
+    repository.attach_resource(
+        first["id"],
+        provider="filesystem",
+        resource_kind="repository",
+        external_identity="shared-repository",
+        label="Shared repository",
+        views=[view],
+    )
+    repository.attach_resource(
+        second["id"],
+        provider="filesystem",
+        resource_kind="repository",
+        external_identity="shared-repository",
+        label="Shared repository",
+        views=[view],
+        home_view_locator=str(checkout),
+    )
+
+    assert repository.resolve_resource_view(checkout)["namespaceId"] == second["id"]
+    assert repository.get_project_namespace(first["id"])["resources"][0]["views"][0][
+        "role"
+    ] == "shared"
+    assert repository.get_project_namespace(second["id"])["resources"][0]["views"][0][
+        "role"
+    ] == "home"
 
 
 def test_v3_resource_binding_migrates_to_many_to_many(tmp_path: Path) -> None:
@@ -289,6 +328,11 @@ def test_project_memory_is_shared_while_worktree_graphs_stay_separate(
         [search["candidates"][0]["nodeId"]], session_id="main-agent"
     )
     session = main_service.repository.session_view(session_id="main-agent")[0]
+    assert session["context"]["projectId"] == project["id"]
+    assert session["context"]["activeViewId"] == view_ids[repository.resolve()]
+    assert {view["id"] for view in session["context"]["selectedViews"]} == {
+        view_ids[repository.resolve()]
+    }
     assert session["context"]["resource"]["externalIdentity"].endswith("repository/.git")
     assert session["context"]["resource"]["locator"] == str(repository.resolve())
     assert session["context"]["resource"]["properties"]["branch"] == "main"
@@ -335,6 +379,8 @@ def test_git_resource_is_discovered_and_reused_across_clones(tmp_path: Path) -> 
     database = tmp_path / "context.db"
 
     first_service = ContextService(db_path=database, root=first)
+    project = first_service.create_project("Product")
+    first_service.attach_git_resource(project["id"], first)
     first_service.set_topic(
         "decision.shared",
         value="Keep project memory isolated but available across clones.",
@@ -345,3 +391,15 @@ def test_git_resource_is_discovered_and_reused_across_clones(tmp_path: Path) -> 
     assert second_service.project_id == first_service.project_id
     assert second_service.topic("decision.shared")["value"].startswith("Keep project memory")
     assert second_service.view()["resourceBinding"]["locator"] == str(second.resolve())
+
+
+def test_observing_an_unregistered_repository_does_not_create_a_project(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    _git(checkout, "init", "-b", "main")
+    service = ContextService(db_path=tmp_path / "context.db", root=checkout)
+
+    assert service.project_id == resolve_project_id(checkout)
+    assert service.projects() == []
