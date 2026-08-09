@@ -213,9 +213,13 @@ export function submitContextFeedback(
   return mutate<{ decisionId: number; verdict: string }>(`/api/context/decisions/${id}/feedback`, "POST", input)
 }
 
+export function selectModel(input: { model: string; role?: "gate" | "reconcile" }) {
+  return mutate<ModelStatus>("/api/model/select", "POST", input)
+}
+
 export function subscribeToEvents(onEvent: () => void) {
   const source = new EventSource(readUrl("/api/stream"))
-  for (const event of ["topic", "seed", "request", "context", "memory", "global-memory", "project"]) {
+  for (const event of ["topic", "seed", "request", "context", "memory", "global-memory", "project", "model"]) {
     source.addEventListener(event, onEvent)
   }
   return () => source.close()

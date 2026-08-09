@@ -12,7 +12,13 @@ from urllib.parse import urlsplit
 
 from purpory.ollama import ollama_urls
 from purpory.supervise.gate.provider import GateProvider
-from purpory.supervise.gate.qwen import DEFAULT_MODEL, QwenGateProvider
+from purpory.supervise.gate.qwen import (
+    DEFAULT_MODEL,
+    DEFAULT_RECONCILE_MODEL,
+    RECOMMENDED_GATE_MODELS,
+    RECOMMENDED_RECONCILE_MODELS,
+    QwenGateProvider,
+)
 
 DEFAULT_START_TIMEOUT_SECONDS = 300.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -152,6 +158,29 @@ class GateModelManager:
             "message": "Purpory does not stop the shared Ollama daemon",
         }
 
+    def list_installed_models(self, *, timeout_seconds: float = 0.5) -> list[str]:
+        try:
+            models = _models(timeout_seconds=timeout_seconds)
+            return [
+                str(m.get("name") or m.get("model") or "")
+                for m in models
+                if str(m.get("name") or m.get("model") or "")
+            ]
+        except RuntimeError:
+            return []
+
+    def select_model(self, model_id: str, *, role: str = "gate") -> dict[str, Any]:
+        selected = model_id.strip()
+        if not selected or len(selected) > 255 or any(character.isspace() for character in selected):
+            raise ValueError("model must be one valid model name")
+        if role == "gate":
+            os.environ["PURPORY_GATE_MODEL"] = selected
+        elif role == "reconcile":
+            os.environ["PURPORY_RECONCILE_MODEL"] = selected
+        else:
+            raise ValueError(f"unsupported role: {role}")
+        return self.status(model=selected)
+
     def status(
         self,
         *,
@@ -160,8 +189,15 @@ class GateModelManager:
     ) -> dict[str, Any]:
         selected = model or _configured_model()
         _, endpoint = ollama_urls()
+        installed_models_list: list[str] = []
         try:
-            installed_model = _find_model(_models(timeout_seconds=timeout_seconds), selected)
+            all_models = _models(timeout_seconds=timeout_seconds)
+            installed_models_list = [
+                str(m.get("name") or m.get("model") or "")
+                for m in all_models
+                if str(m.get("name") or m.get("model") or "")
+            ]
+            installed_model = _find_model(all_models, selected)
         except RuntimeError as exc:
             return {
                 "installed": False,
@@ -177,6 +213,9 @@ class GateModelManager:
                 "runtimeRevision": None,
                 "logPath": None,
                 "error": str(exc),
+                "installedModels": [],
+                "availablePresets": RECOMMENDED_GATE_MODELS,
+                "reconcilePresets": RECOMMENDED_RECONCILE_MODELS,
             }
         digest = str(installed_model.get("digest") or "unknown") if installed_model else None
         return {
@@ -193,6 +232,9 @@ class GateModelManager:
             "runtimeRevision": digest,
             "logPath": None,
             "error": None,
+            "installedModels": installed_models_list,
+            "availablePresets": RECOMMENDED_GATE_MODELS,
+            "reconcilePresets": RECOMMENDED_RECONCILE_MODELS,
         }
 
     def provider(
