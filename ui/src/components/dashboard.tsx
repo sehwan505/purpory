@@ -1,6 +1,5 @@
 import {
   AlertCircle,
-  ArrowLeft,
   ArrowRight,
   BrainCircuit,
   Check,
@@ -97,7 +96,7 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
   workspace: {
     eyebrow: "Work context",
     title: "Workspace",
-    description: "Manage project resources and inspect agent sessions from one connected workspace.",
+    description: "Monitor the live path from Project through Repository and View to every agent Session.",
   },
   delivery: {
     eyebrow: "Routing intelligence",
@@ -171,13 +170,6 @@ function shortSession(id: string) {
 function readableContextKey(key: string) {
   const words = key.replace(/^(intent|knowledge|reference|material|code)\./, "").split(/[._-]+/)
   return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
-}
-
-function contextKind(item: Session["items"][number]) {
-  if (item.namespace === "code") return { label: "Material", variant: "blue" as const }
-  if (item.kind === "decision") return { label: "Intent", variant: "violet" as const }
-  if (item.kind === "doc-ref" || item.kind === "code-area") return { label: "Reference", variant: "teal" as const }
-  return { label: "Knowledge", variant: "default" as const }
 }
 
 function actionVariant(action: ContextAction) {
@@ -550,151 +542,40 @@ function CreateTopicDialog({ onCreated }: { onCreated: () => Promise<void> }) {
   )
 }
 
-function SessionList({ sessions, embedded = false }: { sessions: Session[]; embedded?: boolean }) {
-  const content = (
-    <>
-      <div className="space-y-3">
-        {sessions.map((session, index) => {
-          const latest = session.items.length
-            ? Math.max(...session.items.map((item) => item.deliveredAt))
-            : null
-          const resource = session.context?.resource
-          const branch = typeof resource?.properties?.branch === "string"
-            ? resource.properties.branch
-            : null
-          const agent = session.id.split(":", 1)[0]
+function SessionNode({ session }: { session: Session }) {
+  const latest = session.items.length
+    ? Math.max(...session.items.map((item) => item.deliveredAt))
+    : null
+  const live = latest !== null && Date.now() / 1000 - latest < 300
+  const agent = session.id.split(":", 1)[0]
+  return (
+    <details className="group overflow-hidden rounded-[12px] border border-accent-violet/20 bg-accent-violet-soft/45">
+      <summary className="cursor-pointer list-none p-3 [&::-webkit-details-marker]:hidden">
+        <div className="flex items-center gap-3">
+          <span className={cn("size-2 rounded-full", live ? "bg-positive shadow-[0_0_8px_rgba(127,200,155,.55)]" : "bg-dim")} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-xs font-semibold capitalize text-ink">{agent}</p>
+            <p className="mt-1 truncate font-mono text-[9px] text-dim">{shortSession(session.id)}</p>
+          </div>
+          <Badge variant={live ? "success" : "neutral"}>{live ? "Live" : latest ? relativeTime(latest) : "Idle"}</Badge>
+          <ChevronRight className="size-3.5 text-dim transition-transform group-open:rotate-90" />
+        </div>
+        <p className="mt-2 text-[10px] text-muted">{session.items.length} delivered context items</p>
+      </summary>
+      <div className="space-y-2 border-t border-accent-violet/15 bg-panel/75 p-3">
+        {session.items.slice(0, 5).map((item) => {
+          const label = item.label && item.label !== item.key ? item.label : readableContextKey(item.key)
           return (
-            <details key={`${session.project ?? "unassigned"}:${session.id}`} open={!embedded && index === 0} className="group overflow-hidden rounded-[16px] border border-line bg-panel-raised/45">
-              <summary className="cursor-pointer list-none px-5 py-4 [&::-webkit-details-marker]:hidden">
-                <div className="flex items-start justify-between gap-5">
-                  <div className="flex min-w-0 items-start gap-3.5">
-                    <div className="grid size-10 shrink-0 place-items-center rounded-[12px] border border-accent-blue/20 bg-accent-blue-soft text-accent-blue">
-                      <GitFork className="size-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="truncate text-sm font-semibold text-ink">
-                          {resource?.resourceLabel ?? "Legacy session"}
-                        </p>
-                        {branch && <Badge variant="blue">{branch}</Badge>}
-                        {resource?.properties?.dirty === true && <Badge variant="warning">Dirty</Badge>}
-                      </div>
-                      <p className="mt-1 truncate font-mono text-[10px] text-dim">
-                        {resource?.externalIdentity ?? session.project ?? "Repository view was not recorded"}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-3 text-right">
-                    <div>
-                      <p className="mono-number text-lg font-semibold text-ink">{session.items.length}</p>
-                      <p className="text-[10px] text-dim">context items</p>
-                    </div>
-                    <ChevronRight className="size-4 text-dim transition-transform group-open:rotate-90" />
-                  </div>
-                </div>
-
-                <div className="mt-4 grid items-center gap-2 sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
-                  <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                    <span className="fine-label block">Repository view</span>
-                    <span className="mt-1 block truncate text-xs font-medium text-ink">{branch ?? resource?.resourceLabel ?? "Unknown"}</span>
-                  </div>
-                  <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
-                  <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                    <span className="fine-label block">Agent session</span>
-                    <span className="mt-1 block truncate text-xs font-medium capitalize text-ink">{agent} · {shortSession(session.id)}</span>
-                  </div>
-                  <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
-                  <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                    <span className="fine-label block">Last delivery</span>
-                    <span className="mt-1 block text-xs font-medium text-ink">{latest ? relativeTime(latest) : "No deliveries"}</span>
-                  </div>
-                </div>
-              </summary>
-
-              <div className="border-t border-line bg-panel px-5 py-5">
-                {resource?.locator && (
-                  <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-[10px] bg-canvas/70 px-3 py-2 font-mono text-[10px] text-muted">
-                    <span className="truncate">{resource.locator}</span>
-                    {resource.revision && <span className="text-dim">commit {resource.revision.slice(0, 10)}</span>}
-                  </div>
-                )}
-                <div className="grid gap-2.5 xl:grid-cols-2">
-                  {session.items.map((item) => {
-                    const kind = contextKind(item)
-                    const label = item.label && item.label !== item.key
-                      ? item.label
-                      : readableContextKey(item.key)
-                    return (
-                      <article key={item.key} className="rounded-[12px] border border-line bg-canvas/45 p-4">
-                        <div className="flex items-start gap-3">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Badge variant={kind.variant}>{kind.label}</Badge>
-                              <time className="text-[10px] text-dim">{relativeTime(item.deliveredAt)}</time>
-                            </div>
-                            <h4 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-5 text-ink">{label}</h4>
-                          </div>
-                        </div>
-                        {item.preview && (
-                          <p className="mt-2.5 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-muted">
-                            {item.preview}
-                          </p>
-                        )}
-                        <div className="mt-3 flex items-center justify-between gap-3 border-t border-line/70 pt-2.5">
-                          <span className="truncate text-[9px] text-dim">{item.source ?? "Delivered context"}</span>
-                          <span className="shrink-0 text-[9px] text-dim">exact delivery</span>
-                        </div>
-                      </article>
-                    )
-                  })}
-                </div>
-              </div>
-            </details>
+            <div key={item.key} className="rounded-[9px] border border-line bg-canvas/60 p-2.5">
+              <p className="text-[10px] font-semibold text-ink">{label}</p>
+              {item.preview && <p className="mt-1 line-clamp-2 whitespace-pre-line text-[9px] leading-4 text-muted">{item.preview}</p>}
+            </div>
           )
         })}
+        {session.items.length > 5 && <p className="text-center text-[9px] text-dim">+{session.items.length - 5} more</p>}
+        {!session.items.length && <p className="text-[10px] text-muted">No context delivered yet.</p>}
       </div>
-      {!sessions.length && (
-        <EmptyState
-          icon={<Users />}
-          title="No agent sessions yet"
-          detail="Sessions appear after Purpory prepares context for an agent."
-        />
-      )}
-    </>
-  )
-
-  if (embedded) {
-    return (
-      <section className="mt-5 border-t border-line pt-5">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold text-ink">Agent sessions</p>
-            <p className="mt-1 text-[11px] text-muted">The exact view and context used by this project.</p>
-          </div>
-          <Badge variant="neutral">{sessions.length} sessions</Badge>
-        </div>
-        {sessions.length ? content : (
-          <p className="rounded-[12px] border border-dashed border-line px-4 py-5 text-center text-[11px] text-muted">
-            No sessions have received context from this project yet.
-          </p>
-        )}
-      </section>
-    )
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <div>
-          <CardTitle>Session context map</CardTitle>
-          <CardDescription>Which repository view each agent saw and the human-readable context it carried away.</CardDescription>
-        </div>
-        <Badge variant="success"><CircleDot className="mr-1 size-2.5" /> Provenance</Badge>
-      </CardHeader>
-      <CardContent>
-        {content}
-      </CardContent>
-    </Card>
+    </details>
   )
 }
 
@@ -1723,28 +1604,27 @@ function GitResourceForm({
   )
 }
 
-function ProjectPanel({
+function WorkspaceMonitor({
   projects,
   sessions,
   activeProject,
   activeView,
-  onOpenSessions,
   onRefresh,
 }: {
   projects: ProjectNamespace[]
   sessions: Session[]
   activeProject: string
   activeView: string
-  onOpenSessions: () => void
   onRefresh: () => Promise<void>
 }) {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [section, setSection] = useState<"overview" | "repositories">("overview")
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState("")
-  const selectedProject = projects.find((project) => project.id === selectedProjectId)
+  const project = projects.find((item) => item.id === selectedProjectId)
+    ?? projects.find((item) => item.id === activeProject)
+    ?? projects[0]
 
   async function create(event: FormEvent) {
     event.preventDefault()
@@ -1756,7 +1636,6 @@ function ProjectPanel({
       setDescription("")
       await onRefresh()
       setSelectedProjectId(created.id)
-      setSection("repositories")
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create project")
     } finally {
@@ -1764,251 +1643,172 @@ function ProjectPanel({
     }
   }
 
-  if (selectedProject) {
-    const projectSessions = sessions.filter((session) => session.project === selectedProject.id)
-    const viewCount = selectedProject.resources.reduce((sum, resource) => sum + resource.views.length, 0)
-    return (
-      <div className="space-y-5">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setSelectedProjectId(null)}
-          className="-ml-2"
-        >
-          <ArrowLeft /> All projects
-        </Button>
-
-        <Card className={cn(selectedProject.id === activeProject && "border-signal/35")}>
-          <CardHeader className="items-start gap-5 sm:flex-row sm:items-center">
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <CardTitle className="text-xl">{selectedProject.name}</CardTitle>
-                {selectedProject.id === activeProject && <Badge variant="success">Active context</Badge>}
-              </div>
-              <CardDescription>{selectedProject.description || "No description yet."}</CardDescription>
-              <p className="mt-2 truncate font-mono text-[10px] text-dim">{selectedProject.id}</p>
-            </div>
-            <Button onClick={() => setSection("repositories")}>
-              <Plus /> Add repository
-            </Button>
-          </CardHeader>
-        </Card>
-
-        <div className="flex gap-1 overflow-x-auto rounded-[14px] border border-line bg-panel p-1.5">
-          {([
-            ["overview", "Overview", <FolderKanban key="overview" />],
-            ["repositories", `Repositories · ${selectedProject.resources.length}`, <GitFork key="repositories" />],
-          ] as const).map(([id, label, icon]) => (
-            <Button
-              key={id}
-              variant={section === id ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => setSection(id)}
-              className={cn("shrink-0", section === id && "border-signal/20 text-signal")}
-            >
-              {icon} {label}
-            </Button>
-          ))}
-        </div>
-
-        {section === "overview" && (
-          <div className="space-y-5">
-            <div className="grid grid-cols-2 items-stretch gap-2 rounded-[16px] border border-line bg-panel p-3 xl:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr]">
-              <div className="rounded-[12px] border border-signal/25 bg-signal-soft px-4 py-3">
-                <FolderKanban className="size-4 text-signal" />
-                <p className="mt-3 truncate text-xs font-semibold text-ink">{selectedProject.name}</p>
-                <p className="mt-1 text-[10px] text-muted">Project context</p>
-              </div>
-              <ArrowRight className="m-auto hidden size-4 text-line-strong xl:block" />
-              <button type="button" onClick={() => setSection("repositories")} className="rounded-[12px] border border-accent-blue/20 bg-accent-blue-soft px-4 py-3 text-left transition hover:border-accent-blue/40">
-                <GitFork className="size-4 text-accent-blue" />
-                <p className="mono-number mt-3 text-xl font-semibold text-ink">{selectedProject.resources.length}</p>
-                <p className="mt-1 text-[10px] text-muted">Repositories · manage</p>
-              </button>
-              <ArrowRight className="m-auto hidden size-4 text-line-strong xl:block" />
-              <button type="button" onClick={() => setSection("repositories")} className="rounded-[12px] border border-accent-teal/20 bg-accent-teal-soft px-4 py-3 text-left transition hover:border-accent-teal/40">
-                <CircleDot className="size-4 text-accent-teal" />
-                <p className="mono-number mt-3 text-xl font-semibold text-ink">{viewCount}</p>
-                <p className="mt-1 text-[10px] text-muted">Worktree views · inspect</p>
-              </button>
-              <ArrowRight className="m-auto hidden size-4 text-line-strong xl:block" />
-              <button type="button" onClick={onOpenSessions} className="rounded-[12px] border border-accent-violet/20 bg-accent-violet-soft px-4 py-3 text-left transition hover:border-accent-violet/40">
-                <Users className="size-4 text-accent-violet" />
-                <p className="mono-number mt-3 text-xl font-semibold text-ink">{projectSessions.length}</p>
-                <p className="mt-1 text-[10px] text-muted">Agent sessions · manage</p>
-              </button>
-            </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <Card>
-                <CardHeader>
-                  <div>
-                    <CardTitle>Repositories</CardTitle>
-                    <CardDescription>Material registered to this project context.</CardDescription>
-                  </div>
-                  <Button variant="secondary" size="sm" onClick={() => setSection("repositories")}>Open</Button>
-                </CardHeader>
-                <CardContent>
-                  <p className="mono-number text-3xl font-semibold text-ink">{selectedProject.resources.length}</p>
-                  <p className="mt-2 text-[11px] text-muted">{viewCount} discovered worktree views</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader>
-                  <div>
-                    <CardTitle>Sessions</CardTitle>
-                    <CardDescription>Agents currently associated with this project.</CardDescription>
-                  </div>
-                  <Button variant="secondary" size="sm" onClick={onOpenSessions}>Open</Button>
-                </CardHeader>
-                <CardContent>
-                  <p className="mono-number text-3xl font-semibold text-ink">{projectSessions.length}</p>
-                  <p className="mt-2 text-[11px] text-muted">{projectSessions.reduce((sum, session) => sum + session.items.length, 0)} delivered context items</p>
-                </CardContent>
-              </Card>
-            </div>
-          </div>
-        )}
-
-        {section === "repositories" && (
-          <div className="space-y-4">
-            <GitResourceForm project={selectedProject} onRefresh={onRefresh} />
-            {selectedProject.resources.map((resource) => {
-              const containsActiveView = resource.views.some((view) => view.id === activeView)
-              return (
-                <details key={resource.id} open={containsActiveView} className="group/resource surface-row overflow-hidden rounded-[14px]">
-                  <summary className="cursor-pointer list-none p-5 [&::-webkit-details-marker]:hidden">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <GitFork className="size-4 text-signal" />
-                          <span className="text-sm font-semibold text-ink">{resource.alias || resource.label}</span>
-                          <Badge variant="blue">{resource.provider}</Badge>
-                          <Badge variant="neutral">{resource.views.length} views</Badge>
-                        </div>
-                        <p className="mt-2 break-all font-mono text-[10px] text-dim">{resource.externalIdentity}</p>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <span className="text-[10px] text-dim">{relativeTime(resource.updatedAt)}</span>
-                        <ChevronRight className="size-4 text-dim transition-transform group-open/resource:rotate-90" />
-                      </div>
-                    </div>
-                  </summary>
-                  <div className="grid gap-2 border-t border-line px-5 py-4 xl:grid-cols-2">
-                    {resource.views.map((view) => {
-                      const branch = typeof view.properties.branch === "string" ? view.properties.branch : "detached"
-                      const viewSessionCount = projectSessions.filter(
-                        (session) => session.context?.activeViewId === view.id || session.context?.resource?.viewId === view.id,
-                      ).length
-                      return (
-                        <div key={view.id} className={cn("relative rounded-[11px] border border-line bg-panel px-4 py-3 pl-8", view.id === activeView && "border-signal/35 bg-signal-soft/40")}>
-                          <span className="absolute left-3 top-4 size-2 rounded-full bg-accent-teal" />
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-[11px] font-semibold text-ink">{branch}</span>
-                            {view.properties.dirty === true && <Badge variant="warning">Dirty</Badge>}
-                            {view.role && <Badge variant="neutral">{view.role}</Badge>}
-                            {view.id === activeView && <Badge variant="success">Active</Badge>}
-                            <Badge variant="neutral">{viewSessionCount} sessions</Badge>
-                          </div>
-                          <p className="mt-2 break-all font-mono text-[10px] leading-5 text-muted">{view.locator}</p>
-                        </div>
-                      )
-                    })}
-                    {!resource.views.length && (
-                      <div className="rounded-[11px] border border-dashed border-line bg-panel px-4 py-3 text-[11px] leading-5 text-muted">
-                        Remote repository registered. Attach a local checkout to expose worktree views.
-                      </div>
-                    )}
-                  </div>
-                </details>
-              )
-            })}
-            {!selectedProject.resources.length && (
-              <Card><EmptyState icon={<GitFork />} title="No repositories attached" detail="Add a remote URL or local checkout above to connect the first repository." /></Card>
-            )}
-          </div>
-        )}
-
-      </div>
-    )
-  }
+  const projectSessions = project
+    ? sessions.filter((session) => session.project === project.id)
+    : []
+  const viewIds = new Set(project?.resources.flatMap((resource) => resource.views.map((view) => view.id)) ?? [])
+  const unmappedSessions = projectSessions.filter((session) => {
+    const viewId = session.context?.activeViewId ?? session.context?.resource?.viewId
+    return !viewId || !viewIds.has(viewId)
+  })
+  const viewCount = project?.resources.reduce((sum, resource) => sum + resource.views.length, 0) ?? 0
 
   return (
-    <div className="space-y-5">
-      <Card>
-        <details open={!projects.length} className="group/create">
-          <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-            <CardHeader>
-              <div>
-                <CardTitle>Create a project context</CardTitle>
-                <CardDescription>Add another durable boundary only when the work needs one.</CardDescription>
-              </div>
-              <ChevronRight className="size-5 text-signal transition-transform group-open/create:rotate-90" />
-            </CardHeader>
-          </summary>
-          <CardContent>
-            <form onSubmit={create} className="grid gap-3 lg:grid-cols-[18rem_minmax(0,1fr)_auto]">
-            <Input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Project name"
-              aria-label="Project name"
-              required
-            />
-            <Input
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder="What work belongs in this context?"
-              aria-label="Project description"
-            />
-            <Button type="submit" disabled={pending || !name.trim()}>
-              {pending ? <RefreshCw className="animate-spin" /> : <Plus />}
-              Create project
-            </Button>
+    <div className="grid items-start gap-5 lg:grid-cols-[15rem_minmax(0,1fr)]">
+      <Card className="lg:sticky lg:top-24">
+        <CardHeader>
+          <div>
+            <CardTitle>Projects</CardTitle>
+            <CardDescription>Select the context to monitor.</CardDescription>
+          </div>
+          <Badge variant="neutral">{projects.length}</Badge>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {projects.map((item) => {
+            const itemSessions = sessions.filter((session) => session.project === item.id).length
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSelectedProjectId(item.id)}
+                className={cn(
+                  "w-full rounded-[11px] border px-3 py-3 text-left transition",
+                  item.id === project?.id
+                    ? "border-signal/35 bg-signal-soft"
+                    : "border-line bg-canvas/45 hover:border-line-strong",
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={cn("size-2 rounded-full", item.id === activeProject ? "bg-positive" : "bg-dim")} />
+                  <span className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{item.name}</span>
+                  <ChevronRight className="size-3.5 text-dim" />
+                </div>
+                <p className="mt-2 text-[9px] text-muted">{item.resources.length} repos · {itemSessions} sessions</p>
+              </button>
+            )
+          })}
+
+          <details open={!projects.length} className="group/create border-t border-line pt-3">
+            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-[9px] px-2 py-2 text-[11px] font-semibold text-signal hover:bg-signal-soft [&::-webkit-details-marker]:hidden">
+              <Plus className="size-3.5" /> New project
+            </summary>
+            <form onSubmit={create} className="mt-2 space-y-2">
+              <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Project name" required />
+              <Textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What belongs here?" className="min-h-20" />
+              <Button type="submit" size="sm" className="w-full" disabled={pending || !name.trim()}>
+                {pending ? <RefreshCw className="animate-spin" /> : <Plus />} Create
+              </Button>
+              {error && <p className="text-[10px] text-red-700">{error}</p>}
             </form>
-            {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
-          </CardContent>
-        </details>
+          </details>
+        </CardContent>
       </Card>
 
-      <div className="grid gap-3 xl:grid-cols-2">
-      {projects.map((project) => {
-        const resourceCount = project.resources.length
-        const viewCount = project.resources.reduce((sum, resource) => sum + resource.views.length, 0)
-        const projectSessions = sessions.filter((session) => session.project === project.id)
-        return (
-          <Card key={project.id} className={cn("transition hover:-translate-y-0.5 hover:border-signal/35 hover:shadow-sm", project.id === activeProject && "border-signal/35")}>
-            <button type="button" onClick={() => { setSelectedProjectId(project.id); setSection("overview") }} className="w-full text-left">
-              <CardHeader>
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <CardTitle>{project.name}</CardTitle>
-                    {project.id === activeProject && <Badge variant="success">Active context</Badge>}
-                  </div>
-                  <CardDescription>{project.description || "No description yet."}</CardDescription>
+      {!project ? (
+        <Card><EmptyState icon={<FolderKanban />} title="No projects yet" detail="Create a project to start monitoring its repository, View, and Session topology." /></Card>
+      ) : (
+        <div className="space-y-4">
+          <Card className={cn("relative", project.id === activeProject && "border-signal/35")}>
+            <CardHeader className="items-start gap-4 sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <CardTitle className="text-xl">{project.name}</CardTitle>
+                  {project.id === activeProject && <Badge variant="success"><CircleDot className="mr-1 size-2.5" /> Active path</Badge>}
                 </div>
-                <ChevronRight className="size-5 shrink-0 text-signal" />
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-3 gap-2 border-t border-line pt-4 text-center">
-                  <div><p className="mono-number text-lg font-semibold text-ink">{resourceCount}</p><p className="text-[10px] text-dim">Repositories</p></div>
-                  <div><p className="mono-number text-lg font-semibold text-ink">{viewCount}</p><p className="text-[10px] text-dim">Views</p></div>
-                  <div><p className="mono-number text-lg font-semibold text-ink">{projectSessions.length}</p><p className="text-[10px] text-dim">Sessions</p></div>
+                <CardDescription>{project.description || "No project description."}</CardDescription>
+              </div>
+              <details className="group/add w-full sm:w-auto">
+                <summary className="flex h-9 cursor-pointer list-none items-center justify-center gap-2 rounded-[9px] bg-signal px-3 text-xs font-semibold text-white [&::-webkit-details-marker]:hidden">
+                  <Plus className="size-3.5" /> Add repository
+                </summary>
+                <div className="mt-3 sm:absolute sm:right-8 sm:z-10 sm:w-[min(48rem,calc(100vw-4rem))]">
+                  <Card><CardContent><GitResourceForm project={project} onRefresh={onRefresh} /></CardContent></Card>
                 </div>
-              </CardContent>
-            </button>
+              </details>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-[10px] bg-accent-blue-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{project.resources.length}</p><p className="text-[9px] text-muted">Repositories</p></div>
+                <div className="rounded-[10px] bg-accent-teal-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{viewCount}</p><p className="text-[9px] text-muted">Views</p></div>
+                <div className="rounded-[10px] bg-accent-violet-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{projectSessions.length}</p><p className="text-[9px] text-muted">Sessions</p></div>
+              </div>
+            </CardContent>
           </Card>
-        )
-      })}
-      </div>
 
-      {!projects.length && (
-        <Card>
-          <EmptyState
-            icon={<FolderKanban />}
-            title="No project contexts"
-            detail="Create one to give intent, knowledge, and changing resources a shared boundary."
-          />
-        </Card>
+          <Card>
+            <CardHeader>
+              <div>
+                <CardTitle>Live context topology</CardTitle>
+                <CardDescription>Configured membership flows left to right; green marks the currently observed path.</CardDescription>
+              </div>
+              <Badge variant="success"><span className="mr-1.5 inline-block size-1.5 rounded-full bg-positive" /> Live</Badge>
+            </CardHeader>
+            <CardContent>
+              <div className="mb-5 grid items-center gap-3 xl:grid-cols-[14rem_minmax(0,1fr)]">
+                <div className="rounded-[13px] border border-signal/30 bg-signal-soft p-4">
+                  <div className="flex items-center gap-2"><FolderKanban className="size-4 text-signal" /><span className="text-[9px] font-semibold uppercase tracking-[0.16em] text-signal">Project</span></div>
+                  <p className="mt-2 truncate text-sm font-semibold text-ink">{project.name}</p>
+                </div>
+                <div className="flex items-center gap-3 text-[10px] text-muted">
+                  <span className="h-px min-w-8 flex-1 bg-signal/35" />
+                  <ArrowRight className="size-4 text-signal" />
+                  <span>{project.resources.length} configured repository paths</span>
+                </div>
+              </div>
+              <div className="mb-3 hidden grid-cols-[minmax(170px,.7fr)_28px_minmax(0,1.7fr)] px-6 text-[9px] font-semibold uppercase tracking-[0.16em] text-dim xl:grid">
+                <span>Repository</span><span /><div className="grid grid-cols-[minmax(190px,.8fr)_28px_minmax(220px,1fr)]"><span>Worktree View</span><span /><span>Agent Session</span></div>
+              </div>
+              <div className="relative ml-2 space-y-4 border-l border-signal/25 pl-6">
+                {project.resources.map((resource) => {
+                  const containsActiveView = resource.views.some((view) => view.id === activeView)
+                  const shared = projects.some((other) => other.id !== project.id && other.resources.some((item) => item.externalIdentity === resource.externalIdentity))
+                  return (
+                    <section key={resource.id} className="relative">
+                      <span className={cn("absolute -left-6 top-7 h-px w-6", containsActiveView ? "bg-signal" : "bg-line-strong")} />
+                      <div className="grid items-start gap-3 xl:grid-cols-[minmax(170px,.7fr)_28px_minmax(0,1.7fr)]">
+                        <div className={cn("rounded-[13px] border bg-accent-blue-soft/45 p-4", containsActiveView ? "border-signal/35" : "border-accent-blue/20")}>
+                          <div className="flex items-center gap-2"><GitFork className="size-4 text-accent-blue" /><p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{resource.alias || resource.label}</p></div>
+                          <div className="mt-2 flex flex-wrap gap-1.5"><Badge variant="blue">{resource.provider}</Badge>{shared && <Badge variant="violet">Shared</Badge>}</div>
+                          <p className="mt-3 break-all font-mono text-[9px] leading-4 text-dim">{resource.externalIdentity}</p>
+                        </div>
+                        <ArrowRight className={cn("mx-auto mt-7 hidden size-4 xl:block", containsActiveView ? "text-signal" : "text-line-strong")} />
+                        <div className="space-y-2">
+                          {resource.views.map((view) => {
+                            const branch = typeof view.properties.branch === "string" ? view.properties.branch : "detached"
+                            const viewSessions = projectSessions.filter((session) => session.context?.activeViewId === view.id || session.context?.resource?.viewId === view.id)
+                            return (
+                              <div key={view.id} className="grid items-start gap-2 xl:grid-cols-[minmax(190px,.8fr)_28px_minmax(220px,1fr)]">
+                                <div className={cn("rounded-[12px] border bg-accent-teal-soft/40 p-3", view.id === activeView ? "border-signal/40 shadow-[0_0_0_2px_rgba(69,105,61,.08)]" : "border-accent-teal/20")}>
+                                  <div className="flex items-center gap-2"><span className={cn("size-2 rounded-full", view.id === activeView ? "bg-positive" : "bg-accent-teal")} /><span className="min-w-0 flex-1 truncate font-mono text-[11px] font-semibold text-ink">{branch}</span>{view.id === activeView && <Badge variant="success">Active</Badge>}</div>
+                                  <div className="mt-2 flex flex-wrap gap-1.5">{view.properties.dirty === true && <Badge variant="warning">Dirty</Badge>}{view.role && <Badge variant="neutral">{view.role}</Badge>}</div>
+                                  <p className="mt-2 truncate font-mono text-[9px] text-dim" title={view.locator}>{view.locator}</p>
+                                </div>
+                                <ArrowRight className={cn("mx-auto mt-6 hidden size-4 xl:block", viewSessions.length ? "text-accent-violet" : "text-line-strong")} />
+                                <div className="space-y-2">
+                                  {viewSessions.map((session) => <SessionNode key={session.id} session={session} />)}
+                                  {!viewSessions.length && <div className="rounded-[11px] border border-dashed border-line px-3 py-4 text-center text-[10px] text-muted">No sessions on this View</div>}
+                                </div>
+                              </div>
+                            )
+                          })}
+                          {!resource.views.length && <div className="rounded-[12px] border border-dashed border-accent-teal/25 bg-accent-teal-soft/20 px-4 py-6 text-center text-[10px] text-muted">No local worktree Views discovered</div>}
+                        </div>
+                      </div>
+                    </section>
+                  )
+                })}
+                {!project.resources.length && <div className="rounded-[14px] border border-dashed border-line px-5 py-10 text-center text-xs text-muted">Add a repository to create the first monitored path.</div>}
+              </div>
+
+              {unmappedSessions.length > 0 && (
+                <section className="mt-5 rounded-[14px] border border-accent-amber/25 bg-accent-amber-soft/35 p-4">
+                  <div className="mb-3 flex items-center gap-2"><AlertCircle className="size-4 text-accent-amber" /><p className="text-xs font-semibold text-ink">Unmapped sessions</p><Badge variant="warning">{unmappedSessions.length}</Badge></div>
+                  <div className="grid gap-2 xl:grid-cols-2">{unmappedSessions.map((session) => <SessionNode key={session.id} session={session} />)}</div>
+                </section>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       )}
     </div>
   )
@@ -2026,7 +1826,6 @@ function EmptyState({ icon, title, detail }: { icon: ReactNode; title: string; d
 
 export function Dashboard() {
   const [page, setPage] = useState<Page>("overview")
-  const [workspaceSection, setWorkspaceSection] = useState<"projects" | "sessions">("projects")
   const [view, setView] = useState(emptyView)
   const [projects, setProjects] = useState<ProjectNamespace[]>([])
   const [recall, setRecall] = useState(emptyRecall)
@@ -2270,38 +2069,13 @@ export function Dashboard() {
               </div>
             )}
             {page === "workspace" && (
-              <div className="space-y-5">
-                <div className="flex gap-1 rounded-[14px] border border-line bg-panel p-1.5">
-                  <Button
-                    variant={workspaceSection === "projects" ? "secondary" : "ghost"}
-                    size="sm"
-                    onClick={() => setWorkspaceSection("projects")}
-                    className={cn(workspaceSection === "projects" && "border-signal/20 text-signal")}
-                  >
-                    <FolderKanban /> Projects <Badge variant="neutral">{projects.length}</Badge>
-                  </Button>
-                  <Button
-                    variant={workspaceSection === "sessions" ? "secondary" : "ghost"}
-                    size="sm"
-                    onClick={() => setWorkspaceSection("sessions")}
-                    className={cn(workspaceSection === "sessions" && "border-signal/20 text-signal")}
-                  >
-                    <Users /> Sessions <Badge variant="neutral">{view.sessions.length}</Badge>
-                  </Button>
-                </div>
-                {workspaceSection === "projects" ? (
-                  <ProjectPanel
-                    projects={projects}
-                    sessions={view.sessions}
-                    activeProject={view.project}
-                    activeView={view.resourceBinding?.viewId ?? ""}
-                    onOpenSessions={() => setWorkspaceSection("sessions")}
-                    onRefresh={refresh}
-                  />
-                ) : (
-                  <SessionList sessions={view.sessions} />
-                )}
-              </div>
+              <WorkspaceMonitor
+                projects={projects}
+                sessions={view.sessions}
+                activeProject={view.project}
+                activeView={view.resourceBinding?.viewId ?? ""}
+                onRefresh={refresh}
+              />
             )}
             {page === "delivery" && (
               <PreparationPanel
