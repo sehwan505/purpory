@@ -238,11 +238,11 @@ class ContextGraphRepository:
 
                 CREATE TABLE IF NOT EXISTS awareness_exposures (
                     session_id TEXT NOT NULL,
-                    project TEXT,
+                    project TEXT NOT NULL DEFAULT '',
                     node_id TEXT NOT NULL,
                     reason TEXT NOT NULL,
                     shown_at INTEGER NOT NULL,
-                    PRIMARY KEY(session_id, node_id),
+                    PRIMARY KEY(session_id, project, node_id),
                     FOREIGN KEY(node_id) REFERENCES context_nodes(id) ON DELETE CASCADE
                 );
 
@@ -404,6 +404,7 @@ class ContextGraphRepository:
                 )
             self._migrate_registry_tables(connection)
             self._migrate_delivery_scope(connection)
+            self._migrate_awareness_scope(connection)
             self._initialize_project_view_bindings(connection)
             self._initialize_views(connection)
             self._initialize_fts(connection)
@@ -429,6 +430,8 @@ class ContextGraphRepository:
                     ON deliveries(session_id, delivered_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_awareness_session_time
                     ON awareness_exposures(session_id, shown_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_awareness_project
+                    ON awareness_exposures(project);
                 CREATE INDEX IF NOT EXISTS idx_requests_status_time
                     ON requests(status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_touches_project_dir
@@ -655,6 +658,52 @@ class ContextGraphRepository:
                     row["delivered_at"],
                 ),
             )
+
+    @staticmethod
+    def _migrate_awareness_scope(connection: sqlite3.Connection) -> None:
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'awareness_exposures'"
+        ).fetchone()
+        normalized = " ".join(str(schema["sql"] or "").split()) if schema else ""
+        if "PRIMARY KEY(session_id, project, node_id)" in normalized:
+            return
+        rows = connection.execute(
+            "SELECT session_id, project, node_id, reason, shown_at "
+            "FROM awareness_exposures ORDER BY shown_at"
+        ).fetchall()
+        connection.executescript(
+            """
+            CREATE TABLE awareness_exposures_v7 (
+                session_id TEXT NOT NULL,
+                project TEXT NOT NULL DEFAULT '',
+                node_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                shown_at INTEGER NOT NULL,
+                PRIMARY KEY(session_id, project, node_id),
+                FOREIGN KEY(node_id) REFERENCES context_nodes(id) ON DELETE CASCADE
+            );
+            DROP TABLE awareness_exposures;
+            ALTER TABLE awareness_exposures_v7 RENAME TO awareness_exposures;
+            """
+        )
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO awareness_exposures(
+                session_id, project, node_id, reason, shown_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["session_id"],
+                    row["project"] or "",
+                    row["node_id"],
+                    row["reason"],
+                    row["shown_at"],
+                )
+                for row in rows
+            ],
+        )
 
     @staticmethod
     def _upsert_registry_node(
@@ -4045,18 +4094,21 @@ class ContextGraphRepository:
             ).fetchall()
             return {str(row["object_id"]) for row in rows}
 
-    def session_aware_node_ids(self, session_id: str) -> set[str]:
+    def session_exposed_node_ids(
+        self, session_id: str, *, project: str | None = None
+    ) -> set[str]:
         normalized = session_id.strip()
         if not normalized:
             raise ValueError("session_id cannot be empty")
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT node_id FROM awareness_exposures WHERE session_id = ?",
-                (normalized,),
+                "SELECT node_id FROM awareness_exposures WHERE session_id = ?"
+                + (" AND project = ?" if project is not None else ""),
+                (normalized, project) if project is not None else (normalized,),
             ).fetchall()
         return {str(row["node_id"]) for row in rows}
 
-    def record_awareness(
+    def record_awareness_exposures(
         self,
         session_id: str,
         hints: Sequence[dict[str, Any]],
@@ -4096,6 +4148,29 @@ class ContextGraphRepository:
                         occurred_at=timestamp,
                     )
             connection.commit()
+
+    def awareness_metrics(self, *, project: str | None = None) -> dict[str, int]:
+        normalized_project = project.strip() if project else None
+        parameters = (normalized_project, normalized_project)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS exposures,
+                       COALESCE(SUM(EXISTS (
+                        SELECT 1
+                        FROM context_events AS event
+                        WHERE event.event_type = 'context.delivered'
+                          AND event.session_id = exposure.session_id
+                          AND event.project = exposure.project
+                          AND event.object_id = exposure.node_id
+                          AND event.occurred_at >= exposure.shown_at
+                       )), 0) AS follow_ups
+                FROM awareness_exposures AS exposure
+                WHERE (? IS NULL OR exposure.project = ?)
+                """,
+                parameters,
+            ).fetchone()
+        return {"exposures": int(row["exposures"]), "followUps": int(row["follow_ups"])}
 
     def create_request(
         self,
@@ -4599,25 +4674,6 @@ class ContextGraphRepository:
                 ),
                 "contextFeedback": int(
                     connection.execute("SELECT COUNT(*) FROM gate_feedback").fetchone()[0]
-                ),
-                "awarenessExposures": int(
-                    connection.execute("SELECT COUNT(*) FROM awareness_exposures").fetchone()[0]
-                ),
-                "awarenessFollowUps": int(
-                    connection.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM awareness_exposures AS exposure
-                        WHERE EXISTS (
-                            SELECT 1
-                            FROM context_events AS event
-                            WHERE event.event_type = 'context.delivered'
-                              AND event.session_id = exposure.session_id
-                              AND event.object_id = exposure.node_id
-                              AND event.occurred_at >= exposure.shown_at
-                        )
-                        """
-                    ).fetchone()[0]
                 ),
                 "memoryVersions": int(
                     connection.execute("SELECT COUNT(*) FROM memory_versions").fetchone()[0]

@@ -52,6 +52,32 @@ def test_retrieve_injects_compact_awareness_without_loading_its_content() -> Non
     assert "Direct evidence" in context
 
 
+def test_retrieve_injects_awareness_without_direct_evidence() -> None:
+    result = {
+        "action": "retrieve",
+        "context": {"rendered": ""},
+        "awareness": [
+            {
+                "key": "intent.auth-review",
+                "label": "intent.auth-review",
+                "namespace": "memory",
+                "kind": "decision",
+                "source": "@repo/src/auth",
+                "reason": "active-path-context",
+                "relation": None,
+            }
+        ],
+    }
+
+    response = preflight.hook_response(result)
+
+    assert response is not None
+    context = response["hookSpecificOutput"]["additionalContext"]
+    assert "RELATED CONTEXT AVAILABLE — NOT LOADED" in context
+    assert "intent.auth-review" in context
+    assert "PURPORY CONTEXT — USE FOR THIS TURN" not in context
+
+
 def test_host_environment_session_ids_match_preflight_namespaces(
     monkeypatch,
 ) -> None:

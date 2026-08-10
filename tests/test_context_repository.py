@@ -25,17 +25,31 @@ def test_topic_requires_exactly_one_content_source(tmp_path: Path) -> None:
         repository.set_topic("decision.database", value="x", source="@repo/x")
 
 
-def test_diagnostics_count_awareness_follow_up_after_exposure(tmp_path: Path) -> None:
+def test_awareness_metrics_count_follow_up_after_exposure(tmp_path: Path) -> None:
     repository = ContextGraphRepository(tmp_path / "context.db")
     repository.set_topic("knowledge.hidden", value="A constraint", project="demo")
     topic = repository.get_topic("knowledge.hidden", project="demo")
     assert topic is not None
 
     hint = {"nodeId": topic["id"], "key": topic["key"], "reason": "graph-lead"}
-    repository.record_awareness("session-1", [hint], project="demo", shown_at=100)
-    before = repository.diagnostics()["counts"]
-    assert before["awarenessExposures"] == 1
-    assert before["awarenessFollowUps"] == 0
+    repository.record_awareness_exposures(
+        "session-1", [hint], project="demo", shown_at=100
+    )
+    assert repository.awareness_metrics(project="demo") == {
+        "exposures": 1,
+        "followUps": 0,
+    }
+    assert repository.awareness_metrics(project="other") == {
+        "exposures": 0,
+        "followUps": 0,
+    }
+    repository.record_awareness_exposures(
+        "session-1", [hint], project="other", shown_at=100
+    )
+    assert repository.awareness_metrics(project="other") == {
+        "exposures": 1,
+        "followUps": 0,
+    }
 
     repository.record_node_delivery(
         "session-1",
@@ -45,7 +59,14 @@ def test_diagnostics_count_awareness_follow_up_after_exposure(tmp_path: Path) ->
         project="demo",
         delivered_at=101,
     )
-    assert repository.diagnostics()["counts"]["awarenessFollowUps"] == 1
+    assert repository.awareness_metrics(project="demo") == {
+        "exposures": 1,
+        "followUps": 1,
+    }
+    assert repository.awareness_metrics(project="other") == {
+        "exposures": 1,
+        "followUps": 0,
+    }
 
 
 def test_human_topic_is_never_overwritten_by_graph_seed(tmp_path: Path) -> None:
@@ -775,6 +796,7 @@ def test_delivery_history_is_isolated_by_project(tmp_path: Path) -> None:
             project=project,
         )
         topic = repository.get_topic("decision.scope", project=project)
+        assert topic is not None
         repository.record_node_delivery(
             "same-session",
             topic["id"],

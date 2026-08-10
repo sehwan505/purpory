@@ -275,6 +275,9 @@ class ContextService:
                 project=self.project_id, stale_after_days=self.stale_after_days
             ),
             "sessions": self.repository.session_view(session_id=session_id, since=since),
+            "awarenessMetrics": self.repository.awareness_metrics(
+                project=str(selection["project"])
+            ),
             "diagnostics": self.repository.diagnostics(),
         }
 
