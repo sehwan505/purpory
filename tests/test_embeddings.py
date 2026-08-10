@@ -203,7 +203,7 @@ def test_semantic_search_abstains_on_weak_similarity(
     ) == []
 
 
-def test_search_fuses_lexical_and_semantic_results_and_keeps_fts_fallback(
+def test_search_uses_semantic_results_without_memory_body_fts_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PURPORY_EMBEDDING_DIMENSIONS", "2")
@@ -252,24 +252,20 @@ def test_search_fuses_lexical_and_semantic_results_and_keeps_fts_fallback(
 
     result = provisioner.search("billing", session_id="s", scopes=["human"], connect=False)
 
-    assert [candidate["nodeId"] for candidate in result["candidates"]] == [
-        lexical_id,
-        semantic_id,
-    ]
+    assert [candidate["nodeId"] for candidate in result["candidates"]] == [semantic_id]
+    assert lexical_id not in {candidate["nodeId"] for candidate in result["candidates"]}
     assert hidden_id not in {candidate["nodeId"] for candidate in result["candidates"]}
     with repository.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM node_embeddings WHERE node_id = ?", (pending_id,)
         ).fetchone()[0] == 0
-    lexical, semantic = result["candidates"]
-    assert lexical["retrievalRanks"] == {"lexical": 1}
-    assert lexical["score"] == semantic["score"]
+    semantic = result["candidates"][0]
     assert semantic["matchedTerms"] == []
     assert semantic["retrievalRanks"] == {"semantic": 1}
     assert result["fusion"] == {
         "method": "rrf",
         "k": 60,
-        "sources": {"lexical": 1, "semantic": 1, "activePath": 0},
+        "sources": {"lexical": 0, "semantic": 1, "activePath": 0},
         "semanticFailed": False,
     }
 
@@ -278,7 +274,7 @@ def test_search_fuses_lexical_and_semantic_results_and_keeps_fts_fallback(
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
     )
     fallback = provisioner.search("billing", session_id="fallback", scopes=["human"], connect=False)
-    assert [candidate["nodeId"] for candidate in fallback["candidates"]] == [lexical_id]
+    assert fallback["candidates"] == []
     assert fallback["fusion"]["semanticFailed"] is True
 
 

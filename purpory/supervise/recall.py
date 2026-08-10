@@ -53,6 +53,7 @@ def associations(
     owned_keys: Iterable[str],
     *,
     session_id: str | None = None,
+    project: str | None = None,
 ) -> list[dict[str, Any]]:
     owned = sorted(set(owned_keys))
     if not owned:
@@ -73,6 +74,8 @@ def associations(
               AND candidate.key NOT IN (SELECT key FROM recall_owned_keys)
               AND candidate.key != seed.key
               AND (? IS NULL OR candidate.session_id != ?)
+              AND (? IS NULL OR seed.project = ?)
+              AND (? IS NULL OR candidate.project = ?)
               AND EXISTS (
                   SELECT 1 FROM context_nodes topic
                   WHERE topic.namespace = 'memory'
@@ -82,7 +85,7 @@ def associations(
             GROUP BY candidate.key
             ORDER BY sessions DESC, candidate.key ASC
             """,
-            (session_id, session_id),
+            (session_id, session_id, project, project, project, project),
         ).fetchall()
     return [{"key": row["key"], "sessions": row["sessions"]} for row in rows]
 

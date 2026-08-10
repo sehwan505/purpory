@@ -12,7 +12,7 @@ from purpory.security import sanitize_label, sanitize_metadata
 from purpory.supervise.embeddings import search_embeddings
 from purpory.supervise.freshness import DEFAULT_STALE_DAYS, is_stale
 from purpory.supervise.repository import ContextGraphRepository, stable_json, value_hash
-from purpory.supervise.recall import recall_summary
+from purpory.supervise.recall import associations, recall_summary
 from purpory.supervise.resolve import rendered_injection, resolve_topic
 
 CONTEXT_SCHEMA_VERSION = 2
@@ -149,6 +149,7 @@ MAX_EXPAND_EDGES = 1_000
 MAX_PATH_VISITS = 2_000
 MAX_PATH_FRONTIER = 400
 MAX_FRONTIER_PREVIEW = 4
+MAX_AWARENESS_HINTS = 6
 TRUNCATION_MARKER = "\n\n[truncated by Purpory context budget]\n"
 
 
@@ -563,6 +564,14 @@ class ContextProvisioningService:
             limit=min(parsed_limit, MAX_FRONTIER_PREVIEW),
             adjacent=candidate_edges,
         )
+        awareness = self._discover_hints(
+            candidates,
+            connections=connections,
+            exploration=exploration,
+            session_id=session_id,
+            active_paths=active,
+            limit=MAX_AWARENESS_HINTS,
+        )
         return {
             "schemaVersion": CONTEXT_SCHEMA_VERSION,
             "query": normalized_query,
@@ -593,6 +602,7 @@ class ContextProvisioningService:
             "candidates": candidates,
             "connections": connections,
             "exploration": exploration,
+            "awareness": awareness,
             "hasEvidence": bool(candidates),
         }
 
@@ -1162,6 +1172,127 @@ class ContextProvisioningService:
             candidate["relationCount"] = counts[candidate["nodeId"]]
         return edges
 
+    def _discover_hints(
+        self,
+        candidates: Sequence[dict[str, Any]],
+        *,
+        connections: Sequence[dict[str, Any]],
+        exploration: dict[str, Any],
+        session_id: str,
+        active_paths: set[str],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Expose unexpected related context without loading its content."""
+        excluded_ids = {str(candidate["nodeId"]) for candidate in candidates}
+        excluded_ids |= self.repository.session_delivered_node_ids(
+            session_id, project=self.project
+        )
+        excluded_ids |= self.repository.session_exposed_node_ids(
+            session_id, project=self.project
+        )
+        hints: list[dict[str, Any]] = []
+        seen_ids = set(excluded_ids)
+
+        def add(
+            node: dict[str, Any],
+            *,
+            reason: str,
+            relation: str | None = None,
+            observations: int | None = None,
+        ) -> None:
+            node_id = str(node["id"])
+            if node_id in seen_ids or len(hints) >= limit:
+                return
+            seen_ids.add(node_id)
+            namespace = str(node.get("namespace") or "memory")
+            stable_key = str(node.get("stableKey") or node.get("key") or "")
+            if namespace == "material":
+                key = f"material.{node_id[:20]}"
+            elif namespace in {"resource", "context"}:
+                key = f"{namespace}.{stable_key}"
+            else:
+                key = stable_key
+            hint = {
+                "nodeId": node_id,
+                "key": key,
+                "namespace": namespace,
+                "label": sanitize_label(str(node.get("label") or stable_key)),
+                "kind": sanitize_label(str(node.get("type") or node.get("kind") or "context")),
+                "source": sanitize_label(str(node.get("source") or "")) or None,
+                "reason": reason,
+                "relation": sanitize_label(relation) if relation else None,
+            }
+            if observations is not None:
+                hint["observations"] = observations
+            hints.append(hint)
+
+        if active_paths:
+            for topic in self.repository.list_topics(project=self.project):
+                source = _normalize_path(topic.get("source"))
+                if not source or not any(_paths_related(source, path) for path in active_paths):
+                    continue
+                add(
+                    {
+                        "id": topic["id"],
+                        "namespace": "memory",
+                        "stableKey": topic["key"],
+                        "label": topic["key"],
+                        "type": topic["kind"],
+                        "source": topic.get("source"),
+                    },
+                    reason="active-path-context",
+                )
+
+        # Repeated co-delivery is a useful source of unknown-unknowns: it can
+        # reveal a durable constraint the current query never named. Labels are
+        # hints only; values remain unloaded until a narrower follow-up search.
+        anchor_keys = [str(candidate["key"]) for candidate in candidates]
+        for item in associations(
+            self.repository,
+            anchor_keys,
+            session_id=session_id,
+            project=self.project,
+        ):
+            if len(hints) >= limit:
+                break
+            topic = self.repository.get_topic(str(item["key"]), project=self.project)
+            if topic is None:
+                continue
+            add(
+                {
+                    "id": topic["id"],
+                    "namespace": "memory",
+                    "stableKey": topic["key"],
+                    "label": topic["key"],
+                    "type": topic["kind"],
+                    "source": topic.get("source"),
+                },
+                reason="session-association",
+                observations=int(item["sessions"]),
+            )
+
+        for connection in connections:
+            edges = connection.get("edges") or []
+            for node in connection.get("nodes") or []:
+                node_id = str(node["id"])
+                relation = next(
+                    (
+                        str(edge["relation"])
+                        for edge in edges
+                        if node_id in {str(edge["sourceId"]), str(edge["targetId"])}
+                    ),
+                    None,
+                )
+                add(node, reason="graph-bridge", relation=relation)
+
+        for lead in exploration.get("frontier") or []:
+            add(
+                lead["node"],
+                reason="graph-lead",
+                relation=str(lead["via"]["relation"]),
+            )
+        return hints
+
     def _exploration(
         self,
         anchor_ids: Sequence[str],
@@ -1365,7 +1496,10 @@ class ContextProvisioningService:
 
     def _prepare_node(self, node: dict[str, Any]) -> dict[str, Any] | None:
         if node["namespace"] == "code":
-            packet = self.repository.code_context(node["id"])
+            # Relationships are discovery hints, not direct evidence. Loading
+            # them here duplicates graph expansion and turns one exact symbol
+            # match into an unsolicited neighborhood dump.
+            packet = self.repository.code_context(node["id"], edge_limit=0)
             if packet is None:
                 return None
             return {

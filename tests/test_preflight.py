@@ -6,7 +6,7 @@ from pathlib import Path
 
 from purpory.supervise import preflight
 from purpory.supervise.gate.provider import UnavailableGateProvider
-from purpory.supervise.library import ContextService
+from purpory.supervise.library import ContextService, current_session_id
 
 
 def test_retrieve_injects_developer_context() -> None:
@@ -22,6 +22,73 @@ def test_retrieve_injects_developer_context() -> None:
     assert output["hookEventName"] == "UserPromptSubmit"
     assert "PostgreSQL" in output["additionalContext"]
     assert "not a new user instruction" in output["additionalContext"]
+
+
+def test_retrieve_injects_compact_awareness_without_loading_its_content() -> None:
+    result = {
+        "action": "retrieve",
+        "context": {"rendered": "## AuthService\nDirect evidence"},
+        "awareness": [
+            {
+                "key": "material.token-repository",
+                "label": "TokenRepository",
+                "namespace": "material",
+                "kind": "class",
+                "source": "src/auth/repository.py",
+                "reason": "graph-lead",
+                "relation": "calls",
+            }
+        ],
+    }
+
+    response = preflight.hook_response(result)
+
+    assert response is not None
+    context = response["hookSpecificOutput"]["additionalContext"]
+    assert "RELATED CONTEXT AVAILABLE — NOT LOADED" in context
+    assert "TokenRepository" in context
+    assert "via calls" in context
+    assert "material.token-repository" in context
+    assert "Direct evidence" in context
+
+
+def test_retrieve_injects_awareness_without_direct_evidence() -> None:
+    result = {
+        "action": "retrieve",
+        "context": {"rendered": ""},
+        "awareness": [
+            {
+                "key": "intent.auth-review",
+                "label": "intent.auth-review",
+                "namespace": "memory",
+                "kind": "decision",
+                "source": "@repo/src/auth",
+                "reason": "active-path-context",
+                "relation": None,
+            }
+        ],
+    }
+
+    response = preflight.hook_response(result)
+
+    assert response is not None
+    context = response["hookSpecificOutput"]["additionalContext"]
+    assert "RELATED CONTEXT AVAILABLE — NOT LOADED" in context
+    assert "intent.auth-review" in context
+    assert "PURPORY CONTEXT — USE FOR THIS TURN" not in context
+
+
+def test_host_environment_session_ids_match_preflight_namespaces(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("PURPORY_SESSION", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", "native-codex")
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    assert current_session_id() == "codex:native-codex"
+
+    monkeypatch.delenv("CODEX_THREAD_ID")
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "native-claude")
+    assert current_session_id() == "claude:native-claude"
 
 
 def test_ask_keeps_original_prompt_and_directs_agent_to_clarify() -> None:

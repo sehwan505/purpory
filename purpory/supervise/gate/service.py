@@ -15,8 +15,71 @@ from purpory.supervise.gate.contract import (
     MAX_QUERY_CHARS,
 )
 from purpory.supervise.gate.provider import GateProvider, GateProviderError
-from purpory.supervise.provisioning import ContextProvisioningService
+from purpory.supervise.provisioning import MAX_AWARENESS_HINTS, ContextProvisioningService
 from purpory.supervise.repository import ContextGraphRepository
+
+MAX_DIRECT_EVIDENCE = 2
+
+
+def render_awareness(hints: Sequence[dict[str, Any]]) -> str:
+    if not hints:
+        return ""
+    lines = [
+        "[PURPORY RELATED CONTEXT AVAILABLE — NOT LOADED]",
+        "These are discovery hints, not evidence. Do not assume they are relevant. "
+        'Run `purpory prepare "<specific need>"` only if the task reveals a matching gap.',
+    ]
+    for hint in hints[:MAX_AWARENESS_HINTS]:
+        key = str(hint.get("key") or "").replace("\n", " ").strip()
+        label = str(hint.get("label") or key).replace("\n", " ").strip()
+        relation = str(hint.get("relation") or "").replace("\n", " ").strip()
+        source = str(hint.get("source") or "").replace("\n", " ").strip()
+        details = []
+        if relation:
+            details.append(f"via {relation}")
+        if source:
+            details.append(source)
+        suffix = f" ({'; '.join(details)})" if details else ""
+        if key:
+            lines.append(f"- {key}: {label}{suffix}")
+    return "\n".join(lines)
+
+
+def _select_delivery_hints(
+    search_result: dict[str, Any],
+    *,
+    excluded_ids: set[str],
+) -> list[dict[str, Any]]:
+    hints: list[dict[str, Any]] = []
+    seen = set(excluded_ids)
+
+    for candidate in search_result["candidates"][MAX_DIRECT_EVIDENCE:]:
+        node_id = str(candidate["nodeId"])
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        hints.append(
+            {
+                "nodeId": node_id,
+                "key": candidate["key"],
+                "namespace": candidate["namespace"],
+                "label": candidate["label"],
+                "kind": candidate["kind"],
+                "source": candidate.get("source"),
+                "reason": "additional-anchor",
+                "relation": None,
+            }
+        )
+
+    for hint in search_result.get("awareness") or []:
+        node_id = str(hint["nodeId"])
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        hints.append(hint)
+        if len(hints) >= MAX_AWARENESS_HINTS:
+            break
+    return hints[:MAX_AWARENESS_HINTS]
 
 
 def _fallback_proposal(request: GateRequest) -> GateProposal:
@@ -137,6 +200,7 @@ class GatewayService:
         request_id = None
         clarification = proposal.clarification
         search_result: dict[str, Any] | None = None
+        awareness: list[dict[str, Any]] = []
         delivery_result: dict[str, Any] = {
             "delivery": [],
             "omitted": [],
@@ -158,43 +222,19 @@ class GatewayService:
                 active_paths=active_paths,
                 previous_deliveries=previous,
             )
-            if search_result["candidates"]:
-                delivery_candidates = list(search_result["candidates"])
-                seen_ids = {item["nodeId"] for item in delivery_candidates}
-                previously_delivered_ids = self.repository.session_delivered_node_ids(
-                    session_id, project=project
-                )
-                graph_candidates = [
-                    (
-                        node,
-                        ["graph-bridge"],
-                    )
-                    for connection in search_result["connections"]
-                    for node in connection["nodes"]
-                ] + [
-                    (
-                        lead["node"],
-                        [
-                            "graph-lead",
-                            f"relation:{lead['via']['relation']}",
-                        ],
-                    )
-                    for lead in search_result["exploration"]["frontier"]
-                ]
-                for node, signals in graph_candidates:
-                    node_id = str(node["id"])
-                    if node_id in seen_ids or node_id in previously_delivered_ids:
-                        continue
-                    delivery_candidates.append(
-                        {
-                            "nodeId": node_id,
-                            "score": None,
-                            "signals": signals,
-                        }
-                    )
-                    seen_ids.add(node_id)
-                    if len(delivery_candidates) >= 32:
-                        break
+            delivery_candidates = list(
+                search_result["candidates"][:MAX_DIRECT_EVIDENCE]
+            )
+            excluded_ids = self.repository.session_delivered_node_ids(
+                session_id, project=project
+            ) | {
+                str(candidate["nodeId"]) for candidate in delivery_candidates
+            }
+            awareness = _select_delivery_hints(
+                search_result,
+                excluded_ids=excluded_ids,
+            )
+            if delivery_candidates:
                 delivery_result = provisioner.deliver(
                     [candidate["nodeId"] for candidate in delivery_candidates],
                     session_id=session_id,
@@ -203,7 +243,7 @@ class GatewayService:
                 )
             delivery = delivery_result["delivery"]
             omitted = delivery_result["omitted"]
-            if delivery:
+            if delivery or awareness:
                 final_action = "retrieve"
             elif any(item.get("reason") == "already-delivered" for item in omitted):
                 final_action = "skip"
@@ -232,6 +272,12 @@ class GatewayService:
             )
         if final_action != "ask":
             clarification = None
+        if final_action == "retrieve" and awareness:
+            self.repository.record_awareness_exposures(
+                session_id,
+                awareness,
+                project=project,
+            )
 
         decision = GateDecision(
             action=final_action,
@@ -264,6 +310,7 @@ class GatewayService:
         return {
             **decision_payload,
             "decisionId": decision_id,
+            "awareness": awareness,
             "context": {
                 "manifest": catalog,
                 "search": search_result,

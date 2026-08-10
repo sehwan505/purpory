@@ -236,6 +236,16 @@ class ContextGraphRepository:
                     UNIQUE(session_id, project, key)
                 );
 
+                CREATE TABLE IF NOT EXISTS awareness_exposures (
+                    session_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    node_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    shown_at INTEGER NOT NULL,
+                    PRIMARY KEY(session_id, project, node_id),
+                    FOREIGN KEY(node_id) REFERENCES context_nodes(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS requests (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL,
@@ -394,6 +404,7 @@ class ContextGraphRepository:
                 )
             self._migrate_registry_tables(connection)
             self._migrate_delivery_scope(connection)
+            self._migrate_awareness_scope(connection)
             self._initialize_project_view_bindings(connection)
             self._initialize_views(connection)
             self._initialize_fts(connection)
@@ -411,10 +422,16 @@ class ContextGraphRepository:
                     ON context_edges(target_id, relation);
                 CREATE INDEX IF NOT EXISTS idx_context_events_time
                     ON context_events(event_type, occurred_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_context_events_delivery
+                    ON context_events(event_type, session_id, object_id, occurred_at);
                 CREATE INDEX IF NOT EXISTS idx_deliveries_key_time
                     ON deliveries(key, delivered_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_deliveries_session_time
                     ON deliveries(session_id, delivered_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_awareness_session_time
+                    ON awareness_exposures(session_id, shown_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_awareness_project
+                    ON awareness_exposures(project);
                 CREATE INDEX IF NOT EXISTS idx_requests_status_time
                     ON requests(status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_touches_project_dir
@@ -641,6 +658,52 @@ class ContextGraphRepository:
                     row["delivered_at"],
                 ),
             )
+
+    @staticmethod
+    def _migrate_awareness_scope(connection: sqlite3.Connection) -> None:
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'awareness_exposures'"
+        ).fetchone()
+        normalized = " ".join(str(schema["sql"] or "").split()) if schema else ""
+        if "PRIMARY KEY(session_id, project, node_id)" in normalized:
+            return
+        rows = connection.execute(
+            "SELECT session_id, project, node_id, reason, shown_at "
+            "FROM awareness_exposures ORDER BY shown_at"
+        ).fetchall()
+        connection.executescript(
+            """
+            CREATE TABLE awareness_exposures_v7 (
+                session_id TEXT NOT NULL,
+                project TEXT NOT NULL DEFAULT '',
+                node_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                shown_at INTEGER NOT NULL,
+                PRIMARY KEY(session_id, project, node_id),
+                FOREIGN KEY(node_id) REFERENCES context_nodes(id) ON DELETE CASCADE
+            );
+            DROP TABLE awareness_exposures;
+            ALTER TABLE awareness_exposures_v7 RENAME TO awareness_exposures;
+            """
+        )
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO awareness_exposures(
+                session_id, project, node_id, reason, shown_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["session_id"],
+                    row["project"] or "",
+                    row["node_id"],
+                    row["reason"],
+                    row["shown_at"],
+                )
+                for row in rows
+            ],
+        )
 
     @staticmethod
     def _upsert_registry_node(
@@ -1569,7 +1632,7 @@ class ContextGraphRepository:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT stable_key AS key, value, source, node_type AS kind, origin,
+                SELECT id, stable_key AS key, value, source, node_type AS kind, origin,
                        set_at, external_id AS seed_node_id, source_graph AS seed_graph,
                        project
                 FROM context_nodes
@@ -3177,7 +3240,12 @@ class ContextGraphRepository:
         resource_node_ids: Sequence[str] = (),
         limit: int = 2_000,
     ) -> list[dict[str, Any]]:
-        """Generate a bounded FTS/path candidate pool for precise ranking."""
+        """Generate a bounded identifier/path pool for precise ranking.
+
+        Human knowledge body text is intentionally absent here. Semantic retrieval
+        owns conceptual matching; this pool only supplies exact identifiers and
+        active material paths so incidental words cannot become evidence.
+        """
         normalized_project = project.strip()
         normalized_memory_project = (memory_project or project).strip()
         if not normalized_project:
@@ -3206,15 +3274,26 @@ class ContextGraphRepository:
         """
         by_id: dict[str, dict[str, Any]] = {}
         with self.connect() as connection:
-            fts_enabled = connection.execute(
-                "SELECT value FROM context_meta WHERE key = 'fts5'"
-            ).fetchone()
-            fts_query = " OR ".join(
-                f'"{term.replace(chr(34), chr(34) * 2)}"*' for term in normalized_terms
+            identifier_clause = " OR ".join(
+                """
+                (lower(node.label) = ?
+                 OR instr(lower(node.label), ?) = 1
+                 OR lower(node.stable_key) = ?
+                 OR instr(
+                     '.' || replace(replace(lower(node.stable_key), '-', '.'), '_', '.') || '.',
+                     '.' || ? || '.'
+                 ) > 0)
+                """
+                for _ in normalized_terms
+            )
+            identifier_parameters = tuple(
+                value
+                for term in normalized_terms
+                for value in (term, term, term, term)
             )
 
-            def add_fts_candidates(namespace: str, maximum: int) -> None:
-                if maximum <= 0:
+            def add_identifier_candidates(namespace: str, maximum: int) -> None:
+                if maximum <= 0 or not identifier_clause:
                     return
                 if namespace == MEMORY_NAMESPACE:
                     visibility = "node.project IN ('', ?)"
@@ -3229,42 +3308,35 @@ class ContextGraphRepository:
                     placeholders = ",".join("?" for _ in selected_resource_ids)
                     visibility = f"node.id IN ({placeholders})"
                     visibility_parameters = selected_resource_ids
-                try:
-                    rows = connection.execute(
-                        select
-                        + f"""
-                        FROM context_nodes_fts search
-                        JOIN context_nodes node ON node.id = search.id
-                        WHERE context_nodes_fts MATCH ?
-                          AND node.namespace = ?
-                          AND {visibility}
-                        ORDER BY bm25(context_nodes_fts), node.stable_key
-                        LIMIT ?
-                        """,  # nosec B608
-                        (
-                            fts_query,
-                            namespace,
-                            *visibility_parameters,
-                            maximum,
-                        ),
-                    ).fetchall()
-                except sqlite3.OperationalError:
-                    rows = []
+                rows = connection.execute(
+                    select
+                    + f"""
+                    FROM context_nodes node
+                    WHERE node.namespace = ?
+                      AND {visibility}
+                      AND ({identifier_clause})
+                    ORDER BY node.stable_key
+                    LIMIT ?
+                    """,  # nosec B608
+                    (
+                        namespace,
+                        *visibility_parameters,
+                        *identifier_parameters,
+                        maximum,
+                    ),
+                ).fetchall()
                 by_id.update((str(row["id"]), _context_node(row)) for row in rows)
 
-            can_use_fts = bool(
-                normalized_terms and fts_enabled is not None and fts_enabled["value"] == "enabled"
-            )
-            if can_use_fts and include_memory:
+            if normalized_terms and include_memory:
                 memory_limit = parsed_limit if not include_code else max(1, parsed_limit // 4)
-                add_fts_candidates(MEMORY_NAMESPACE, memory_limit)
+                add_identifier_candidates(MEMORY_NAMESPACE, memory_limit)
 
-            if can_use_fts and include_resources:
-                add_fts_candidates(
+            if normalized_terms and include_resources:
+                add_identifier_candidates(
                     RESOURCE_NAMESPACE,
                     min(max(1, parsed_limit // 4), parsed_limit - len(by_id)),
                 )
-                add_fts_candidates(
+                add_identifier_candidates(
                     CONTEXT_NAMESPACE,
                     min(max(1, parsed_limit // 8), parsed_limit - len(by_id)),
                 )
@@ -3293,38 +3365,8 @@ class ContextGraphRepository:
                 by_id.update((str(row["id"]), _context_node(row)) for row in rows)
                 path_added += len(by_id) - before
 
-            if can_use_fts and include_code:
-                add_fts_candidates("code", parsed_limit - len(by_id))
-            if not by_id:
-                code_placeholders = ",".join("?" for _ in selected_code_projects)
-                resource_clause = ""
-                resource_parameters: tuple[str, ...] = ()
-                if include_resources and selected_resource_ids:
-                    placeholders = ",".join("?" for _ in selected_resource_ids)
-                    resource_clause = f" OR node.id IN ({placeholders})"
-                    resource_parameters = selected_resource_ids
-                rows = connection.execute(
-                    select
-                    + f"""
-                    FROM context_nodes node
-                    WHERE (? = 1 AND node.namespace = ? AND node.project IN ('', ?))
-                       OR (? = 1 AND node.namespace = 'code'
-                           AND node.project IN ({code_placeholders}))
-                       {resource_clause}
-                    ORDER BY node.namespace, node.stable_key
-                    LIMIT ?
-                    """,  # nosec B608
-                    (
-                        int(include_memory),
-                        MEMORY_NAMESPACE,
-                        normalized_memory_project,
-                        int(include_code),
-                        *selected_code_projects,
-                        *resource_parameters,
-                        parsed_limit,
-                    ),
-                ).fetchall()
-                by_id.update((str(row["id"]), _context_node(row)) for row in rows)
+            if normalized_terms and include_code:
+                add_identifier_candidates("code", parsed_limit - len(by_id))
         return _prefer_project_memory(
             [by_id[node_id] for node_id in sorted(by_id)], normalized_memory_project
         )
@@ -4050,7 +4092,85 @@ class ContextGraphRepository:
                 + (" AND project = ?" if project is not None else ""),
                 (normalized, project) if project is not None else (normalized,),
             ).fetchall()
-        return {str(row["object_id"]) for row in rows}
+            return {str(row["object_id"]) for row in rows}
+
+    def session_exposed_node_ids(
+        self, session_id: str, *, project: str | None = None
+    ) -> set[str]:
+        normalized = session_id.strip()
+        if not normalized:
+            raise ValueError("session_id cannot be empty")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT node_id FROM awareness_exposures WHERE session_id = ?"
+                + (" AND project = ?" if project is not None else ""),
+                (normalized, project) if project is not None else (normalized,),
+            ).fetchall()
+        return {str(row["node_id"]) for row in rows}
+
+    def record_awareness_exposures(
+        self,
+        session_id: str,
+        hints: Sequence[dict[str, Any]],
+        *,
+        project: str,
+        shown_at: int | None = None,
+    ) -> None:
+        normalized = session_id.strip()
+        if not normalized:
+            raise ValueError("session_id cannot be empty")
+        timestamp = _now(shown_at)
+        with self.connect() as connection:
+            for hint in hints:
+                node_id = str(hint.get("nodeId") or "").strip()
+                reason = str(hint.get("reason") or "related").strip()
+                if not node_id:
+                    continue
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO awareness_exposures(
+                        session_id, project, node_id, reason, shown_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (normalized, project, node_id, reason, timestamp),
+                )
+                if cursor.rowcount:
+                    self._record_event(
+                        connection,
+                        "context.awareness",
+                        object_id=node_id,
+                        session_id=normalized,
+                        project=project,
+                        payload={
+                            "key": hint.get("key"),
+                            "reason": reason,
+                        },
+                        occurred_at=timestamp,
+                    )
+            connection.commit()
+
+    def awareness_metrics(self, *, project: str | None = None) -> dict[str, int]:
+        normalized_project = project.strip() if project else None
+        parameters = (normalized_project, normalized_project)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS exposures,
+                       COALESCE(SUM(EXISTS (
+                        SELECT 1
+                        FROM context_events AS event
+                        WHERE event.event_type = 'context.delivered'
+                          AND event.session_id = exposure.session_id
+                          AND event.project = exposure.project
+                          AND event.object_id = exposure.node_id
+                          AND event.occurred_at >= exposure.shown_at
+                       )), 0) AS follow_ups
+                FROM awareness_exposures AS exposure
+                WHERE (? IS NULL OR exposure.project = ?)
+                """,
+                parameters,
+            ).fetchone()
+        return {"exposures": int(row["exposures"]), "followUps": int(row["follow_ups"])}
 
     def create_request(
         self,

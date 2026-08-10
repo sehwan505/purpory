@@ -133,6 +133,7 @@ const emptyView: ViewResponse = {
   resources: [],
   topics: [],
   sessions: [],
+  awarenessMetrics: { exposures: 0, followUps: 0 },
   diagnostics: { database: "", integrity: "unknown", schemaVersion: 0, counts: {} },
 }
 const emptyRecall: Recall = { preferred: [], tentative: [], associations: [], activation: [] }
@@ -2022,6 +2023,11 @@ export function Dashboard() {
   const meta = pageMeta[page]
   const openRequests = requests.filter((request) => request.status === "open")
   const totalDeliveries = view.sessions.reduce((sum, session) => sum + session.items.length, 0)
+  const awarenessExposures = view.awarenessMetrics.exposures
+  const awarenessFollowUps = view.awarenessMetrics.followUps
+  const awarenessConversion = awarenessExposures
+    ? Math.round((awarenessFollowUps / awarenessExposures) * 100)
+    : 0
 
   return (
     <div className="min-h-screen text-ink">
@@ -2166,9 +2172,9 @@ export function Dashboard() {
                   />
                   <StatCard
                     icon={<BrainCircuit />}
-                    label="Recalled"
-                    value={recall.preferred.length}
-                    detail="cross-session preferred"
+                    label="Explored hints"
+                    value={awarenessFollowUps}
+                    detail={`${awarenessExposures} shown · ${awarenessConversion}% followed up`}
                     tone="teal"
                   />
                 </section>

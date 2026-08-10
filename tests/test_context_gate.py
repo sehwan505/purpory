@@ -159,6 +159,34 @@ def test_search_without_evidence_asks_and_deduplicates_gap(tmp_path: Path) -> No
     assert len(service.requests(status="open")) == 1
 
 
+def test_search_with_only_awareness_retrieves_and_records_the_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = StubGateProvider(
+        _proposal("search", query="unrelated", scopes=["human"])
+    )
+    service = ContextService(db_path=tmp_path / "context.db", root=tmp_path, gate_provider=provider)
+    service.set_topic("intent.auth-review", source="@repo/src/auth", kind="decision")
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings",
+        lambda *args, **kwargs: [],
+    )
+
+    result = service.prepare(
+        "unrelated",
+        session_id="session-a",
+        active_paths=["src/auth/service.py"],
+    )
+
+    assert result["action"] == "retrieve"
+    assert result["delivery"] == []
+    assert [item["key"] for item in result["awareness"]] == ["intent.auth-review"]
+    assert service.repository.awareness_metrics(project=service.project_id) == {
+        "exposures": 1,
+        "followUps": 0,
+    }
+
+
 def test_direct_ask_records_a_deduplicated_gap(tmp_path: Path) -> None:
     provider = StubGateProvider(
         _proposal(
