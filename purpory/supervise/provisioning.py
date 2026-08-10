@@ -564,7 +564,7 @@ class ContextProvisioningService:
             limit=min(parsed_limit, MAX_FRONTIER_PREVIEW),
             adjacent=candidate_edges,
         )
-        awareness = self._awareness(
+        awareness = self._discover_hints(
             candidates,
             connections=connections,
             exploration=exploration,
@@ -1172,7 +1172,7 @@ class ContextProvisioningService:
             candidate["relationCount"] = counts[candidate["nodeId"]]
         return edges
 
-    def _awareness(
+    def _discover_hints(
         self,
         candidates: Sequence[dict[str, Any]],
         *,
@@ -1184,8 +1184,12 @@ class ContextProvisioningService:
     ) -> list[dict[str, Any]]:
         """Expose unexpected related context without loading its content."""
         excluded_ids = {str(candidate["nodeId"]) for candidate in candidates}
-        excluded_ids |= self.repository.session_delivered_node_ids(session_id)
-        excluded_ids |= self.repository.session_aware_node_ids(session_id)
+        excluded_ids |= self.repository.session_delivered_node_ids(
+            session_id, project=self.project
+        )
+        excluded_ids |= self.repository.session_exposed_node_ids(
+            session_id, project=self.project
+        )
         hints: list[dict[str, Any]] = []
         seen_ids = set(excluded_ids)
 
@@ -1222,27 +1226,35 @@ class ContextProvisioningService:
                 hint["observations"] = observations
             hints.append(hint)
 
-        for topic in self.repository.list_topics(project=self.project):
-            source = _normalize_path(topic.get("source"))
-            if not source or not any(_paths_related(source, path) for path in active_paths):
-                continue
-            add(
-                {
-                    "id": topic["id"],
-                    "namespace": "memory",
-                    "stableKey": topic["key"],
-                    "label": topic["key"],
-                    "type": topic["kind"],
-                    "source": topic.get("source"),
-                },
-                reason="active-path-context",
-            )
+        if active_paths:
+            for topic in self.repository.list_topics(project=self.project):
+                source = _normalize_path(topic.get("source"))
+                if not source or not any(_paths_related(source, path) for path in active_paths):
+                    continue
+                add(
+                    {
+                        "id": topic["id"],
+                        "namespace": "memory",
+                        "stableKey": topic["key"],
+                        "label": topic["key"],
+                        "type": topic["kind"],
+                        "source": topic.get("source"),
+                    },
+                    reason="active-path-context",
+                )
 
         # Repeated co-delivery is a useful source of unknown-unknowns: it can
         # reveal a durable constraint the current query never named. Labels are
         # hints only; values remain unloaded until a narrower follow-up search.
         anchor_keys = [str(candidate["key"]) for candidate in candidates]
-        for item in associations(self.repository, anchor_keys, session_id=session_id):
+        for item in associations(
+            self.repository,
+            anchor_keys,
+            session_id=session_id,
+            project=self.project,
+        ):
+            if len(hints) >= limit:
+                break
             topic = self.repository.get_topic(str(item["key"]), project=self.project)
             if topic is None:
                 continue

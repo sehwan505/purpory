@@ -15,11 +15,10 @@ from purpory.supervise.gate.contract import (
     MAX_QUERY_CHARS,
 )
 from purpory.supervise.gate.provider import GateProvider, GateProviderError
-from purpory.supervise.provisioning import ContextProvisioningService
+from purpory.supervise.provisioning import MAX_AWARENESS_HINTS, ContextProvisioningService
 from purpory.supervise.repository import ContextGraphRepository
 
 MAX_DIRECT_EVIDENCE = 2
-MAX_AWARENESS_HINTS = 6
 
 
 def render_awareness(hints: Sequence[dict[str, Any]]) -> str:
@@ -46,14 +45,13 @@ def render_awareness(hints: Sequence[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _awareness_hints(
+def _select_delivery_hints(
     search_result: dict[str, Any],
     *,
-    delivered_ids: set[str],
-    previously_delivered_ids: set[str],
+    excluded_ids: set[str],
 ) -> list[dict[str, Any]]:
     hints: list[dict[str, Any]] = []
-    seen = set(delivered_ids) | set(previously_delivered_ids)
+    seen = set(excluded_ids)
 
     for candidate in search_result["candidates"][MAX_DIRECT_EVIDENCE:]:
         node_id = str(candidate["nodeId"])
@@ -224,21 +222,19 @@ class GatewayService:
                 active_paths=active_paths,
                 previous_deliveries=previous,
             )
-            if search_result["candidates"]:
-                previously_delivered_ids = self.repository.session_delivered_node_ids(
-                    session_id, project=project
-                )
-                delivery_candidates = list(
-                    search_result["candidates"][:MAX_DIRECT_EVIDENCE]
-                )
-                delivered_ids = {
-                    str(candidate["nodeId"]) for candidate in delivery_candidates
-                }
-                awareness = _awareness_hints(
-                    search_result,
-                    delivered_ids=delivered_ids,
-                    previously_delivered_ids=previously_delivered_ids,
-                )
+            delivery_candidates = list(
+                search_result["candidates"][:MAX_DIRECT_EVIDENCE]
+            )
+            excluded_ids = self.repository.session_delivered_node_ids(
+                session_id, project=project
+            ) | {
+                str(candidate["nodeId"]) for candidate in delivery_candidates
+            }
+            awareness = _select_delivery_hints(
+                search_result,
+                excluded_ids=excluded_ids,
+            )
+            if delivery_candidates:
                 delivery_result = provisioner.deliver(
                     [candidate["nodeId"] for candidate in delivery_candidates],
                     session_id=session_id,
@@ -247,7 +243,7 @@ class GatewayService:
                 )
             delivery = delivery_result["delivery"]
             omitted = delivery_result["omitted"]
-            if delivery:
+            if delivery or awareness:
                 final_action = "retrieve"
             elif any(item.get("reason") == "already-delivered" for item in omitted):
                 final_action = "skip"
@@ -276,8 +272,8 @@ class GatewayService:
             )
         if final_action != "ask":
             clarification = None
-        if awareness:
-            self.repository.record_awareness(
+        if final_action == "retrieve" and awareness:
+            self.repository.record_awareness_exposures(
                 session_id,
                 awareness,
                 project=project,
@@ -318,7 +314,6 @@ class GatewayService:
             "context": {
                 "manifest": catalog,
                 "search": search_result,
-                "awareness": awareness,
                 "rendered": delivery_result["rendered"],
                 "estimatedTokens": delivery_result["estimatedTokens"],
                 "valueHash": delivery_result["valueHash"],

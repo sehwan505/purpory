@@ -226,17 +226,16 @@ def test_search_expands_korean_developer_terms_without_an_llm(
 def test_session_scope_can_recall_previously_delivered_memory(tmp_path: Path) -> None:
     service = _service_with_graph(tmp_path)
     memory_search = service._provisioner().search(
-        "token expiry",
+        "decision.auth.ttl",
         session_id="agent-a",
         scopes=["human"],
-        keywords=["token", "expire"],
         connect=False,
     )
     memory_id = memory_search["candidates"][0]["nodeId"]
     service._provisioner().deliver([memory_id], session_id="agent-a", token_budget=512)
 
     result = service._provisioner().search(
-        "token",
+        "decision.auth.ttl",
         session_id="agent-a",
         scopes=["session"],
         connect=False,
@@ -475,9 +474,10 @@ def test_prepare_includes_ready_context_without_public_primitives(
     assert follow_up["action"] == "retrieve"
     assert [item["nodeId"] for item in follow_up["delivery"]] == [token_hint["nodeId"]]
     assert "TokenRepository" in follow_up["context"]["rendered"]
-    counts = service.repository.diagnostics()["counts"]
-    assert counts["awarenessExposures"] == 1
-    assert counts["awarenessFollowUps"] == 1
+    assert service.repository.awareness_metrics(project=service.project_id) == {
+        "exposures": 1,
+        "followUps": 1,
+    }
 
     repeated = service.prepare(
         "인증 흐름이 DB와 어떻게 연결돼?",
@@ -495,6 +495,53 @@ def test_prepare_includes_ready_context_without_public_primitives(
         ).fetchone()
     assert exposure is not None
     assert exposure["reason"] == "graph-bridge"
+
+
+def test_prepare_surfaces_new_hint_when_direct_anchor_was_already_delivered(
+    tmp_path: Path,
+) -> None:
+    from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
+
+    class Provider:
+        def propose(self, request: GateRequest) -> ProviderResult:
+            return ProviderResult(
+                proposal=GateProposal.from_mapping(
+                    {
+                        "action": "search",
+                        "query": "AuthService",
+                        "scopes": ["material"],
+                        "keywords": [],
+                        "reasonCode": "CODE_CONTEXT_REQUIRED",
+                        "clarification": None,
+                    }
+                ),
+                model_id="stub/qwen",
+                model_revision="test",
+                latency_ms=1,
+            )
+
+    service = _service_with_graph(tmp_path)
+    service.gate_provider = Provider()
+    auth = next(
+        candidate
+        for candidate in service._provisioner().search(
+            "AuthService", session_id="agent-a", scopes=["material"]
+        )["candidates"]
+        if candidate["label"] == "AuthService"
+    )
+    service._provisioner().deliver(
+        [auth["nodeId"]], session_id="agent-a", token_budget=512
+    )
+
+    result = service.prepare("AuthService", session_id="agent-a", token_budget=512)
+
+    assert result["action"] == "retrieve"
+    assert result["delivery"] == []
+    assert [hint["label"] for hint in result["awareness"]] == ["TokenRepository"]
+    assert service.repository.awareness_metrics(project=service.project_id) == {
+        "exposures": 1,
+        "followUps": 0,
+    }
 
 
 def test_search_surfaces_cross_session_associations_as_awareness_not_evidence(

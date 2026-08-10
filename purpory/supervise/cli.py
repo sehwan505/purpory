@@ -297,7 +297,7 @@ def dispatch_product_command(command: str, arguments: Sequence[str] | None = Non
                 awareness = render_awareness(result.get("awareness") or [])
                 rendered = result["context"]["rendered"].rstrip()
                 _emit(
-                    rendered + ("\n\n" + awareness if awareness else ""),
+                    "\n\n".join(part for part in (rendered, awareness) if part),
                     json_output=False,
                 )
             elif result["action"] == "ask":

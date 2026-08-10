@@ -208,6 +208,7 @@ export type ViewResponse = {
   resources: ProjectResource[]
   topics: Topic[]
   sessions: Session[]
+  awarenessMetrics: { exposures: number; followUps: number }
   diagnostics: {
     database: string
     integrity: string
