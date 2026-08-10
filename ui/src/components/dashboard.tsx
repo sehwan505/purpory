@@ -172,6 +172,13 @@ function readableContextKey(key: string) {
   return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
 }
 
+function contextKind(item: Session["items"][number]) {
+  if (item.namespace === "code" || item.key.startsWith("material.")) return { label: "Material", variant: "blue" as const }
+  if (item.kind === "decision" || item.key.startsWith("intent.")) return { label: "Intent", variant: "violet" as const }
+  if (item.kind === "doc-ref" || item.kind === "code-area" || item.key.startsWith("reference.")) return { label: "Reference", variant: "teal" as const }
+  return { label: "Knowledge", variant: "default" as const }
+}
+
 function actionVariant(action: ContextAction) {
   if (action === "retrieve") return "success" as const
   if (action === "ask") return "warning" as const
@@ -548,6 +555,10 @@ function SessionNode({ session }: { session: Session }) {
     : null
   const live = latest !== null && Date.now() / 1000 - latest < 300
   const agent = session.id.split(":", 1)[0]
+  const kinds = [...new Map(session.items.map((item) => {
+    const kind = contextKind(item)
+    return [kind.label, kind]
+  })).values()]
   return (
     <details className="group overflow-hidden rounded-[12px] border border-accent-violet/20 bg-accent-violet-soft/45">
       <summary className="cursor-pointer list-none p-3 [&::-webkit-details-marker]:hidden">
@@ -560,15 +571,24 @@ function SessionNode({ session }: { session: Session }) {
           <Badge variant={live ? "success" : "neutral"}>{live ? "Live" : latest ? relativeTime(latest) : "Idle"}</Badge>
           <ChevronRight className="size-3.5 text-dim transition-transform group-open:rotate-90" />
         </div>
-        <p className="mt-2 text-[10px] text-muted">{session.items.length} delivered context items</p>
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {kinds.map((kind) => <Badge key={kind.label} variant={kind.variant}>{kind.label}</Badge>)}
+          <span className="text-[10px] text-muted">{session.items.length} delivered</span>
+        </div>
       </summary>
       <div className="space-y-2 border-t border-accent-violet/15 bg-panel/75 p-3">
         {session.items.slice(0, 5).map((item) => {
           const label = item.label && item.label !== item.key ? item.label : readableContextKey(item.key)
+          const kind = contextKind(item)
           return (
             <div key={item.key} className="rounded-[9px] border border-line bg-canvas/60 p-2.5">
-              <p className="text-[10px] font-semibold text-ink">{label}</p>
+              <div className="flex items-start gap-2">
+                <Badge variant={kind.variant}>{kind.label}</Badge>
+                <p className="min-w-0 flex-1 text-[10px] font-semibold text-ink">{label}</p>
+                <span className="shrink-0 text-[9px] text-dim">{relativeTime(item.deliveredAt)}</span>
+              </div>
               {item.preview && <p className="mt-1 line-clamp-2 whitespace-pre-line text-[9px] leading-4 text-muted">{item.preview}</p>}
+              <p className="mt-1.5 truncate text-[9px] text-dim" title={item.source ?? undefined}>From {item.source || "project memory"}</p>
             </div>
           )
         })}
@@ -1652,6 +1672,12 @@ function WorkspaceMonitor({
     return !viewId || !viewIds.has(viewId)
   })
   const viewCount = project?.resources.reduce((sum, resource) => sum + resource.views.length, 0) ?? 0
+  const dirtyViewCount = project?.resources.reduce(
+    (sum, resource) => sum + resource.views.filter((view) => view.properties.dirty === true).length,
+    0,
+  ) ?? 0
+  const missingViewCount = project?.resources.filter((resource) => !resource.views.length).length ?? 0
+  const attentionCount = dirtyViewCount + missingViewCount + unmappedSessions.length
 
   return (
     <div className="grid items-start gap-5 lg:grid-cols-[15rem_minmax(0,1fr)]">
@@ -1735,6 +1761,21 @@ function WorkspaceMonitor({
             </CardContent>
           </Card>
 
+          <section className="grid gap-2 sm:grid-cols-3" aria-label="What to watch">
+            <div className="rounded-[12px] border border-signal/25 bg-signal-soft/55 p-3">
+              <div className="flex items-center gap-2 text-[10px] font-semibold text-signal"><CircleDot className="size-3.5" /> Active path</div>
+              <p className="mt-1.5 text-[10px] leading-4 text-muted">Follow green to see which Project and View are supplying context now.</p>
+            </div>
+            <div className={cn("rounded-[12px] border p-3", attentionCount ? "border-accent-amber/30 bg-accent-amber-soft/45" : "border-line bg-canvas/45")}>
+              <div className="flex items-center gap-2 text-[10px] font-semibold text-ink"><AlertCircle className={cn("size-3.5", attentionCount ? "text-accent-amber" : "text-dim")} /> Needs attention <Badge variant={attentionCount ? "warning" : "neutral"}>{attentionCount}</Badge></div>
+              <p className="mt-1.5 text-[10px] leading-4 text-muted">Dirty Views, repositories without a View, and unmapped Sessions.</p>
+            </div>
+            <div className="rounded-[12px] border border-accent-violet/20 bg-accent-violet-soft/40 p-3">
+              <div className="flex items-center gap-2 text-[10px] font-semibold text-accent-violet"><BrainCircuit className="size-3.5" /> Delivered data</div>
+              <p className="mt-1.5 text-[10px] leading-4 text-muted">Expand a Session to inspect its Intent, Knowledge, Reference, and Material.</p>
+            </div>
+          </section>
+
           <Card>
             <CardHeader>
               <div>
@@ -1748,6 +1789,7 @@ function WorkspaceMonitor({
                 <div className="rounded-[13px] border border-signal/30 bg-signal-soft p-4">
                   <div className="flex items-center gap-2"><FolderKanban className="size-4 text-signal" /><span className="text-[9px] font-semibold uppercase tracking-[0.16em] text-signal">Project</span></div>
                   <p className="mt-2 truncate text-sm font-semibold text-ink">{project.name}</p>
+                  <p className="mt-1 text-[9px] text-muted">Context boundary · {project.resources.length} repositories</p>
                 </div>
                 <div className="flex items-center gap-3 text-[10px] text-muted">
                   <span className="h-px min-w-8 flex-1 bg-signal/35" />
@@ -1770,6 +1812,10 @@ function WorkspaceMonitor({
                           <div className="flex items-center gap-2"><GitFork className="size-4 text-accent-blue" /><p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{resource.alias || resource.label}</p></div>
                           <div className="mt-2 flex flex-wrap gap-1.5"><Badge variant="blue">{resource.provider}</Badge>{shared && <Badge variant="violet">Shared</Badge>}</div>
                           <p className="mt-3 break-all font-mono text-[9px] leading-4 text-dim">{resource.externalIdentity}</p>
+                          <div className="mt-3 flex items-center justify-between border-t border-accent-blue/15 pt-2 text-[9px] text-muted">
+                            <span>{resource.views.length} Views</span>
+                            <span>Updated {relativeTime(resource.updatedAt)}</span>
+                          </div>
                         </div>
                         <ArrowRight className={cn("mx-auto mt-7 hidden size-4 xl:block", containsActiveView ? "text-signal" : "text-line-strong")} />
                         <div className="space-y-2">
@@ -1782,6 +1828,10 @@ function WorkspaceMonitor({
                                   <div className="flex items-center gap-2"><span className={cn("size-2 rounded-full", view.id === activeView ? "bg-positive" : "bg-accent-teal")} /><span className="min-w-0 flex-1 truncate font-mono text-[11px] font-semibold text-ink">{branch}</span>{view.id === activeView && <Badge variant="success">Active</Badge>}</div>
                                   <div className="mt-2 flex flex-wrap gap-1.5">{view.properties.dirty === true && <Badge variant="warning">Dirty</Badge>}{view.role && <Badge variant="neutral">{view.role}</Badge>}</div>
                                   <p className="mt-2 truncate font-mono text-[9px] text-dim" title={view.locator}>{view.locator}</p>
+                                  <div className="mt-2 flex items-center justify-between border-t border-accent-teal/15 pt-2 text-[9px] text-muted">
+                                    <span>{viewSessions.length} Sessions</span>
+                                    <span>{view.revision ? `rev ${view.revision.slice(0, 8)}` : `Seen ${relativeTime(view.observedAt)}`}</span>
+                                  </div>
                                 </div>
                                 <ArrowRight className={cn("mx-auto mt-6 hidden size-4 xl:block", viewSessions.length ? "text-accent-violet" : "text-line-strong")} />
                                 <div className="space-y-2">
