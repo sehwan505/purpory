@@ -671,9 +671,11 @@ class ContextService:
 
     def model_status(self) -> dict[str, Any]:
         from purpory.supervise.gate.provider import UnavailableGateProvider
-        from purpory.supervise.gate.runtime import GateModelManager
+        from purpory.supervise.gate.runtime import GateModelManager, configured_model
 
-        managed = GateModelManager().status()
+        manager = GateModelManager()
+        managed = manager.status()
+        reconcile = manager.status(model=configured_model("reconcile"))
         provider = self.gate_provider
         environment_url = os.environ.get("PURPORY_GATE_URL", "").strip()
         provider_endpoint = getattr(provider, "endpoint", None)
@@ -697,6 +699,11 @@ class ContextService:
             "providerConfigured": provider is not None or bool(environment_url),
             "providerSource": source,
             "providerModel": getattr(provider, "model", None),
+            "selectedModels": {
+                "gate": configured_model("gate"),
+                "reconcile": configured_model("reconcile"),
+            },
+            "models": {"gate": managed, "reconcile": reconcile},
         }
 
     def context_feedback(

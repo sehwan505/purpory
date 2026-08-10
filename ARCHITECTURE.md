@@ -9,8 +9,8 @@ distinct without splitting retrieval into separate products.
 The product is a modular monolith: one Python distribution and CLI, strict internal boundaries, and
 a separately built React dashboard packaged as static assets.
 
-The current priority is situation-aware transfer from Purpory memory to an agent session. A small
-reconciliation workflow also keeps explicit durable project intent current; broader educational
+The current priority is situation-aware transfer from Purpory memory to an agent session. Session-end
+reconciliation also keeps explicit durable project intent current; broader educational
 learning and user-knowledge modeling remain in [`docs/TODO.md`](docs/TODO.md).
 
 ## Runtime Components
@@ -35,10 +35,10 @@ operations; legacy JSON enters the graph only through explicit import.
 - `bridge.py`: deterministic compatibility-artifact import and seed derivation.
 - `gate/`: strict proposal schema, optional Qwen provider, fallback policy, and model lifecycle.
 - `preflight.py`: the shared Claude Code and Codex `UserPromptSubmit` adapter.
+- `session_reconcile.py`: the shared `SessionEnd` queue, transcript normalization, bounded
+  map/reduce model pipeline, and conflict-checked project-memory writer.
 - `serve/`: loopback HTTP, capability tokens, SSE, and packaged dashboard assets.
 - `cli.py`: the `remember`, `prepare`, and `dashboard` product commands.
-- `skills/purpory-reconcile/`: one shared Claude Code and Codex workflow for selecting every
-  important durable memory that clears a simple evidence gate and updating it safely.
 
 The context repository does not import NetworkX, tree-sitter, clustering, embedding, or LLM
 packages at module import time. SQLite owns persistence and bounded traversal. Heavy analysis and
@@ -50,8 +50,8 @@ The model action space is `skip | search | ask`. `search` is a proposal, not a r
 Purpory validates the proposal against actual memory and code evidence before producing the public
 `skip | retrieve | ask` action.
 
-Qwen runs in a warm loopback `transformers serve` process. Purpory owns the installation manifest,
-pinned revision, PID, endpoint, readiness checks, and logs. The model never selects authoritative
+Qwen runs in the shared loopback Ollama daemon. Purpory persists the selected routing and reconcile
+roles and reports Ollama's inventory/readiness. The routing model never selects authoritative
 node IDs, and its response must be exactly one closed enum value. Purpory expands it into a
 schema-validated internal proposal. Provider construction and process side
 effects stay in CLI adapters; `ContextService` receives the provider as a dependency.
@@ -64,8 +64,9 @@ Three adjacent names have deliberately separate meanings:
 - **Prepare** is the single domain operation implemented by `ContextService.prepare`.
 - **Gate** is the optional non-authoritative model proposal inside preparation.
 
-Host-specific code must stop at `preflight.py`. It must not duplicate preparation, retrieval, or
-gate policy.
+Host-specific prompt code stops at `preflight.py`, and host-specific session input stops at the
+queue boundary in `session_reconcile.py`. Neither duplicates preparation, retrieval, or memory-write
+policy.
 
 ### Dashboard
 
@@ -121,8 +122,9 @@ Purpory deliberately exposes one context-preparation operation:
 raises a global-memory approval request;
 `dashboard` opens supervision. Discovery, search, graph
 connection, expansion, path finding, rendering, budgeting, and delivery are internal domain
-operations. Native Claude Code and Codex hooks invoke `prepare` before each user prompt; other
-adapters may call it directly with a stable session ID.
+operations. Native Claude Code and Codex hooks invoke `prepare` before each user prompt and queue
+reconciliation when a session ends; other adapters may call preparation directly with a stable
+session ID.
 
 ## Preparation Flow
 
@@ -137,6 +139,23 @@ adapters may call it directly with a stable session ID.
 7. Pack evidence under the token budget, hash exact bytes, and record delivery events.
 8. Return `retrieve` with rendered context, `ask` with one deduplicated gap, or `skip`.
 9. Accept human feedback through the dashboard audit surface.
+
+## Session Reconciliation Flow
+
+1. `SessionEnd` hard-links or copies the host transcript into Purpory's local queue and exits.
+2. A detached worker normalizes Claude and Codex JSONL into user/assistant messages; tool and system
+   content is excluded.
+3. Every chronological segment is processed under half of the selected model's context budget.
+   Nothing is tail-truncated.
+4. Candidates must be grounded in user evidence and pass the durable/consequential gate.
+5. Candidates sharing a stable key are consolidated hierarchically. Every reduce response must
+   account for every input candidate, and later explicit user corrections win.
+6. Final project-local changes use the existing expected-hash contract in batches of at most 20.
+   Duplicate session/content jobs are harmless, and failures remain queued for retry.
+
+This bounded map/reduce shape borrows the split-then-summarize idea from
+[Summ^N](https://aclanthology.org/2022.acl-long.112/), but transports structured evidence-backed
+memory candidates instead of lossy prose summaries.
 
 ## Trust and Security
 

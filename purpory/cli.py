@@ -38,6 +38,7 @@ _COMMANDS = {
     "prs": "inspect pull requests",
     "query": "query the canonical graph",
     "remember": "store durable human context",
+    "session-end": "queue or process session memory reconciliation",
     "update": "rebuild the structural graph",
 }
 
@@ -400,6 +401,10 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             print("Usage: purpory preflight [claude|codex]", file=sys.stderr)
             raise SystemExit(2)
         run_preflight(argv[2])
+    elif cmd == "session-end":
+        from purpory.supervise.session_reconcile import run_session_end
+
+        run_session_end(argv[2:])
     elif cmd == "model":
         from purpory.supervise.model_cli import dispatch_model
 

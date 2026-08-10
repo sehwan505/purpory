@@ -1,4 +1,0 @@
-interface:
-  display_name: "Purpory Reconcile"
-  short_description: "Keep important project intent current without session noise"
-  default_prompt: "Use $purpory-reconcile to retain every important durable intent from this conversation."

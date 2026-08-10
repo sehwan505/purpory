@@ -40,18 +40,6 @@ def _third_party_hook(command: str = "third-party prepare") -> dict[str, object]
     return {"hooks": [{"type": "command", "command": command}]}
 
 
-def test_reconcile_skill_uses_an_evidence_gate_without_a_fixed_count() -> None:
-    from purpory import install
-
-    skill = Path(install.__file__).parent / "skills" / "purpory-reconcile" / "SKILL.md"
-    content = skill.read_text(encoding="utf-8")
-
-    assert all(signal in content for signal in ("Grounded", "Durable", "Consequential"))
-    assert "Do not impose a fixed count" in content
-    assert "importance score" in content
-    assert "zero to three" not in content.lower()
-
-
 def test_help_lists_only_supported_agent_integrations(monkeypatch, capsys):
     _run_main(monkeypatch, "--help")
     output = capsys.readouterr().out
@@ -91,17 +79,19 @@ def test_claude_round_trip_is_idempotent_and_preserves_user_config(tmp_path, mon
     prompt_hooks = settings["hooks"]["UserPromptSubmit"]
     assert len([hook for hook in prompt_hooks if "preflight claude" in str(hook)]) == 1
     assert _third_party_hook() in prompt_hooks
+    end_hooks = settings["hooks"]["SessionEnd"]
+    assert len([hook for hook in end_hooks if "session-end claude" in str(hook)]) == 1
     assert settings["hooks"]["PreToolUse"] == [_third_party_hook("third-party guard")]
     assert settings["permissions"] == {"allow": ["Read"]}
-    skill = tmp_path / ".claude" / "skills" / "purpory-reconcile" / "SKILL.md"
-    assert skill.is_file()
-    assert skill.read_text(encoding="utf-8").startswith("---\nname: purpory-reconcile")
+    skill = tmp_path / ".claude" / "skills" / "purpory-reconcile"
+    assert not skill.exists()
 
     _run_main(monkeypatch, "claude", "uninstall", "--project")
 
     assert claude_md.read_text(encoding="utf-8") == "# Project\n\nKeep this rule.\n"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     assert settings["hooks"]["UserPromptSubmit"] == [_third_party_hook()]
+    assert "SessionEnd" not in settings["hooks"]
     assert settings["hooks"]["PreToolUse"] == [_third_party_hook("third-party guard")]
     assert "purpory" not in str(settings["hooks"])
     assert not skill.exists()
@@ -128,14 +118,18 @@ def test_codex_round_trip_is_idempotent_and_preserves_user_config(tmp_path, monk
     prompt_hooks = settings["hooks"]["UserPromptSubmit"]
     assert len([hook for hook in prompt_hooks if "preflight codex" in str(hook)]) == 1
     assert _third_party_hook() in prompt_hooks
-    skill = tmp_path / ".agents" / "skills" / "purpory-reconcile" / "SKILL.md"
-    assert skill.is_file()
+    assert len(
+        [hook for hook in settings["hooks"]["SessionEnd"] if "session-end codex" in str(hook)]
+    ) == 1
+    skill = tmp_path / ".agents" / "skills" / "purpory-reconcile"
+    assert not skill.exists()
 
     _run_main(monkeypatch, "codex", "uninstall", "--project")
 
     assert agents_md.read_text(encoding="utf-8") == "# Local instructions\n\nKeep this too.\n"
     settings = json.loads(hooks_path.read_text(encoding="utf-8"))
     assert settings["hooks"]["UserPromptSubmit"] == [_third_party_hook()]
+    assert "SessionEnd" not in settings["hooks"]
     assert "purpory" not in str(settings["hooks"])
     assert not skill.exists()
 
@@ -154,6 +148,17 @@ def test_unknown_integration_option_fails_without_writing(tmp_path, monkeypatch)
         _run_main(monkeypatch, "claude", "install", "--global")
     assert exc.value.code == 2
     assert not any(tmp_path.iterdir())
+
+
+def test_install_removes_the_legacy_reconcile_skill(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    legacy = tmp_path / ".agents" / "skills" / "purpory-reconcile"
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("legacy", encoding="utf-8")
+
+    _run_main(monkeypatch, "codex", "install", "--project")
+
+    assert not legacy.exists()
 
 
 @pytest.mark.parametrize(
@@ -176,7 +181,9 @@ def test_default_install_is_user_global(
 
     assert (config / instructions).is_file()
     assert (config / settings).is_file()
-    assert (config / "skills" / "purpory-reconcile" / "SKILL.md").is_file()
+    installed = json.loads((config / settings).read_text(encoding="utf-8"))
+    assert "SessionEnd" in installed["hooks"]
+    assert not (config / "skills" / "purpory-reconcile").exists()
     assert not any(project.iterdir())
 
 

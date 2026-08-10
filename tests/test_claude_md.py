@@ -102,7 +102,7 @@ def test_uninstall_no_op_when_no_file(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_install_creates_settings_json(tmp_path):
-    """claude_install writes the mandatory prompt preflight hook."""
+    """claude_install writes prompt and session-end hooks."""
     import json
     claude_install(tmp_path)
     settings_path = tmp_path / ".claude" / "settings.json"
@@ -111,6 +111,9 @@ def test_install_creates_settings_json(tmp_path):
     hooks = settings.get("hooks", {}).get("UserPromptSubmit", [])
     assert len(hooks) == 1
     assert "preflight claude" in str(hooks[0])
+    end_hooks = settings.get("hooks", {}).get("SessionEnd", [])
+    assert len(end_hooks) == 1
+    assert "session-end claude" in str(end_hooks[0])
     assert "PreToolUse" not in settings.get("hooks", {})
 
 
@@ -123,6 +126,8 @@ def test_install_settings_json_idempotent(tmp_path):
     settings = json.loads(settings_path.read_text())
     hooks = settings.get("hooks", {}).get("UserPromptSubmit", [])
     assert len([hook for hook in hooks if "purpory" in str(hook)]) == 1
+    end_hooks = settings.get("hooks", {}).get("SessionEnd", [])
+    assert len([hook for hook in end_hooks if "purpory" in str(hook)]) == 1
 
 
 def test_uninstall_removes_settings_hook(tmp_path):

@@ -5,10 +5,23 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/parksehwan/.local/bin/purpory preflight codex",
-            "commandWindows": "/Users/parksehwan/.local/bin/purpory preflight codex",
+            "command": "/Users/parksehwan/orca/projects/purpory/.venv/bin/purpory preflight codex",
+            "commandWindows": "/Users/parksehwan/orca/projects/purpory/.venv/bin/purpory preflight codex",
             "timeout": 330,
             "statusMessage": "Purpory is preparing context"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/parksehwan/orca/projects/purpory/.venv/bin/purpory session-end codex",
+            "commandWindows": "/Users/parksehwan/orca/projects/purpory/.venv/bin/purpory session-end codex",
+            "timeout": 3,
+            "statusMessage": "Purpory is queueing session memory"
           }
         ]
       }

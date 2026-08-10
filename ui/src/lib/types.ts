@@ -326,4 +326,9 @@ export type ModelStatus = {
   installedModels?: string[]
   availablePresets?: string[]
   reconcilePresets?: string[]
+  selectedModels?: { gate: string; reconcile: string }
+  models?: {
+    gate: Pick<ModelStatus, "installed" | "ready" | "model" | "revision">
+    reconcile: Pick<ModelStatus, "installed" | "ready" | "model" | "revision">
+  }
 }

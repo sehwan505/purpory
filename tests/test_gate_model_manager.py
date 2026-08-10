@@ -121,6 +121,26 @@ def test_start_does_not_own_or_spawn_shared_runtime(monkeypatch: pytest.MonkeyPa
     assert manager.stop()["action"] == "external-runtime"
 
 
+def test_model_selection_persists_for_detached_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PURPORY_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "purpory.supervise.gate.runtime._models",
+        lambda timeout_seconds=0.25: [{"name": "custom:7b", "digest": "sha256:custom"}],
+    )
+
+    result = GateModelManager().select_model("custom:7b", role="reconcile")
+
+    from purpory.supervise.gate.runtime import configured_model
+
+    assert result["model"] == "custom:7b"
+    assert configured_model("reconcile") == "custom:7b"
+    assert json.loads((tmp_path / "models.json").read_text(encoding="utf-8")) == {
+        "reconcile": "custom:7b"
+    }
+
+
 def test_ollama_url_must_be_local_and_shared(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:1234/v1")
     assert ollama_urls() == ("http://127.0.0.1:1234", "http://127.0.0.1:1234/v1")
@@ -158,7 +178,7 @@ def test_model_cli_installs_gate_and_embedding_roles(
     dispatch_model(["install", "--json"])
 
     result = json.loads(capsys.readouterr().out)
-    assert installed == ["qwen3.5:0.8b", "qwen3.5:4b", "qwen3-embedding:0.6b"]
+    assert installed == ["qwen3.5:0.8b", "qwen3.5:9b", "qwen3-embedding:0.6b"]
     assert result["action"] == "installed"
 
 

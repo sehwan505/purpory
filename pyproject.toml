@@ -114,8 +114,6 @@ include-package-data = false
 purpory = [
     "always_on/claude-md.md",
     "always_on/agents-md.md",
-    "skills/purpory-reconcile/SKILL.md",
-    "skills/purpory-reconcile/agents/openai.yaml",
 ]
 "purpory.supervise.serve" = ["static/*", "static/assets/*"]
 

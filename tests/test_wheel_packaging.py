@@ -70,15 +70,8 @@ def test_wheel_uses_only_purpory_package_paths(wheel_namelist: set[str]) -> None
         "purpory/always_on/agents-md.md",
         "purpory/always_on/claude-md.md",
     } <= wheel_namelist
-    assert {
-        "purpory/skills/purpory-reconcile/SKILL.md",
-        "purpory/skills/purpory-reconcile/agents/openai.yaml",
-    } <= wheel_namelist
     packaged_skills = {name for name in wheel_namelist if "/skills/" in name}
-    assert packaged_skills == {
-        "purpory/skills/purpory-reconcile/SKILL.md",
-        "purpory/skills/purpory-reconcile/agents/openai.yaml",
-    }
+    assert packaged_skills == set()
     assert "purpory/command-kilo.md" not in wheel_namelist
     packaged_always_on = {name for name in wheel_namelist if name.startswith("purpory/always_on/")}
     assert packaged_always_on == {

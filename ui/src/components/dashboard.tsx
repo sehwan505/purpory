@@ -805,9 +805,16 @@ function PreparationPanel({
   const [switchingModel, setSwitchingModel] = useState(false)
   const [installingModel, setInstallingModel] = useState(false)
   const [modelError, setModelError] = useState("")
-  const activeModel = modelStatus.model ?? modelStatus.providerModel ?? "qwen3.5:0.8b"
-  const [selectedModel, setSelectedModel] = useState(activeModel)
-  useEffect(() => setSelectedModel(activeModel), [activeModel])
+  const activeGateModel =
+    modelStatus.selectedModels?.gate ??
+    modelStatus.providerModel ??
+    modelStatus.model ??
+    "qwen3.5:0.8b"
+  const activeReconcileModel = modelStatus.selectedModels?.reconcile ?? "qwen3.5:9b"
+  const [selectedGateModel, setSelectedGateModel] = useState(activeGateModel)
+  const [selectedReconcileModel, setSelectedReconcileModel] = useState(activeReconcileModel)
+  useEffect(() => setSelectedGateModel(activeGateModel), [activeGateModel])
+  useEffect(() => setSelectedReconcileModel(activeReconcileModel), [activeReconcileModel])
   const modelOptions = useMemo(() => {
     const installed = modelStatus.installedModels ?? []
     const presets = modelStatus.availablePresets ?? [
@@ -818,30 +825,47 @@ function PreparationPanel({
     ]
     return Array.from(new Set([...installed, ...presets]))
   }, [modelStatus.installedModels, modelStatus.availablePresets])
+  const reconcileOptions = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...(modelStatus.installedModels ?? []),
+          ...(modelStatus.reconcilePresets ?? [
+            "qwen3.5:9b",
+            "qwen3.5:4b",
+            "qwen3.5:27b",
+          ]),
+        ]),
+      ),
+    [modelStatus.installedModels, modelStatus.reconcilePresets],
+  )
 
-  async function handleModelChange(selected: string) {
+  async function handleModelChange(selected: string, role: "gate" | "reconcile") {
     if (!selected) return
-    setSelectedModel(selected)
+    const active = role === "gate" ? activeGateModel : activeReconcileModel
+    if (role === "gate") setSelectedGateModel(selected)
+    else setSelectedReconcileModel(selected)
     setModelError("")
-    if (!modelStatus.installedModels?.includes(selected) || selected === activeModel) return
+    if (!modelStatus.installedModels?.includes(selected) || selected === active) return
     setSwitchingModel(true)
     try {
-      await selectModel({ model: selected, role: "gate" })
+      await selectModel({ model: selected, role })
       await onRefresh()
     } catch (caught) {
-      setSelectedModel(activeModel)
+      if (role === "gate") setSelectedGateModel(activeGateModel)
+      else setSelectedReconcileModel(activeReconcileModel)
       setModelError(caught instanceof Error ? caught.message : "Could not select the model")
     } finally {
       setSwitchingModel(false)
     }
   }
 
-  async function handleModelInstall() {
+  async function handleModelInstall(model: string, role: "gate" | "reconcile") {
     setInstallingModel(true)
     setModelError("")
     try {
-      await installModel({ model: selectedModel })
-      await selectModel({ model: selectedModel, role: "gate" })
+      await installModel({ model })
+      await selectModel({ model, role })
       await onRefresh()
     } catch (caught) {
       setModelError(caught instanceof Error ? caught.message : "Could not install the model")
@@ -887,22 +911,26 @@ function PreparationPanel({
                 <Badge variant={modelStatus.ready ? "success" : modelStatus.running ? "warning" : "neutral"}>
                   {modelStatus.ready ? "Ready" : modelStatus.running ? "Starting" : modelStatus.installed ? "Stopped" : "Not installed"}
                 </Badge>
+                <Badge variant={modelStatus.models?.reconcile.ready ? "success" : "warning"}>
+                  Reconcile {modelStatus.models?.reconcile.ready ? "ready" : "not installed"}
+                </Badge>
               </div>
               <p className="mt-1.5 font-mono text-[10px] text-dim">
-                {activeModel}
+                route {activeGateModel}
                 {modelStatus.revision ? ` @ ${modelStatus.revision.slice(0, 12)}` : ""}
+                {` · reconcile ${activeReconcileModel}`}
               </p>
             </div>
           </div>
           <div className="flex flex-col gap-2 sm:items-end">
             <div className="flex items-center gap-2">
               <label htmlFor="model-select" className="text-[11px] font-medium text-muted">
-                Model:
+                Routing:
               </label>
               <select
                 id="model-select"
-                value={selectedModel}
-                onChange={(e) => void handleModelChange(e.target.value)}
+                value={selectedGateModel}
+                onChange={(e) => void handleModelChange(e.target.value, "gate")}
                 disabled={switchingModel}
                 className="h-8 rounded-lg border border-line bg-panel-raised px-2.5 py-1 font-mono text-xs text-ink shadow-sm transition hover:border-signal/50 focus:border-signal focus:outline-none focus:ring-1 focus:ring-signal disabled:opacity-50"
               >
@@ -912,17 +940,46 @@ function PreparationPanel({
                   </option>
                 ))}
               </select>
-              {switchingModel && <RefreshCw className="size-3.5 animate-spin text-signal" />}
-              {!modelStatus.installedModels?.includes(selectedModel) && (
+              {!modelStatus.installedModels?.includes(selectedGateModel) && (
                 <Button
                   size="sm"
-                  onClick={() => void handleModelInstall()}
+                  onClick={() => void handleModelInstall(selectedGateModel, "gate")}
                   disabled={installingModel || !modelStatus.running}
                 >
                   {installingModel ? <RefreshCw className="animate-spin" /> : null}
                   Install
                 </Button>
               )}
+              <label
+                htmlFor="reconcile-model-select"
+                className="ml-2 text-[11px] font-medium text-muted"
+              >
+                Reconcile:
+              </label>
+              <select
+                id="reconcile-model-select"
+                value={selectedReconcileModel}
+                onChange={(e) => void handleModelChange(e.target.value, "reconcile")}
+                disabled={switchingModel}
+                className="h-8 rounded-lg border border-line bg-panel-raised px-2.5 py-1 font-mono text-xs text-ink shadow-sm transition hover:border-signal/50 focus:border-signal focus:outline-none focus:ring-1 focus:ring-signal disabled:opacity-50"
+              >
+                {reconcileOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt} {modelStatus.installedModels?.includes(opt) ? "✓" : "(preset)"}
+                  </option>
+                ))}
+              </select>
+              {!modelStatus.installedModels?.includes(selectedReconcileModel) && (
+                <Button
+                  size="sm"
+                  onClick={() => void handleModelInstall(selectedReconcileModel, "reconcile")}
+                  disabled={installingModel || !modelStatus.running}
+                >
+                  {installingModel ? <RefreshCw className="animate-spin" /> : null}
+                  Install
+                </Button>
+              )}
+              {switchingModel && <RefreshCw className="size-3.5 animate-spin text-signal" />}
             </div>
             {modelError && <p className="text-[11px] text-red-700">{modelError}</p>}
             <div className="border-l-2 border-line pl-4 sm:border-l-0 sm:pl-0 sm:text-right">
