@@ -184,6 +184,22 @@ function contextKind(item: Session["items"][number]) {
   return { label: "Knowledge", variant: "default" as const }
 }
 
+function SessionContextItem({ item, compact = false }: { item: Session["items"][number]; compact?: boolean }) {
+  const label = item.label && item.label !== item.key ? item.label : readableContextKey(item.key)
+  const kind = contextKind(item)
+  return (
+    <div className="rounded-[9px] border border-line bg-canvas/60 p-2.5">
+      <div className="flex items-start gap-2">
+        <Badge variant={kind.variant}>{kind.label}</Badge>
+        <p className="min-w-0 flex-1 text-[10px] font-semibold text-ink">{label}</p>
+        <span className="shrink-0 text-[9px] text-dim">{relativeTime(item.deliveredAt)}</span>
+      </div>
+      {item.preview && <p className={cn("mt-1 whitespace-pre-line text-[9px] leading-4 text-muted", compact && "line-clamp-2")}>{item.preview}</p>}
+      <p className="mt-1.5 truncate text-[9px] text-dim" title={item.source ?? undefined}>From {item.source || "project memory"}</p>
+    </div>
+  )
+}
+
 function actionVariant(action: ContextAction) {
   if (action === "retrieve") return "success" as const
   if (action === "ask") return "warning" as const
@@ -580,22 +596,25 @@ function SessionNode({ session }: { session: Session }) {
         </div>
       </summary>
       <div className="space-y-2 border-t border-accent-violet/15 bg-panel/75 p-3">
-        {session.items.slice(0, 5).map((item) => {
-          const label = item.label && item.label !== item.key ? item.label : readableContextKey(item.key)
-          const kind = contextKind(item)
-          return (
-            <div key={item.key} className="rounded-[9px] border border-line bg-canvas/60 p-2.5">
-              <div className="flex items-start gap-2">
-                <Badge variant={kind.variant}>{kind.label}</Badge>
-                <p className="min-w-0 flex-1 text-[10px] font-semibold text-ink">{label}</p>
-                <span className="shrink-0 text-[9px] text-dim">{relativeTime(item.deliveredAt)}</span>
+        {session.items.slice(0, 5).map((item) => <SessionContextItem key={item.key} item={item} compact />)}
+        {session.items.length > 5 && (
+          <Dialog>
+            <DialogTrigger asChild>
+              <button type="button" className="flex w-full items-center justify-center gap-1.5 rounded-[8px] border border-line bg-canvas/45 px-3 py-2 text-[10px] font-semibold text-muted transition hover:border-line-strong hover:text-ink">
+                +{session.items.length - 5} more <ArrowRight className="size-3" />
+              </button>
+            </DialogTrigger>
+            <DialogContent className="max-w-2xl">
+              <DialogHeader>
+                <DialogTitle className="capitalize">{agent} session context</DialogTitle>
+                <DialogDescription>All {session.items.length} context items delivered to this Session, including content, source, and delivery time.</DialogDescription>
+              </DialogHeader>
+              <div className="max-h-[65vh] space-y-2 overflow-y-auto pr-1">
+                {session.items.map((item) => <SessionContextItem key={item.key} item={item} />)}
               </div>
-              {item.preview && <p className="mt-1 line-clamp-2 whitespace-pre-line text-[9px] leading-4 text-muted">{item.preview}</p>}
-              <p className="mt-1.5 truncate text-[9px] text-dim" title={item.source ?? undefined}>From {item.source || "project memory"}</p>
-            </div>
-          )
-        })}
-        {session.items.length > 5 && <p className="text-center text-[9px] text-dim">+{session.items.length - 5} more</p>}
+            </DialogContent>
+          </Dialog>
+        )}
         {!session.items.length && <p className="text-[10px] text-muted">No context delivered yet.</p>}
       </div>
     </details>
