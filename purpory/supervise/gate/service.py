@@ -66,12 +66,14 @@ class GatewayService:
         graph_project: str | None = None,
         graph_projects: Sequence[str] = (),
         resource_node_ids: Sequence[str] = (),
+        selected_views: Sequence[dict[str, Any]] = (),
     ) -> None:
         self.repository = repository
         self.root = Path(root).expanduser().resolve()
         self.graph_project = graph_project
         self.graph_projects = tuple(graph_projects)
         self.resource_node_ids = tuple(resource_node_ids)
+        self.selected_views = tuple(selected_views)
         self.provider = provider
 
     def prepare(
@@ -92,8 +94,11 @@ class GatewayService:
             graph_projects=self.graph_projects,
             project=project,
             resource_node_ids=self.resource_node_ids,
+            selected_views=self.selected_views,
         )
-        previous = self.repository.session_topic_keys(session_id)[:1_000]
+        previous = self.repository.session_topic_keys(
+            session_id, project=project
+        )[:1_000]
         catalog = provisioner.catalog(session_id=session_id)
         namespaces = [str(item["name"]) for item in catalog["topicNamespaces"]][:MAX_NAMESPACES]
         request = GateRequest.create(
@@ -156,7 +161,9 @@ class GatewayService:
             if search_result["candidates"]:
                 delivery_candidates = list(search_result["candidates"])
                 seen_ids = {item["nodeId"] for item in delivery_candidates}
-                previously_delivered_ids = self.repository.session_delivered_node_ids(session_id)
+                previously_delivered_ids = self.repository.session_delivered_node_ids(
+                    session_id, project=project
+                )
                 graph_candidates = [
                     (
                         node,

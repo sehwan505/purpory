@@ -63,7 +63,12 @@ def _request_json(
         if len(raw) > MAX_HTTP_RESPONSE_BYTES:
             raise RuntimeError("Ollama response exceeded the size limit")
         if response.status >= 400:
-            raise RuntimeError(f"Ollama returned HTTP {response.status}")
+            try:
+                error = json.loads(raw or b"{}").get("error")
+            except (AttributeError, json.JSONDecodeError):
+                error = None
+            detail = f": {error}" if isinstance(error, str) and error.strip() else ""
+            raise RuntimeError(f"Ollama returned HTTP {response.status}{detail}")
         value = json.loads(raw or b"{}")
         if not isinstance(value, dict):
             raise RuntimeError("Ollama returned a non-object response")
@@ -173,6 +178,8 @@ class GateModelManager:
         selected = model_id.strip()
         if not selected or len(selected) > 255 or any(character.isspace() for character in selected):
             raise ValueError("model must be one valid model name")
+        if _find_model(_models(timeout_seconds=2.0), selected) is None:
+            raise RuntimeError(f"model is not installed: {selected}")
         if role == "gate":
             os.environ["PURPORY_GATE_MODEL"] = selected
         elif role == "reconcile":

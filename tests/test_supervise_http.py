@@ -123,6 +123,35 @@ def test_model_status_api_reports_managed_runtime_state(
     assert body["providerSource"] == "none"
 
 
+def test_model_install_api_uses_existing_model_manager(
+    context_server: ContextHTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        context_server.service,
+        "install_model",
+        lambda model: {"action": "installed", "model": model, "installed": True},
+    )
+
+    status, body = _request(
+        context_server,
+        "POST",
+        "/api/model/install",
+        body=json.dumps({"model": "qwen3.5:0.8b"}),
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Token": "write-secret",
+        },
+    )
+
+    assert status == 200
+    assert body == {
+        "action": "installed",
+        "model": "qwen3.5:0.8b",
+        "installed": True,
+    }
+
+
 def test_graph_api_imports_snapshot_and_bounds_response(
     context_server: ContextHTTPServer,
     tmp_path: Path,

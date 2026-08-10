@@ -82,27 +82,17 @@ class ContextService:
                     provider="git",
                     external_identity=str(discovered["externalIdentity"]),
                 )
-                namespace_id = (
-                    str(resource["namespaceId"])
-                    if resource is not None
-                    else self._default_project_id
-                )
-                if resource is None:
-                    identity = str(discovered["externalIdentity"])
-                    self.repository.ensure_project_namespace(
-                        namespace_id,
-                        name=identity[-120:],
+                if resource is not None:
+                    self.repository.attach_resource(
+                        str(resource["namespaceId"]),
+                        provider="git",
+                        resource_kind=str(discovered["resourceKind"]),
+                        external_identity=str(discovered["externalIdentity"]),
+                        label=str(discovered["resourceLabel"]),
+                        properties=discovered["resourceProperties"],
+                        views=[discovered["view"]],
                     )
-                self.repository.attach_resource(
-                    namespace_id,
-                    provider="git",
-                    resource_kind=str(discovered["resourceKind"]),
-                    external_identity=str(discovered["externalIdentity"]),
-                    label=str(discovered["resourceLabel"]),
-                    properties=discovered["resourceProperties"],
-                    views=[discovered["view"]],
-                )
-                binding = self.repository.resolve_resource_view(directory)
+                    binding = self.repository.resolve_resource_view(directory)
         selected_project = (
             project.strip() if project and project.strip() else self._explicit_project_id
         )
@@ -229,6 +219,11 @@ class ContextService:
             graph_projects=selection["graphProjects"],
             project=str(selection["project"]),
             resource_node_ids=selection["resourceNodeIds"],
+            selected_views=[
+                view
+                for resource in selection["resources"]
+                if isinstance((view := resource.get("selectedView")), dict)
+            ],
             stale_after_days=self.stale_after_days,
         )
 
@@ -259,6 +254,7 @@ class ContextService:
             label=str(discovered["resourceLabel"]),
             properties=discovered["resourceProperties"],
             views=discovered["views"],
+            home_view_locator=discovered.get("primaryViewLocator"),
             alias=alias,
         )
 
@@ -628,6 +624,11 @@ class ContextService:
             graph_project=graph_project,
             graph_projects=selection["graphProjects"],
             resource_node_ids=selection["resourceNodeIds"],
+            selected_views=[
+                view
+                for resource in selection["resources"]
+                if isinstance((view := resource.get("selectedView")), dict)
+            ],
             provider=provider,
         )
         return gateway.prepare(
@@ -653,6 +654,12 @@ class ContextService:
             if isinstance(self.gate_provider, QwenGateProvider):
                 self.gate_provider.model = model
         return self.model_status()
+
+    def install_model(self, model: str) -> dict[str, Any]:
+        from purpory.supervise.gate.runtime import GateModelManager
+
+        result = GateModelManager().install(model_id=model)
+        return {**self.model_status(), "action": result["action"]}
 
     def model_status(self) -> dict[str, Any]:
         from purpory.supervise.gate.provider import UnavailableGateProvider

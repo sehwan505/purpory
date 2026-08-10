@@ -194,5 +194,6 @@ def discover_git_resource(path: str | Path) -> dict[str, Any]:
     views.sort(key=lambda item: str(item["locator"]))
     return {
         **{key: value for key, value in primary.items() if key != "view"},
+        "primaryViewLocator": str(primary_path),
         "views": views,
     }

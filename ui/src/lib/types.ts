@@ -95,8 +95,17 @@ export type Session = {
   id: string
   project: string | null
   context?: {
+    projectId?: string
     graphProject?: string
     graphProjects?: string[]
+    activeViewId?: string | null
+    selectedViews?: Array<{
+      id?: string
+      locator?: string
+      revision?: string | null
+      stateHash?: string | null
+      role?: "home" | "shared"
+    }>
     resource?: {
       resourceId?: string
       resourceLabel?: string
@@ -144,6 +153,7 @@ export type ResourceView = {
   locator: string
   revision: string | null
   stateHash: string | null
+  role?: "home" | "shared"
   properties: Record<string, unknown> & {
     branch?: string | null
     dirty?: boolean

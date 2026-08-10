@@ -8,7 +8,7 @@ import pytest
 
 from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
 from purpory.ollama import ollama_urls
-from purpory.supervise.gate.runtime import GateModelManager
+from purpory.supervise.gate.runtime import GateModelManager, _request_json
 from purpory.supervise.model_cli import dispatch_model
 
 
@@ -16,7 +16,7 @@ def test_status_reads_gate_model_from_ollama_inventory(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         "purpory.supervise.gate.runtime._models",
         lambda timeout_seconds=0.25: [
-            {"name": "qwen3.6:1.5b", "digest": "sha256:gate"},
+            {"name": "qwen3.5:0.8b", "digest": "sha256:gate"},
             {"name": "qwen3-embedding:0.6b", "digest": "sha256:embedding"},
         ],
     )
@@ -51,22 +51,60 @@ def test_install_pulls_only_when_missing_or_forced(monkeypatch: pytest.MonkeyPat
     assert manager.install()["action"] == "kept"
     assert manager.install(force=True)["action"] == "installed"
     assert requests == [
-        {"method": "POST", "path": "/api/pull", "body": {"model": "qwen3.6:1.5b", "stream": False}},
-        {"method": "POST", "path": "/api/pull", "body": {"model": "qwen3.6:1.5b", "stream": False}},
+        {"method": "POST", "path": "/api/pull", "body": {"model": "qwen3.5:0.8b", "stream": False}},
+        {"method": "POST", "path": "/api/pull", "body": {"model": "qwen3.5:0.8b", "stream": False}},
     ]
+
+
+def test_ollama_error_includes_response_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        status = 500
+
+        @staticmethod
+        def read(_limit: int) -> bytes:
+            return b'{"error":"pull model manifest: file does not exist"}'
+
+    class Connection:
+        def request(self, *_args, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def getresponse() -> Response:
+            return Response()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "purpory.supervise.gate.runtime.HTTPConnection",
+        lambda *_args, **_kwargs: Connection(),
+    )
+
+    with pytest.raises(RuntimeError, match="pull model manifest: file does not exist"):
+        _request_json("POST", "/api/pull", body={"model": "missing"}, timeout_seconds=1)
+
+
+def test_model_selection_requires_an_installed_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "purpory.supervise.gate.runtime._models",
+        lambda timeout_seconds=0.25: [],
+    )
+
+    with pytest.raises(RuntimeError, match="model is not installed: missing"):
+        GateModelManager().select_model("missing")
 
 
 def test_provider_reuses_ollama_endpoint_and_digest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "purpory.supervise.gate.runtime._models",
-        lambda timeout_seconds=0.25: [{"name": "qwen3.6:1.5b", "digest": "sha256:gate"}],
+        lambda timeout_seconds=0.25: [{"name": "qwen3.5:0.8b", "digest": "sha256:gate"}],
     )
 
     provider = GateModelManager().provider()
 
     assert provider is not None
     assert provider.endpoint == "http://localhost:11434/v1/chat/completions"
-    assert provider.model == "qwen3.6:1.5b"
+    assert provider.model == "qwen3.5:0.8b"
     assert provider.model_revision == "sha256:gate"
     assert provider.tokenizer_path is None
 
@@ -120,7 +158,7 @@ def test_model_cli_installs_gate_and_embedding_roles(
     dispatch_model(["install", "--json"])
 
     result = json.loads(capsys.readouterr().out)
-    assert installed == ["qwen3.6:1.5b", "qwen3.6:7b", "qwen3-embedding:0.6b"]
+    assert installed == ["qwen3.5:0.8b", "qwen3.5:4b", "qwen3-embedding:0.6b"]
     assert result["action"] == "installed"
 
 
@@ -137,7 +175,7 @@ class _SkipProvider:
                     "clarification": None,
                 }
             ),
-            model_id="qwen3.6:1.5b",
+            model_id="qwen3.5:0.8b",
             model_revision="test",
             latency_ms=3,
         )
@@ -162,5 +200,5 @@ def test_prepare_auto_discovers_managed_provider(
     main()
 
     result = json.loads(capsys.readouterr().out)
-    assert result["model"]["id"] == "qwen3.6:1.5b"
+    assert result["model"]["id"] == "qwen3.5:0.8b"
     assert result["fallback"] is None

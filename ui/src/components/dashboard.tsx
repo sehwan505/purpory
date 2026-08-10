@@ -58,6 +58,7 @@ import {
   getRecall,
   getRequests,
   getView,
+  installModel,
   prepareContext,
   resolveRequest,
   resolveNeedsReview,
@@ -84,15 +85,7 @@ import type {
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-type Page =
-  | "overview"
-  | "projects"
-  | "delivery"
-  | "context"
-  | "memory"
-  | "sessions"
-  | "requests"
-  | "graph"
+type Page = "overview" | "workspace" | "delivery" | "context" | "memory" | "requests" | "graph"
 
 const pageMeta: Record<Page, { eyebrow: string; title: string; description: string }> = {
   overview: {
@@ -100,40 +93,35 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
     title: "Overview",
     description: "The context plane at a glance—what exists, what moved, and what still needs you.",
   },
-  projects: {
+  workspace: {
     eyebrow: "Work context",
-    title: "Projects",
-    description: "Group intent, knowledge, and resources under a durable work context.",
+    title: "Workspace",
+    description: "Monitor the live path from Project through Repository and View to every agent Session.",
   },
   delivery: {
     eyebrow: "Routing intelligence",
     title: "Delivery",
-    description: "Inspect every context decision, its input, rationale, and final delivery.",
+    description: "Inspect context decisions and manage the local model used to prepare them.",
   },
   context: {
     eyebrow: "Durable memory",
     title: "Context library",
-    description: "Human intent and live references stored at stable logical addresses.",
+    description: "Manage durable intent, knowledge, and references at stable logical addresses.",
   },
   memory: {
     eyebrow: "Memory governance",
     title: "Memory review",
     description: "Approve global writes, resolve evidence conflicts, and audit project memory changes.",
   },
-  sessions: {
-    eyebrow: "Exact provenance",
-    title: "Sessions",
-    description: "A content-addressed record of the context delivered to every agent.",
-  },
   requests: {
     eyebrow: "Human attention",
     title: "Context gaps",
-    description: "Questions that need a durable answer before an agent can move with confidence.",
+    description: "Resolve questions that need durable answers before an agent can move confidently.",
   },
   graph: {
     eyebrow: "Structural intelligence",
     title: "Material graph",
-    description: "Explore structural relationships across code, documents, and other project material.",
+    description: "Explore structural relationships across code, documents, and project material.",
   },
 }
 
@@ -166,6 +154,7 @@ const emptyModelStatus: ModelStatus = {
 }
 
 const graphPalette = ["#3973a5", "#7559a2", "#287b72", "#97651b", "#5f7358"]
+const SESSION_HISTORY_AFTER_SECONDS = 24 * 60 * 60
 
 function relativeTime(timestamp: number) {
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - timestamp))
@@ -173,6 +162,10 @@ function relativeTime(timestamp: number) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
   return `${Math.floor(seconds / 86400)}d ago`
+}
+
+function sessionLastActivity(session: Session) {
+  return Math.max(...session.items.map((item) => item.deliveredAt), 0)
 }
 
 function shortSession(id: string) {
@@ -185,10 +178,26 @@ function readableContextKey(key: string) {
 }
 
 function contextKind(item: Session["items"][number]) {
-  if (item.namespace === "code") return { label: "Material", variant: "blue" as const }
-  if (item.kind === "decision") return { label: "Intent", variant: "violet" as const }
-  if (item.kind === "doc-ref" || item.kind === "code-area") return { label: "Reference", variant: "teal" as const }
+  if (item.namespace === "code" || item.key.startsWith("material.")) return { label: "Material", variant: "blue" as const }
+  if (item.kind === "decision" || item.key.startsWith("intent.")) return { label: "Intent", variant: "violet" as const }
+  if (item.kind === "doc-ref" || item.kind === "code-area" || item.key.startsWith("reference.")) return { label: "Reference", variant: "teal" as const }
   return { label: "Knowledge", variant: "default" as const }
+}
+
+function SessionContextItem({ item, compact = false }: { item: Session["items"][number]; compact?: boolean }) {
+  const label = item.label && item.label !== item.key ? item.label : readableContextKey(item.key)
+  const kind = contextKind(item)
+  return (
+    <div className="rounded-[9px] border border-line bg-canvas/60 p-2.5">
+      <div className="flex items-start gap-2">
+        <Badge variant={kind.variant}>{kind.label}</Badge>
+        <p className="min-w-0 flex-1 text-[10px] font-semibold text-ink">{label}</p>
+        <span className="shrink-0 text-[9px] text-dim">{relativeTime(item.deliveredAt)}</span>
+      </div>
+      {item.preview && <p className={cn("mt-1 whitespace-pre-line text-[9px] leading-4 text-muted", compact && "line-clamp-2")}>{item.preview}</p>}
+      <p className="mt-1.5 truncate text-[9px] text-dim" title={item.source ?? undefined}>From {item.source || "project memory"}</p>
+    </div>
+  )
 }
 
 function actionVariant(action: ContextAction) {
@@ -561,129 +570,54 @@ function CreateTopicDialog({ onCreated }: { onCreated: () => Promise<void> }) {
   )
 }
 
-function SessionList({ sessions }: { sessions: Session[] }) {
+function SessionNode({ session }: { session: Session }) {
+  const latest = sessionLastActivity(session) || null
+  const live = latest !== null && Date.now() / 1000 - latest < 300
+  const agent = session.id.split(":", 1)[0]
+  const kinds = [...new Map(session.items.map((item) => {
+    const kind = contextKind(item)
+    return [kind.label, kind]
+  })).values()]
   return (
-    <Card>
-      <CardHeader>
-        <div>
-          <CardTitle>Session context map</CardTitle>
-          <CardDescription>Which repository view each agent saw and the human-readable context it carried away.</CardDescription>
+    <details className="group overflow-hidden rounded-[12px] border border-accent-violet/20 bg-accent-violet-soft/45">
+      <summary className="cursor-pointer list-none p-3 [&::-webkit-details-marker]:hidden">
+        <div className="flex items-center gap-3">
+          <span className={cn("size-2 rounded-full", live ? "bg-positive shadow-[0_0_8px_rgba(127,200,155,.55)]" : "bg-dim")} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-xs font-semibold capitalize text-ink">{agent}</p>
+            <p className="mt-1 truncate font-mono text-[9px] text-dim">{shortSession(session.id)}</p>
+          </div>
+          <Badge variant={live ? "success" : "neutral"}>{live ? "Live" : latest ? relativeTime(latest) : "Idle"}</Badge>
+          <ChevronRight className="size-3.5 text-dim transition-transform group-open:rotate-90" />
         </div>
-        <Badge variant="success"><CircleDot className="mr-1 size-2.5" /> Provenance</Badge>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-3">
-          {sessions.map((session, index) => {
-            const latest = session.items.length
-              ? Math.max(...session.items.map((item) => item.deliveredAt))
-              : null
-            const resource = session.context?.resource
-            const branch = typeof resource?.properties?.branch === "string"
-              ? resource.properties.branch
-              : null
-            const agent = session.id.split(":", 1)[0]
-            return (
-              <details key={session.id} open={index === 0} className="group overflow-hidden rounded-[16px] border border-line bg-panel-raised/45">
-                <summary className="cursor-pointer list-none px-5 py-4 [&::-webkit-details-marker]:hidden">
-                  <div className="flex items-start justify-between gap-5">
-                    <div className="flex min-w-0 items-start gap-3.5">
-                      <div className="grid size-10 shrink-0 place-items-center rounded-[12px] border border-accent-blue/20 bg-accent-blue-soft text-accent-blue">
-                        <GitFork className="size-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="truncate text-sm font-semibold text-ink">
-                            {resource?.resourceLabel ?? "Legacy session"}
-                          </p>
-                          {branch && <Badge variant="blue">{branch}</Badge>}
-                          {resource?.properties?.dirty === true && <Badge variant="warning">Dirty</Badge>}
-                        </div>
-                        <p className="mt-1 truncate font-mono text-[10px] text-dim">
-                          {resource?.externalIdentity ?? session.project ?? "Repository view was not recorded"}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-3 text-right">
-                      <div>
-                        <p className="mono-number text-lg font-semibold text-ink">{session.items.length}</p>
-                        <p className="text-[10px] text-dim">context items</p>
-                      </div>
-                      <ChevronRight className="size-4 text-dim transition-transform group-open:rotate-90" />
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid items-center gap-2 sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
-                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                      <span className="fine-label block">Repository view</span>
-                      <span className="mt-1 block truncate text-xs font-medium text-ink">{branch ?? resource?.resourceLabel ?? "Unknown"}</span>
-                    </div>
-                    <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
-                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                      <span className="fine-label block">Agent session</span>
-                      <span className="mt-1 block truncate text-xs font-medium capitalize text-ink">{agent} · {shortSession(session.id)}</span>
-                    </div>
-                    <ArrowRight className="mx-auto hidden size-3.5 text-line-strong sm:block" />
-                    <div className="rounded-[10px] border border-line bg-panel px-3 py-2.5">
-                      <span className="fine-label block">Last delivery</span>
-                      <span className="mt-1 block text-xs font-medium text-ink">{latest ? relativeTime(latest) : "No deliveries"}</span>
-                    </div>
-                  </div>
-                </summary>
-
-                <div className="border-t border-line bg-panel px-5 py-5">
-                  {resource?.locator && (
-                    <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-[10px] bg-canvas/70 px-3 py-2 font-mono text-[10px] text-muted">
-                      <span className="truncate">{resource.locator}</span>
-                      {resource.revision && <span className="text-dim">commit {resource.revision.slice(0, 10)}</span>}
-                    </div>
-                  )}
-                  <div className="grid gap-2.5 xl:grid-cols-2">
-                    {session.items.map((item) => {
-                      const kind = contextKind(item)
-                      const label = item.label && item.label !== item.key
-                        ? item.label
-                        : readableContextKey(item.key)
-                      return (
-                        <article key={item.key} className="rounded-[12px] border border-line bg-canvas/45 p-4">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <Badge variant={kind.variant}>{kind.label}</Badge>
-                                <time className="text-[10px] text-dim">{relativeTime(item.deliveredAt)}</time>
-                              </div>
-                              <h4 className="mt-2.5 line-clamp-2 text-sm font-semibold leading-5 text-ink">{label}</h4>
-                            </div>
-                            <span title={item.valueHash} className="shrink-0 font-mono text-[9px] text-dim">
-                              {item.valueHash.slice(0, 8)}
-                            </span>
-                          </div>
-                          {item.preview && (
-                            <p className="mt-2.5 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-muted">
-                              {item.preview}
-                            </p>
-                          )}
-                          <div className="mt-3 flex items-center justify-between gap-3 border-t border-line/70 pt-2.5">
-                            <span className="truncate font-mono text-[9px] text-dim">{item.source ?? item.key}</span>
-                            <span className="shrink-0 text-[9px] text-dim">exact delivery</span>
-                          </div>
-                        </article>
-                      )
-                    })}
-                  </div>
-                </div>
-              </details>
-            )
-          })}
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {kinds.map((kind) => <Badge key={kind.label} variant={kind.variant}>{kind.label}</Badge>)}
+          <span className="text-[10px] text-muted">{session.items.length} delivered</span>
         </div>
-        {!sessions.length && (
-          <EmptyState
-            icon={<Users />}
-            title="No agent sessions yet"
-            detail="Sessions appear after Purpory prepares context for an agent."
-          />
+      </summary>
+      <div className="space-y-2 border-t border-accent-violet/15 bg-panel/75 p-3">
+        {session.items.slice(0, 5).map((item) => <SessionContextItem key={item.key} item={item} compact />)}
+        {session.items.length > 5 && (
+          <Dialog>
+            <DialogTrigger asChild>
+              <button type="button" className="flex w-full items-center justify-center gap-1.5 rounded-[8px] border border-line bg-canvas/45 px-3 py-2 text-[10px] font-semibold text-muted transition hover:border-line-strong hover:text-ink">
+                +{session.items.length - 5} more <ArrowRight className="size-3" />
+              </button>
+            </DialogTrigger>
+            <DialogContent className="max-w-2xl">
+              <DialogHeader>
+                <DialogTitle className="capitalize">{agent} session context</DialogTitle>
+                <DialogDescription>All {session.items.length} context items delivered to this Session, including content, source, and delivery time.</DialogDescription>
+              </DialogHeader>
+              <div className="max-h-[65vh] space-y-2 overflow-y-auto pr-1">
+                {session.items.map((item) => <SessionContextItem key={item.key} item={item} />)}
+              </div>
+            </DialogContent>
+          </Dialog>
         )}
-      </CardContent>
-    </Card>
+        {!session.items.length && <p className="text-[10px] text-muted">No context delivered yet.</p>}
+      </div>
+    </details>
   )
 }
 
@@ -868,30 +802,50 @@ function PreparationPanel({
   }
 
   const [switchingModel, setSwitchingModel] = useState(false)
-  const currentModel = modelStatus.providerModel ?? modelStatus.model ?? "qwen3.6:1.5b"
+  const [installingModel, setInstallingModel] = useState(false)
+  const [modelError, setModelError] = useState("")
+  const activeModel = modelStatus.model ?? modelStatus.providerModel ?? "qwen3.5:0.8b"
+  const [selectedModel, setSelectedModel] = useState(activeModel)
+  useEffect(() => setSelectedModel(activeModel), [activeModel])
   const modelOptions = useMemo(() => {
     const installed = modelStatus.installedModels ?? []
     const presets = modelStatus.availablePresets ?? [
-      "qwen3.6:1.5b",
-      "qwen3.6:3b",
-      "qwen3.6:7b",
-      "qwen3.6-coder:3b",
-      "qwen3.6-coder:7b",
       "qwen3.5:0.8b",
+      "qwen3.5:2b",
+      "qwen3.5:4b",
+      "qwen3.5:9b",
     ]
     return Array.from(new Set([...installed, ...presets]))
   }, [modelStatus.installedModels, modelStatus.availablePresets])
 
   async function handleModelChange(selected: string) {
-    if (!selected || selected === currentModel) return
+    if (!selected) return
+    setSelectedModel(selected)
+    setModelError("")
+    if (!modelStatus.installedModels?.includes(selected) || selected === activeModel) return
     setSwitchingModel(true)
     try {
       await selectModel({ model: selected, role: "gate" })
       await onRefresh()
     } catch (caught) {
-      console.error("Failed to select model:", caught)
+      setSelectedModel(activeModel)
+      setModelError(caught instanceof Error ? caught.message : "Could not select the model")
     } finally {
       setSwitchingModel(false)
+    }
+  }
+
+  async function handleModelInstall() {
+    setInstallingModel(true)
+    setModelError("")
+    try {
+      await installModel({ model: selectedModel })
+      await selectModel({ model: selectedModel, role: "gate" })
+      await onRefresh()
+    } catch (caught) {
+      setModelError(caught instanceof Error ? caught.message : "Could not install the model")
+    } finally {
+      setInstallingModel(false)
     }
   }
 
@@ -934,7 +888,7 @@ function PreparationPanel({
                 </Badge>
               </div>
               <p className="mt-1.5 font-mono text-[10px] text-dim">
-                {currentModel}
+                {activeModel}
                 {modelStatus.revision ? ` @ ${modelStatus.revision.slice(0, 12)}` : ""}
               </p>
             </div>
@@ -946,7 +900,7 @@ function PreparationPanel({
               </label>
               <select
                 id="model-select"
-                value={currentModel}
+                value={selectedModel}
                 onChange={(e) => void handleModelChange(e.target.value)}
                 disabled={switchingModel}
                 className="h-8 rounded-lg border border-line bg-panel-raised px-2.5 py-1 font-mono text-xs text-ink shadow-sm transition hover:border-signal/50 focus:border-signal focus:outline-none focus:ring-1 focus:ring-signal disabled:opacity-50"
@@ -958,7 +912,18 @@ function PreparationPanel({
                 ))}
               </select>
               {switchingModel && <RefreshCw className="size-3.5 animate-spin text-signal" />}
+              {!modelStatus.installedModels?.includes(selectedModel) && (
+                <Button
+                  size="sm"
+                  onClick={() => void handleModelInstall()}
+                  disabled={installingModel || !modelStatus.running}
+                >
+                  {installingModel ? <RefreshCw className="animate-spin" /> : null}
+                  Install
+                </Button>
+              )}
             </div>
+            {modelError && <p className="text-[11px] text-red-700">{modelError}</p>}
             <div className="border-l-2 border-line pl-4 sm:border-l-0 sm:pl-0 sm:text-right">
               <p className="text-[11px] text-muted">Provider · {modelStatus.providerSource}</p>
               <p className="mt-0.5 max-w-md truncate font-mono text-[10px] text-dim">
@@ -1681,31 +1646,38 @@ function GitResourceForm({
   )
 }
 
-function ProjectPanel({
+function WorkspaceMonitor({
   projects,
+  sessions,
   activeProject,
   activeView,
   onRefresh,
 }: {
   projects: ProjectNamespace[]
+  sessions: Session[]
   activeProject: string
   activeView: string
   onRefresh: () => Promise<void>
 }) {
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState("")
+  const project = projects.find((item) => item.id === selectedProjectId)
+    ?? projects.find((item) => item.id === activeProject)
+    ?? projects[0]
 
   async function create(event: FormEvent) {
     event.preventDefault()
     setPending(true)
     setError("")
     try {
-      await createProject({ name, description })
+      const created = await createProject({ name, description })
       setName("")
       setDescription("")
       await onRefresh()
+      setSelectedProjectId(created.id)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create project")
     } finally {
@@ -1713,146 +1685,240 @@ function ProjectPanel({
     }
   }
 
+  const projectSessions = project
+    ? sessions.filter((session) => session.project === project.id)
+    : []
+  const sessionHistoryCutoff = Date.now() / 1000 - SESSION_HISTORY_AFTER_SECONDS
+  const currentSessions = projectSessions.filter((session) => sessionLastActivity(session) >= sessionHistoryCutoff)
+  const historySessions = projectSessions.filter((session) => sessionLastActivity(session) < sessionHistoryCutoff)
+  const viewIds = new Set(project?.resources.flatMap((resource) => resource.views.map((view) => view.id)) ?? [])
+  const unmappedSessions = currentSessions.filter((session) => {
+    const viewId = session.context?.activeViewId ?? session.context?.resource?.viewId
+    return !viewId || !viewIds.has(viewId)
+  })
+  const viewCount = project?.resources.reduce((sum, resource) => sum + resource.views.length, 0) ?? 0
+  const dirtyViewCount = project?.resources.reduce(
+    (sum, resource) => sum + resource.views.filter((view) => view.properties.dirty === true).length,
+    0,
+  ) ?? 0
+  const missingViewCount = project?.resources.filter((resource) => !resource.views.length).length ?? 0
+  const attentionCount = dirtyViewCount + missingViewCount + unmappedSessions.length
+
   return (
-    <div className="space-y-5">
-      <Card>
+    <div className="grid items-start gap-5 lg:grid-cols-[15rem_minmax(0,1fr)]">
+      <Card className="lg:sticky lg:top-24">
         <CardHeader>
           <div>
-            <CardTitle>Create a project context</CardTitle>
-            <CardDescription>
-              A project is a durable namespace for intent and knowledge. Resources provide the changing
-              material an agent works with.
-            </CardDescription>
+            <CardTitle>Projects</CardTitle>
+            <CardDescription>Select the context to monitor.</CardDescription>
           </div>
-          <FolderKanban className="size-5 text-signal" />
+          <Badge variant="neutral">{projects.length}</Badge>
         </CardHeader>
-        <CardContent>
-          <form onSubmit={create} className="grid gap-3 lg:grid-cols-[18rem_minmax(0,1fr)_auto]">
-            <Input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Project name"
-              aria-label="Project name"
-              required
-            />
-            <Input
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder="What work belongs in this context?"
-              aria-label="Project description"
-            />
-            <Button type="submit" disabled={pending || !name.trim()}>
-              {pending ? <RefreshCw className="animate-spin" /> : <Plus />}
-              Create project
-            </Button>
-          </form>
-          {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+        <CardContent className="space-y-2">
+          {projects.map((item) => {
+            const itemSessions = sessions.filter((session) => session.project === item.id)
+            const itemHistoryCount = itemSessions.filter((session) => sessionLastActivity(session) < sessionHistoryCutoff).length
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSelectedProjectId(item.id)}
+                className={cn(
+                  "w-full rounded-[11px] border px-3 py-3 text-left transition",
+                  item.id === project?.id
+                    ? "border-signal/35 bg-signal-soft"
+                    : "border-line bg-canvas/45 hover:border-line-strong",
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={cn("size-2 rounded-full", item.id === activeProject ? "bg-positive" : "bg-dim")} />
+                  <span className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{item.name}</span>
+                  <ChevronRight className="size-3.5 text-dim" />
+                </div>
+                <p className="mt-2 text-[9px] text-muted">{item.resources.length} repos · {itemSessions.length - itemHistoryCount} current · {itemHistoryCount} history</p>
+              </button>
+            )
+          })}
+
+          <details open={!projects.length} className="group/create border-t border-line pt-3">
+            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-[9px] px-2 py-2 text-[11px] font-semibold text-signal hover:bg-signal-soft [&::-webkit-details-marker]:hidden">
+              <Plus className="size-3.5" /> New project
+            </summary>
+            <form onSubmit={create} className="mt-2 space-y-2">
+              <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Project name" required />
+              <Textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What belongs here?" className="min-h-20" />
+              <Button type="submit" size="sm" className="w-full" disabled={pending || !name.trim()}>
+                {pending ? <RefreshCw className="animate-spin" /> : <Plus />} Create
+              </Button>
+              {error && <p className="text-[10px] text-red-700">{error}</p>}
+            </form>
+          </details>
         </CardContent>
       </Card>
 
-      {projects.map((project) => {
-        const resourceCount = project.resources.length
-        const viewCount = project.resources.reduce((sum, resource) => sum + resource.views.length, 0)
-        return (
-          <Card key={project.id} className={cn(project.id === activeProject && "border-signal/35")}>
-            <CardHeader>
-              <div className="min-w-0">
+      {!project ? (
+        <Card><EmptyState icon={<FolderKanban />} title="No projects yet" detail="Create a project to start monitoring its repository, View, and Session topology." /></Card>
+      ) : (
+        <div className="space-y-4">
+          <Card className={cn("relative", project.id === activeProject && "border-signal/35")}>
+            <CardHeader className="items-start gap-4 sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <CardTitle>{project.name}</CardTitle>
-                  {project.id === activeProject && <Badge variant="success">Active context</Badge>}
-                  <Badge variant="neutral">{resourceCount} resources</Badge>
-                  <Badge variant="neutral">{viewCount} views</Badge>
+                  <CardTitle className="text-xl">{project.name}</CardTitle>
+                  {project.id === activeProject && <Badge variant="success"><CircleDot className="mr-1 size-2.5" /> Active path</Badge>}
                 </div>
-                <CardDescription>
-                  {project.description || "No description yet."}
-                </CardDescription>
-                <p className="mt-2 truncate font-mono text-[10px] text-dim">{project.id}</p>
+                <CardDescription>{project.description || "No project description."}</CardDescription>
               </div>
-              <FolderKanban className="size-5 text-signal" />
+              <details className="group/add w-full sm:w-auto">
+                <summary className="flex h-9 cursor-pointer list-none items-center justify-center gap-2 rounded-[9px] bg-signal px-3 text-xs font-semibold text-white [&::-webkit-details-marker]:hidden">
+                  <Plus className="size-3.5" /> Add repository
+                </summary>
+                <div className="mt-3 sm:absolute sm:right-8 sm:z-10 sm:w-[min(48rem,calc(100vw-4rem))]">
+                  <Card><CardContent><GitResourceForm project={project} onRefresh={onRefresh} /></CardContent></Card>
+                </div>
+              </details>
             </CardHeader>
             <CardContent>
-              <div className="space-y-3">
-                {project.resources.map((resource) => (
-                  <article key={resource.id} className="surface-row rounded-[14px] p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <GitFork className="size-4 text-signal" />
-                          <span className="text-sm font-semibold text-ink">
-                            {resource.alias || resource.label}
-                          </span>
-                          <Badge variant="blue">{resource.provider}</Badge>
-                          <Badge variant="neutral">{resource.kind}</Badge>
-                        </div>
-                        <p className="mt-2 break-all font-mono text-[10px] text-dim">
-                          {resource.externalIdentity}
-                        </p>
-                      </div>
-                      <span className="text-[10px] text-dim">{relativeTime(resource.updatedAt)}</span>
-                    </div>
-                    <div className="mt-4 grid gap-2 xl:grid-cols-2">
-                      {resource.views.map((view) => {
-                        const branch =
-                          typeof view.properties.branch === "string"
-                            ? view.properties.branch
-                            : "detached"
-                        const dirty = view.properties.dirty === true
-                        return (
-                          <div
-                            key={view.id}
-                            className={cn(
-                              "rounded-[11px] border border-line bg-panel px-4 py-3",
-                              view.id === activeView && "border-signal/35 bg-signal-soft/40",
-                            )}
-                          >
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-mono text-[11px] font-semibold text-ink">
-                                {branch}
-                              </span>
-                              {dirty && <Badge variant="warning">Dirty</Badge>}
-                              {view.id === activeView && <Badge variant="success">Active view</Badge>}
-                              {view.revision && (
-                                <span className="font-mono text-[10px] text-dim">
-                                  {view.revision.slice(0, 10)}
-                                </span>
-                              )}
-                            </div>
-                            <p className="mt-2 break-all font-mono text-[10px] leading-5 text-muted">
-                              {view.locator}
-                            </p>
-                          </div>
-                        )
-                      })}
-                      {!resource.views.length && (
-                        <div className="rounded-[11px] border border-dashed border-line bg-panel px-4 py-3 text-[11px] leading-5 text-muted">
-                          Remote Resource registered. Attach a local checkout with the same origin URL when structural or file context is needed.
-                        </div>
-                      )}
-                    </div>
-                  </article>
-                ))}
-                {!project.resources.length && (
-                  <EmptyState
-                    icon={<GitFork />}
-                    title="No resources attached"
-                    detail="The project namespace already exists. Attach material only when it should inform this work context."
-                  />
-                )}
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-[10px] bg-accent-blue-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{project.resources.length}</p><p className="text-[9px] text-muted">Repositories</p></div>
+                <div className="rounded-[10px] bg-accent-teal-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{viewCount}</p><p className="text-[9px] text-muted">Views</p></div>
+                <div className="rounded-[10px] bg-accent-violet-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{currentSessions.length}</p><p className="text-[9px] text-muted">Current Sessions · {historySessions.length} history</p></div>
               </div>
-              <GitResourceForm project={project} onRefresh={onRefresh} />
             </CardContent>
           </Card>
-        )
-      })}
 
-      {!projects.length && (
-        <Card>
-          <EmptyState
-            icon={<FolderKanban />}
-            title="No project contexts"
-            detail="Create one to give intent, knowledge, and changing resources a shared boundary."
-          />
-        </Card>
+          <section className="grid gap-2 sm:grid-cols-3" aria-label="What to watch">
+            <div className="rounded-[12px] border border-signal/25 bg-signal-soft/55 p-3">
+              <div className="flex items-center gap-2 text-[10px] font-semibold text-signal"><CircleDot className="size-3.5" /> Active path</div>
+              <p className="mt-1.5 text-[10px] leading-4 text-muted">Follow green to see which Project and View are supplying context now.</p>
+            </div>
+            <div className={cn("rounded-[12px] border p-3", attentionCount ? "border-accent-amber/30 bg-accent-amber-soft/45" : "border-line bg-canvas/45")}>
+              <div className="flex items-center gap-2 text-[10px] font-semibold text-ink"><AlertCircle className={cn("size-3.5", attentionCount ? "text-accent-amber" : "text-dim")} /> Needs attention <Badge variant={attentionCount ? "warning" : "neutral"}>{attentionCount}</Badge></div>
+              <p className="mt-1.5 text-[10px] leading-4 text-muted">Dirty Views, repositories without a View, and unmapped Sessions.</p>
+            </div>
+            <div className="rounded-[12px] border border-accent-violet/20 bg-accent-violet-soft/40 p-3">
+              <div className="flex items-center gap-2 text-[10px] font-semibold text-accent-violet"><BrainCircuit className="size-3.5" /> Delivered data</div>
+              <p className="mt-1.5 text-[10px] leading-4 text-muted">Expand a Session to inspect its Intent, Knowledge, Reference, and Material.</p>
+            </div>
+          </section>
+
+          <Card>
+            <CardHeader>
+              <div>
+                <CardTitle>Current context topology</CardTitle>
+                <CardDescription>Sessions remain on their View for 24 hours after their last context delivery.</CardDescription>
+              </div>
+              <Badge variant="neutral"><Clock3 className="mr-1.5 size-3" /> 24h window</Badge>
+            </CardHeader>
+            <CardContent>
+              <div className="mb-5 grid items-center gap-3 xl:grid-cols-[14rem_minmax(0,1fr)]">
+                <div className="rounded-[13px] border border-signal/30 bg-signal-soft p-4">
+                  <div className="flex items-center gap-2"><FolderKanban className="size-4 text-signal" /><span className="text-[9px] font-semibold uppercase tracking-[0.16em] text-signal">Project</span></div>
+                  <p className="mt-2 truncate text-sm font-semibold text-ink">{project.name}</p>
+                  <p className="mt-1 text-[9px] text-muted">Context boundary · {project.resources.length} repositories</p>
+                </div>
+                <div className="flex items-center gap-3 text-[10px] text-muted">
+                  <span className="h-px min-w-8 flex-1 bg-signal/35" />
+                  <ArrowRight className="size-4 text-signal" />
+                  <span>{project.resources.length} configured repository paths</span>
+                </div>
+              </div>
+              <div className="mb-3 hidden grid-cols-[minmax(170px,.7fr)_28px_minmax(0,1.7fr)] px-6 text-[9px] font-semibold uppercase tracking-[0.16em] text-dim xl:grid">
+                <span>Repository</span><span /><div className="grid grid-cols-[minmax(190px,.8fr)_28px_minmax(220px,1fr)]"><span>Worktree View</span><span /><span>Agent Session</span></div>
+              </div>
+              <div className="relative ml-2 space-y-4 border-l border-signal/25 pl-6">
+                {project.resources.map((resource) => {
+                  const containsActiveView = resource.views.some((view) => view.id === activeView)
+                  const shared = projects.some((other) => other.id !== project.id && other.resources.some((item) => item.externalIdentity === resource.externalIdentity))
+                  return (
+                    <section key={resource.id} className="relative">
+                      <span className={cn("absolute -left-6 top-7 h-px w-6", containsActiveView ? "bg-signal" : "bg-line-strong")} />
+                      <div className="grid items-start gap-3 xl:grid-cols-[minmax(170px,.7fr)_28px_minmax(0,1.7fr)]">
+                        <div className={cn("rounded-[13px] border bg-accent-blue-soft/45 p-4", containsActiveView ? "border-signal/35" : "border-accent-blue/20")}>
+                          <div className="flex items-center gap-2"><GitFork className="size-4 text-accent-blue" /><p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{resource.alias || resource.label}</p></div>
+                          <div className="mt-2 flex flex-wrap gap-1.5"><Badge variant="blue">{resource.provider}</Badge>{shared && <Badge variant="violet">Shared</Badge>}</div>
+                          <p className="mt-3 break-all font-mono text-[9px] leading-4 text-dim">{resource.externalIdentity}</p>
+                          <div className="mt-3 flex items-center justify-between border-t border-accent-blue/15 pt-2 text-[9px] text-muted">
+                            <span>{resource.views.length} Views</span>
+                            <span>Updated {relativeTime(resource.updatedAt)}</span>
+                          </div>
+                        </div>
+                        <ArrowRight className={cn("mx-auto mt-7 hidden size-4 xl:block", containsActiveView ? "text-signal" : "text-line-strong")} />
+                        <div className="space-y-2">
+                          {resource.views.map((view) => {
+                            const branch = typeof view.properties.branch === "string" ? view.properties.branch : "detached"
+                            const viewSessions = currentSessions.filter((session) => session.context?.activeViewId === view.id || session.context?.resource?.viewId === view.id)
+                            return (
+                              <div key={view.id} className="grid items-start gap-2 xl:grid-cols-[minmax(190px,.8fr)_28px_minmax(220px,1fr)]">
+                                <div className={cn("rounded-[12px] border bg-accent-teal-soft/40 p-3", view.id === activeView ? "border-signal/40 shadow-[0_0_0_2px_rgba(69,105,61,.08)]" : "border-accent-teal/20")}>
+                                  <div className="flex items-center gap-2"><span className={cn("size-2 rounded-full", view.id === activeView ? "bg-positive" : "bg-accent-teal")} /><span className="min-w-0 flex-1 truncate font-mono text-[11px] font-semibold text-ink">{branch}</span>{view.id === activeView && <Badge variant="success">Active</Badge>}</div>
+                                  <div className="mt-2 flex flex-wrap gap-1.5">{view.properties.dirty === true && <Badge variant="warning">Dirty</Badge>}{view.role && <Badge variant="neutral">{view.role}</Badge>}</div>
+                                  <p className="mt-2 truncate font-mono text-[9px] text-dim" title={view.locator}>{view.locator}</p>
+                                  <div className="mt-2 flex items-center justify-between border-t border-accent-teal/15 pt-2 text-[9px] text-muted">
+                                    <span>{viewSessions.length} Sessions</span>
+                                    <span>{view.revision ? `rev ${view.revision.slice(0, 8)}` : `Seen ${relativeTime(view.observedAt)}`}</span>
+                                  </div>
+                                </div>
+                                <ArrowRight className={cn("mx-auto mt-6 hidden size-4 xl:block", viewSessions.length ? "text-accent-violet" : "text-line-strong")} />
+                                <div className="space-y-2">
+                                  {viewSessions.map((session) => <SessionNode key={session.id} session={session} />)}
+                                  {!viewSessions.length && <div className="rounded-[11px] border border-dashed border-line px-3 py-4 text-center text-[10px] text-muted">No current sessions on this View</div>}
+                                </div>
+                              </div>
+                            )
+                          })}
+                          {!resource.views.length && <div className="rounded-[12px] border border-dashed border-accent-teal/25 bg-accent-teal-soft/20 px-4 py-6 text-center text-[10px] text-muted">No local worktree Views discovered</div>}
+                        </div>
+                      </div>
+                    </section>
+                  )
+                })}
+                {!project.resources.length && <div className="rounded-[14px] border border-dashed border-line px-5 py-10 text-center text-xs text-muted">Add a repository to create the first monitored path.</div>}
+              </div>
+
+              {unmappedSessions.length > 0 && (
+                <section className="mt-5 rounded-[14px] border border-accent-amber/25 bg-accent-amber-soft/35 p-4">
+                  <div className="mb-3 flex items-center gap-2"><AlertCircle className="size-4 text-accent-amber" /><p className="text-xs font-semibold text-ink">Unmapped sessions</p><Badge variant="warning">{unmappedSessions.length}</Badge></div>
+                  <div className="grid gap-2 xl:grid-cols-2">{unmappedSessions.map((session) => <SessionNode key={session.id} session={session} />)}</div>
+                </section>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <details className="group/history">
+              <summary className="flex cursor-pointer list-none items-center gap-3 px-5 py-4 [&::-webkit-details-marker]:hidden">
+                <span className="grid size-9 place-items-center rounded-[10px] border border-line bg-black/[0.025]"><History className="size-4 text-muted" /></span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-ink">Session history</p>
+                  <p className="mt-1 text-[10px] text-muted">Sessions move here 24 hours after their last context delivery.</p>
+                </div>
+                <Badge variant="neutral">{historySessions.length}</Badge>
+                <ChevronRight className="size-4 text-dim transition-transform group-open/history:rotate-90" />
+              </summary>
+              <CardContent className="border-t border-line">
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {historySessions.map((session) => {
+                    const resource = session.context?.resource
+                    const branch = typeof resource?.properties?.branch === "string" ? resource.properties.branch : null
+                    return (
+                      <div key={`${session.project}:${session.id}`} className="rounded-[12px] border border-line bg-canvas/35 p-3">
+                        <div className="mb-2 flex min-w-0 items-center gap-2 text-[9px] text-muted">
+                          <GitFork className="size-3 shrink-0 text-accent-blue" />
+                          <span className="truncate">{resource?.resourceLabel || "Unmapped repository"}</span>
+                          <ArrowRight className="size-3 shrink-0 text-dim" />
+                          <span className="truncate font-mono">{branch || resource?.locator || "Unknown View"}</span>
+                        </div>
+                        <SessionNode session={session} />
+                      </div>
+                    )
+                  })}
+                </div>
+                {!historySessions.length && <p className="py-6 text-center text-[10px] text-muted">No sessions have aged into history yet.</p>}
+              </CardContent>
+            </details>
+          </Card>
+        </div>
       )}
     </div>
   )
@@ -1934,7 +2000,7 @@ export function Dashboard() {
 
   const navigation: Array<{ id: Page; label: string; icon: ReactNode; count?: number }> = [
     { id: "overview", label: "Overview", icon: <LayoutDashboard /> },
-    { id: "projects", label: "Projects", icon: <FolderKanban />, count: projects.length },
+    { id: "workspace", label: "Workspace", icon: <FolderKanban />, count: projects.length },
     { id: "delivery", label: "Delivery", icon: <Route />, count: contextDecisions.length },
     { id: "context", label: "Context", icon: <Database />, count: view.topics.length },
     {
@@ -1945,7 +2011,6 @@ export function Dashboard() {
         needsReviews.filter((item) => item.status === "open").length
         + globalMemoryRequests.filter((item) => item.status === "pending").length,
     },
-    { id: "sessions", label: "Sessions", icon: <Users />, count: view.sessions.length },
     {
       id: "requests",
       label: "Requests",
@@ -2107,20 +2172,18 @@ export function Dashboard() {
                     tone="teal"
                   />
                 </section>
-                <section className="grid items-start gap-5 xl:grid-cols-[1.2fr_.8fr]">
-                  <SessionList sessions={view.sessions.slice(0, 5)} />
-                  <div className="space-y-5">
-                    <RecallPanel recall={recall} />
-                    <RequestQueue requests={openRequests.slice(0, 3)} topics={view.topics} onRefresh={refresh} />
-                  </div>
+                <section className="grid items-start gap-5 xl:grid-cols-2">
+                  <RequestQueue requests={openRequests.slice(0, 3)} topics={view.topics} onRefresh={refresh} />
+                  <RecallPanel recall={recall} />
                 </section>
               </div>
             )}
-            {page === "projects" && (
-              <ProjectPanel
+            {page === "workspace" && (
+              <WorkspaceMonitor
                 projects={projects}
+                sessions={view.sessions}
                 activeProject={view.project}
-                activeView={view.graphProject}
+                activeView={view.resourceBinding?.viewId ?? ""}
                 onRefresh={refresh}
               />
             )}
@@ -2142,7 +2205,6 @@ export function Dashboard() {
                 onRefresh={refresh}
               />
             )}
-            {page === "sessions" && <SessionList sessions={view.sessions} />}
             {page === "requests" && (
               <RequestQueue requests={requests} topics={view.topics} onRefresh={refresh} />
             )}

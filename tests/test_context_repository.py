@@ -740,3 +740,100 @@ def test_delivery_history_is_append_only_in_context_events(tmp_path: Path) -> No
         "second",
     ]
     assert received == 1
+
+
+def test_delivery_history_is_isolated_by_project(tmp_path: Path) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    for project in ("product", "release"):
+        repository.set_topic(
+            "decision.scope",
+            value=f"{project} context",
+            kind="decision",
+            project=project,
+        )
+        topic = repository.get_topic("decision.scope", project=project)
+        repository.record_node_delivery(
+            "same-session",
+            topic["id"],
+            "memory:decision.scope",
+            topic["value"],
+            project=project,
+            session_context={"projectId": project},
+        )
+
+    sessions = repository.session_view(session_id="same-session")
+    assert {session["project"] for session in sessions} == {"product", "release"}
+    assert repository.session_topic_keys(
+        "same-session", project="product"
+    ) == ["memory:decision.scope"]
+
+
+def test_session_view_recovers_human_label_after_delivered_node_is_removed(
+    tmp_path: Path,
+) -> None:
+    repository = ContextGraphRepository(tmp_path / "context.db")
+    repository.set_topic("reference.dashboard", value="Dashboard", project="demo")
+    topic = repository.get_topic("reference.dashboard", project="demo")
+    assert topic is not None
+    repository.record_node_delivery(
+        "session",
+        topic["id"],
+        "material.49a62f2f278a85507109",
+        "## Session dashboard\n\nReadable context content.",
+        project="demo",
+    )
+    with repository.connect() as connection:
+        row = connection.execute(
+            "SELECT id, payload_json FROM context_events WHERE event_type = 'context.delivered'"
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        for field in ("label", "namespace", "kind", "origin", "source"):
+            payload.pop(field, None)
+        connection.execute(
+            "UPDATE context_events SET payload_json = ? WHERE id = ?",
+            (json.dumps(payload), row["id"]),
+        )
+        connection.execute("DELETE FROM context_nodes WHERE id = ?", (topic["id"],))
+        connection.commit()
+
+    item = repository.session_view(session_id="session")[0]["items"][0]
+    assert item["label"] == "Session dashboard"
+    assert item["preview"] == "## Session dashboard\n\nReadable context content."
+
+
+def test_v6_delivery_history_migrates_to_project_scope(tmp_path: Path) -> None:
+    database = tmp_path / "context.db"
+    repository = ContextGraphRepository(database)
+    repository.set_topic("decision.scope", value="Scoped")
+    with repository.connect() as connection:
+        connection.executescript(
+            """
+            DROP TABLE deliveries;
+            CREATE TABLE deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                project TEXT,
+                key TEXT NOT NULL,
+                value_hash TEXT NOT NULL,
+                delivered_at INTEGER NOT NULL,
+                UNIQUE(session_id, key)
+            );
+            INSERT INTO deliveries(session_id, project, key, value_hash, delivered_at)
+            VALUES ('session', NULL, 'decision.scope', 'old', 1);
+            """
+        )
+        connection.commit()
+
+    migrated = ContextGraphRepository(database)
+    migrated.record_delivery(
+        "session", "decision.scope", "product", project="product"
+    )
+    migrated.record_delivery(
+        "session", "decision.scope", "release", project="release"
+    )
+
+    assert {session["project"] for session in migrated.session_view()} == {
+        "",
+        "product",
+        "release",
+    }

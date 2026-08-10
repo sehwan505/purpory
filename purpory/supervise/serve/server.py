@@ -138,7 +138,7 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             self._handle_write(method, split.path, payload)
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             self._error(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
 
     def _authorized_read(self, query: str) -> bool:
@@ -481,6 +481,14 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
                 return
             result = service.select_model(model, role=role)
             self.server.events.publish("model", {"model": model, "role": role})
+            self._json(result)
+        elif method == "POST" and path == "/api/model/install":
+            model = str(payload.get("model", "")).strip()
+            if not model:
+                self._error(HTTPStatus.BAD_REQUEST, "model parameter is required")
+                return
+            result = service.install_model(model)
+            self.server.events.publish("model", {"model": model, "action": result["action"]})
             self._json(result)
         else:
             self._error(HTTPStatus.NOT_FOUND, "API endpoint not found")
