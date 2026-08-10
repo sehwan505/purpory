@@ -154,6 +154,7 @@ const emptyModelStatus: ModelStatus = {
 }
 
 const graphPalette = ["#3973a5", "#7559a2", "#287b72", "#97651b", "#5f7358"]
+const SESSION_HISTORY_AFTER_SECONDS = 24 * 60 * 60
 
 function relativeTime(timestamp: number) {
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - timestamp))
@@ -161,6 +162,10 @@ function relativeTime(timestamp: number) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
   return `${Math.floor(seconds / 86400)}d ago`
+}
+
+function sessionLastActivity(session: Session) {
+  return Math.max(...session.items.map((item) => item.deliveredAt), 0)
 }
 
 function shortSession(id: string) {
@@ -550,9 +555,7 @@ function CreateTopicDialog({ onCreated }: { onCreated: () => Promise<void> }) {
 }
 
 function SessionNode({ session }: { session: Session }) {
-  const latest = session.items.length
-    ? Math.max(...session.items.map((item) => item.deliveredAt))
-    : null
+  const latest = sessionLastActivity(session) || null
   const live = latest !== null && Date.now() / 1000 - latest < 300
   const agent = session.id.split(":", 1)[0]
   const kinds = [...new Map(session.items.map((item) => {
@@ -1666,8 +1669,11 @@ function WorkspaceMonitor({
   const projectSessions = project
     ? sessions.filter((session) => session.project === project.id)
     : []
+  const sessionHistoryCutoff = Date.now() / 1000 - SESSION_HISTORY_AFTER_SECONDS
+  const currentSessions = projectSessions.filter((session) => sessionLastActivity(session) >= sessionHistoryCutoff)
+  const historySessions = projectSessions.filter((session) => sessionLastActivity(session) < sessionHistoryCutoff)
   const viewIds = new Set(project?.resources.flatMap((resource) => resource.views.map((view) => view.id)) ?? [])
-  const unmappedSessions = projectSessions.filter((session) => {
+  const unmappedSessions = currentSessions.filter((session) => {
     const viewId = session.context?.activeViewId ?? session.context?.resource?.viewId
     return !viewId || !viewIds.has(viewId)
   })
@@ -1691,7 +1697,8 @@ function WorkspaceMonitor({
         </CardHeader>
         <CardContent className="space-y-2">
           {projects.map((item) => {
-            const itemSessions = sessions.filter((session) => session.project === item.id).length
+            const itemSessions = sessions.filter((session) => session.project === item.id)
+            const itemHistoryCount = itemSessions.filter((session) => sessionLastActivity(session) < sessionHistoryCutoff).length
             return (
               <button
                 key={item.id}
@@ -1709,7 +1716,7 @@ function WorkspaceMonitor({
                   <span className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{item.name}</span>
                   <ChevronRight className="size-3.5 text-dim" />
                 </div>
-                <p className="mt-2 text-[9px] text-muted">{item.resources.length} repos · {itemSessions} sessions</p>
+                <p className="mt-2 text-[9px] text-muted">{item.resources.length} repos · {itemSessions.length - itemHistoryCount} current · {itemHistoryCount} history</p>
               </button>
             )
           })}
@@ -1756,7 +1763,7 @@ function WorkspaceMonitor({
               <div className="grid grid-cols-3 gap-2 text-center">
                 <div className="rounded-[10px] bg-accent-blue-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{project.resources.length}</p><p className="text-[9px] text-muted">Repositories</p></div>
                 <div className="rounded-[10px] bg-accent-teal-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{viewCount}</p><p className="text-[9px] text-muted">Views</p></div>
-                <div className="rounded-[10px] bg-accent-violet-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{projectSessions.length}</p><p className="text-[9px] text-muted">Sessions</p></div>
+                <div className="rounded-[10px] bg-accent-violet-soft px-3 py-2"><p className="mono-number text-lg font-semibold text-ink">{currentSessions.length}</p><p className="text-[9px] text-muted">Current Sessions · {historySessions.length} history</p></div>
               </div>
             </CardContent>
           </Card>
@@ -1779,10 +1786,10 @@ function WorkspaceMonitor({
           <Card>
             <CardHeader>
               <div>
-                <CardTitle>Live context topology</CardTitle>
-                <CardDescription>Configured membership flows left to right; green marks the currently observed path.</CardDescription>
+                <CardTitle>Current context topology</CardTitle>
+                <CardDescription>Sessions remain on their View for 24 hours after their last context delivery.</CardDescription>
               </div>
-              <Badge variant="success"><span className="mr-1.5 inline-block size-1.5 rounded-full bg-positive" /> Live</Badge>
+              <Badge variant="neutral"><Clock3 className="mr-1.5 size-3" /> 24h window</Badge>
             </CardHeader>
             <CardContent>
               <div className="mb-5 grid items-center gap-3 xl:grid-cols-[14rem_minmax(0,1fr)]">
@@ -1821,7 +1828,7 @@ function WorkspaceMonitor({
                         <div className="space-y-2">
                           {resource.views.map((view) => {
                             const branch = typeof view.properties.branch === "string" ? view.properties.branch : "detached"
-                            const viewSessions = projectSessions.filter((session) => session.context?.activeViewId === view.id || session.context?.resource?.viewId === view.id)
+                            const viewSessions = currentSessions.filter((session) => session.context?.activeViewId === view.id || session.context?.resource?.viewId === view.id)
                             return (
                               <div key={view.id} className="grid items-start gap-2 xl:grid-cols-[minmax(190px,.8fr)_28px_minmax(220px,1fr)]">
                                 <div className={cn("rounded-[12px] border bg-accent-teal-soft/40 p-3", view.id === activeView ? "border-signal/40 shadow-[0_0_0_2px_rgba(69,105,61,.08)]" : "border-accent-teal/20")}>
@@ -1836,7 +1843,7 @@ function WorkspaceMonitor({
                                 <ArrowRight className={cn("mx-auto mt-6 hidden size-4 xl:block", viewSessions.length ? "text-accent-violet" : "text-line-strong")} />
                                 <div className="space-y-2">
                                   {viewSessions.map((session) => <SessionNode key={session.id} session={session} />)}
-                                  {!viewSessions.length && <div className="rounded-[11px] border border-dashed border-line px-3 py-4 text-center text-[10px] text-muted">No sessions on this View</div>}
+                                  {!viewSessions.length && <div className="rounded-[11px] border border-dashed border-line px-3 py-4 text-center text-[10px] text-muted">No current sessions on this View</div>}
                                 </div>
                               </div>
                             )
@@ -1857,6 +1864,40 @@ function WorkspaceMonitor({
                 </section>
               )}
             </CardContent>
+          </Card>
+
+          <Card>
+            <details className="group/history">
+              <summary className="flex cursor-pointer list-none items-center gap-3 px-5 py-4 [&::-webkit-details-marker]:hidden">
+                <span className="grid size-9 place-items-center rounded-[10px] border border-line bg-black/[0.025]"><History className="size-4 text-muted" /></span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-ink">Session history</p>
+                  <p className="mt-1 text-[10px] text-muted">Sessions move here 24 hours after their last context delivery.</p>
+                </div>
+                <Badge variant="neutral">{historySessions.length}</Badge>
+                <ChevronRight className="size-4 text-dim transition-transform group-open/history:rotate-90" />
+              </summary>
+              <CardContent className="border-t border-line">
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {historySessions.map((session) => {
+                    const resource = session.context?.resource
+                    const branch = typeof resource?.properties?.branch === "string" ? resource.properties.branch : null
+                    return (
+                      <div key={`${session.project}:${session.id}`} className="rounded-[12px] border border-line bg-canvas/35 p-3">
+                        <div className="mb-2 flex min-w-0 items-center gap-2 text-[9px] text-muted">
+                          <GitFork className="size-3 shrink-0 text-accent-blue" />
+                          <span className="truncate">{resource?.resourceLabel || "Unmapped repository"}</span>
+                          <ArrowRight className="size-3 shrink-0 text-dim" />
+                          <span className="truncate font-mono">{branch || resource?.locator || "Unknown View"}</span>
+                        </div>
+                        <SessionNode session={session} />
+                      </div>
+                    )
+                  })}
+                </div>
+                {!historySessions.length && <p className="py-6 text-center text-[10px] text-muted">No sessions have aged into history yet.</p>}
+              </CardContent>
+            </details>
           </Card>
         </div>
       )}
