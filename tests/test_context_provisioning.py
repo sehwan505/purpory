@@ -226,17 +226,16 @@ def test_search_expands_korean_developer_terms_without_an_llm(
 def test_session_scope_can_recall_previously_delivered_memory(tmp_path: Path) -> None:
     service = _service_with_graph(tmp_path)
     memory_search = service._provisioner().search(
-        "token expiry",
+        "decision.auth.ttl",
         session_id="agent-a",
         scopes=["human"],
-        keywords=["token", "expire"],
         connect=False,
     )
     memory_id = memory_search["candidates"][0]["nodeId"]
     service._provisioner().deliver([memory_id], session_id="agent-a", token_budget=512)
 
     result = service._provisioner().search(
-        "token",
+        "decision.auth.ttl",
         session_id="agent-a",
         scopes=["session"],
         connect=False,
