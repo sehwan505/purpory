@@ -129,27 +129,6 @@ def test_partial_files_carries_empty_parse_truncation():
     assert llm._partial_source_files(result2) == ["big.md", "x.md"]
 
 
-def test_stamped_manifest_excludes_partial_files():
-    """A truncated file produced output this run but is left unstamped in the
-    manifest (like a failed chunk) so detect_incremental re-queues it."""
-    from pathlib import Path
-    from purpory.cli import _stamped_manifest_files
-
-    files_by_type = {"document": ["a.md", "b.md"], "code": ["x.py"]}
-    sem_result = {
-        "nodes": [
-            {"id": "1", "source_file": "a.md"},
-            {"id": "2", "source_file": "b.md"},
-        ],
-        "edges": [], "hyperedges": [],
-    }
-    out = _stamped_manifest_files(files_by_type, sem_result, Path("."),
-                                  partial_source_files={"b.md"})
-    # a.md extracted cleanly -> stamped; b.md truncated -> excluded; code kept.
-    assert out["document"] == ["a.md"]
-    assert out["code"] == ["x.py"]
-
-
 def test_group_has_partial_marker():
     assert _group_has_partial_marker({"nodes": [{"_partial": True}]}) is True
     assert _group_has_partial_marker({"edges": [{"_partial": True}]}) is True

@@ -66,22 +66,20 @@ def test_detect_backend_ollama(monkeypatch):
     assert detect_backend() == "ollama"
 
 
-def test_detect_backend_kimi_beats_ollama(monkeypatch):
+def test_detect_backend_ignores_kimi_when_ollama_is_configured(monkeypatch):
     monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert detect_backend() == "kimi"
+    assert detect_backend() == "ollama"
 
 
-def test_detect_backend_claude_beats_ollama(monkeypatch):
-    # ANTHROPIC_API_KEY (paid, intentional) should win over OLLAMA_BASE_URL
-    # (env-driven, easy to set accidentally) -- security fix F-002/F-029.
+def test_detect_backend_ignores_claude_when_ollama_is_configured(monkeypatch):
     monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert detect_backend() == "claude"
+    assert detect_backend() == "ollama"
 
 
 def test_detect_backend_none_without_envvars(monkeypatch):

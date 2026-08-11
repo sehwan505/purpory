@@ -101,7 +101,7 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
   delivery: {
     eyebrow: "Routing intelligence",
     title: "Delivery",
-    description: "Inspect context decisions and manage the local model used to prepare them.",
+    description: "Inspect context decisions and choose the models used to prepare and reconcile them.",
   },
   context: {
     eyebrow: "Durable memory",
@@ -811,10 +811,13 @@ function PreparationPanel({
     modelStatus.model ??
     "qwen3.5:0.8b"
   const activeReconcileModel = modelStatus.selectedModels?.reconcile ?? "qwen3.5:9b"
+  const activeReconcileProvider = modelStatus.selectedProviders?.reconcile ?? "ollama"
   const [selectedGateModel, setSelectedGateModel] = useState(activeGateModel)
   const [selectedReconcileModel, setSelectedReconcileModel] = useState(activeReconcileModel)
+  const [selectedReconcileProvider, setSelectedReconcileProvider] = useState(activeReconcileProvider)
   useEffect(() => setSelectedGateModel(activeGateModel), [activeGateModel])
   useEffect(() => setSelectedReconcileModel(activeReconcileModel), [activeReconcileModel])
+  useEffect(() => setSelectedReconcileProvider(activeReconcileProvider), [activeReconcileProvider])
   const modelOptions = useMemo(() => {
     const installed = modelStatus.installedModels ?? []
     const presets = modelStatus.availablePresets ?? [
@@ -849,7 +852,7 @@ function PreparationPanel({
     if (!modelStatus.installedModels?.includes(selected) || selected === active) return
     setSwitchingModel(true)
     try {
-      await selectModel({ model: selected, role })
+      await selectModel({ model: selected, role, provider: "ollama" })
       await onRefresh()
     } catch (caught) {
       if (role === "gate") setSelectedGateModel(activeGateModel)
@@ -865,12 +868,33 @@ function PreparationPanel({
     setModelError("")
     try {
       await installModel({ model })
-      await selectModel({ model, role })
+      await selectModel({ model, role, provider: "ollama" })
       await onRefresh()
     } catch (caught) {
       setModelError(caught instanceof Error ? caught.message : "Could not install the model")
     } finally {
       setInstallingModel(false)
+    }
+  }
+
+  async function handleReconcileSelection() {
+    const model = selectedReconcileModel.trim()
+    if (!model) return
+    setSwitchingModel(true)
+    setModelError("")
+    try {
+      await selectModel({
+        model,
+        role: "reconcile",
+        provider: selectedReconcileProvider,
+      })
+      await onRefresh()
+    } catch (caught) {
+      setSelectedReconcileModel(activeReconcileModel)
+      setSelectedReconcileProvider(activeReconcileProvider)
+      setModelError(caught instanceof Error ? caught.message : "Could not select the model")
+    } finally {
+      setSwitchingModel(false)
     }
   }
 
@@ -907,18 +931,18 @@ function PreparationPanel({
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <p className="text-sm font-semibold text-ink">Local routing model</p>
+                <p className="text-sm font-semibold text-ink">Model routing</p>
                 <Badge variant={modelStatus.ready ? "success" : modelStatus.running ? "warning" : "neutral"}>
                   {modelStatus.ready ? "Ready" : modelStatus.running ? "Starting" : modelStatus.installed ? "Stopped" : "Not installed"}
                 </Badge>
                 <Badge variant={modelStatus.models?.reconcile.ready ? "success" : "warning"}>
-                  Reconcile {modelStatus.models?.reconcile.ready ? "ready" : "not installed"}
+                  Reconcile {modelStatus.models?.reconcile.ready ? "ready" : "not configured"}
                 </Badge>
               </div>
               <p className="mt-1.5 font-mono text-[10px] text-dim">
                 route {activeGateModel}
                 {modelStatus.revision ? ` @ ${modelStatus.revision.slice(0, 12)}` : ""}
-                {` · reconcile ${activeReconcileModel}`}
+                {` · reconcile ${activeReconcileProvider}/${activeReconcileModel}`}
               </p>
             </div>
           </div>
@@ -951,25 +975,44 @@ function PreparationPanel({
                 </Button>
               )}
               <label
-                htmlFor="reconcile-model-select"
+                htmlFor="reconcile-provider-select"
                 className="ml-2 text-[11px] font-medium text-muted"
               >
                 Reconcile:
               </label>
               <select
-                id="reconcile-model-select"
-                value={selectedReconcileModel}
-                onChange={(e) => void handleModelChange(e.target.value, "reconcile")}
+                id="reconcile-provider-select"
+                value={selectedReconcileProvider}
+                onChange={(event) => {
+                  const provider = event.target.value
+                  setSelectedReconcileProvider(provider)
+                  setSelectedReconcileModel(
+                    modelStatus.reconcileProviderDefaults?.[provider] ?? "",
+                  )
+                }}
                 disabled={switchingModel}
                 className="h-8 rounded-lg border border-line bg-panel-raised px-2.5 py-1 font-mono text-xs text-ink shadow-sm transition hover:border-signal/50 focus:border-signal focus:outline-none focus:ring-1 focus:ring-signal disabled:opacity-50"
               >
-                {reconcileOptions.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt} {modelStatus.installedModels?.includes(opt) ? "✓" : "(preset)"}
+                {(modelStatus.reconcileProviders ?? ["ollama"]).map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider}
                   </option>
                 ))}
               </select>
-              {!modelStatus.installedModels?.includes(selectedReconcileModel) && (
+              <Input
+                id="reconcile-model-select"
+                list="reconcile-model-options"
+                value={selectedReconcileModel}
+                onChange={(event) => setSelectedReconcileModel(event.target.value)}
+                disabled={switchingModel}
+                className="h-8 w-44 font-mono text-xs"
+                aria-label="Reconcile model"
+              />
+              <datalist id="reconcile-model-options">
+                {reconcileOptions.map((option) => <option key={option} value={option} />)}
+              </datalist>
+              {selectedReconcileProvider === "ollama" &&
+              !modelStatus.installedModels?.includes(selectedReconcileModel) ? (
                 <Button
                   size="sm"
                   onClick={() => void handleModelInstall(selectedReconcileModel, "reconcile")}
@@ -977,6 +1020,14 @@ function PreparationPanel({
                 >
                   {installingModel ? <RefreshCw className="animate-spin" /> : null}
                   Install
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  onClick={() => void handleReconcileSelection()}
+                  disabled={switchingModel || !selectedReconcileModel.trim()}
+                >
+                  Use
                 </Button>
               )}
               {switchingModel && <RefreshCw className="size-3.5 animate-spin text-signal" />}
@@ -986,6 +1037,14 @@ function PreparationPanel({
               <p className="text-[11px] text-muted">Provider · {modelStatus.providerSource}</p>
               <p className="mt-0.5 max-w-md truncate font-mono text-[10px] text-dim">
                 {modelStatus.endpoint ?? "purpory model install && purpory model start"}
+              </p>
+              <p className="mt-1 max-w-md truncate font-mono text-[10px] text-dim">
+                Reconcile · {modelStatus.models?.reconcile.runtime ?? activeReconcileProvider}
+                {modelStatus.models?.reconcile.endpoint
+                  ? ` · ${modelStatus.models.reconcile.endpoint}`
+                  : modelStatus.models?.reconcile.error
+                    ? ` · ${modelStatus.models.reconcile.error}`
+                    : ""}
               </p>
             </div>
           </div>

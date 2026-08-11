@@ -30,33 +30,22 @@ def _clear_backend_env(monkeypatch) -> None:
         ("DEEPSEEK_API_KEY", "deepseek"),
     ),
 )
-def test_detects_builtin_provider_from_environment(monkeypatch, key: str, backend: str) -> None:
+def test_hosted_provider_keys_do_not_enable_semantic_extraction(
+    monkeypatch, key: str, backend: str
+) -> None:
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv(key, "test-key")
 
-    assert llm.detect_backend() == backend
+    assert llm.detect_backend() is None
 
 
-def test_extract_dispatches_through_provider(tmp_path: Path, monkeypatch) -> None:
+def test_semantic_extraction_rejects_hosted_provider(tmp_path: Path, monkeypatch) -> None:
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
     source = tmp_path / "note.md"
     source.write_text("# Architecture\n", encoding="utf-8")
-    expected = {"nodes": [], "edges": [], "hyperedges": []}
-    received = {}
-
-    class Provider:
-        def call_direct(self, **kwargs):
-            received.update(kwargs)
-            return expected
-
-    monkeypatch.setattr("purpory.llm.providers.get_provider", lambda backend: Provider())
-
-    assert llm.extract_files_direct([source], backend="gemini", root=tmp_path) is expected
-    assert received["api_key"] == "google-key"
-    assert received["model"] == "gemini-3-flash-preview"
-    assert received["max_tokens"] == 16_384
-    assert received["cfg"]["name"] == "gemini"
+    with pytest.raises(ValueError, match="reserved for session reconciliation"):
+        llm.extract_files_direct([source], backend="gemini", root=tmp_path)
 
 
 def test_raw_completion_dispatches_through_provider(monkeypatch) -> None:

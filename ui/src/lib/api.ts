@@ -213,7 +213,11 @@ export function submitContextFeedback(
   return mutate<{ decisionId: number; verdict: string }>(`/api/context/decisions/${id}/feedback`, "POST", input)
 }
 
-export function selectModel(input: { model: string; role?: "gate" | "reconcile" }) {
+export function selectModel(input: {
+  model: string
+  role?: "gate" | "reconcile"
+  provider?: string
+}) {
   return mutate<ModelStatus>("/api/model/select", "POST", input)
 }
 

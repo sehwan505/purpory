@@ -1170,31 +1170,11 @@ def _validate_ollama_base_url(url: str, *, warn: bool = True) -> None:
         )
 
 def detect_backend() -> str | None:
-    """Return the name of whichever backend has an API key set, or None.
-
-    Priority: gemini → kimi → claude → openai → deepseek → azure → bedrock → ollama (last, opt-in).
-
-    Ollama is intentionally checked LAST so a paid API key (Anthropic/OpenAI/etc.)
-    is never silently shadowed by an incidental OLLAMA_BASE_URL in the environment
-    — see security finding F-002/F-029. Setting OLLAMA_BASE_URL alongside a paid
-    key now keeps you on the paid backend; remove the paid key (or pass
-    --backend ollama explicitly) to route to the local model.
-    """
-    for backend in ("gemini", "kimi", "claude", "openai", "deepseek"):
-        if _get_backend_api_key(backend):
-            return backend
-    if _get_backend_api_key("azure") and os.environ.get("AZURE_OPENAI_ENDPOINT"):
-        return "azure"
-    if os.environ.get("AWS_PROFILE") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"):
-        return "bedrock"
+    """Return the local semantic backend, if explicitly configured."""
     ollama_url = os.environ.get("OLLAMA_BASE_URL")
     if ollama_url:
         _validate_ollama_base_url(ollama_url)
         return "ollama"
-    for name in BACKENDS:
-        if name not in ("gemini", "kimi", "claude", "openai", "deepseek", "azure", "bedrock", "ollama", "claude-cli"):
-            if _get_backend_api_key(name):
-                return name
     return None
 
 _LABEL_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)

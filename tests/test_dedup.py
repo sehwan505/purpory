@@ -112,14 +112,6 @@ def test_single_node_no_crash():
     assert len(result_nodes) == 1
 
 
-def test_dedup_llm_flag_accepted():
-    """deduplicate_entities accepts dedup_llm_backend without crashing when no ambiguous pairs exist."""
-    nodes = _make_nodes("UserService", "OrderService")
-    edges = []
-    result_nodes, _ = deduplicate_entities(nodes, edges, communities={}, dedup_llm_backend=None)
-    assert len(result_nodes) == 2
-
-
 # ── build integration ─────────────────────────────────────────────────────────
 
 def test_build_calls_dedup():

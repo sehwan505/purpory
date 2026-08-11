@@ -371,19 +371,8 @@ def test_claude_cli_adds_dir_and_read_instruction(tmp_path, monkeypatch):
 
 # ── dispatch-level vision gating ──────────────────────────────────────────────
 
-def test_extract_files_direct_gates_pixels_by_capability(tmp_path, monkeypatch):
+def test_extract_files_direct_rejects_hosted_vision_backends(tmp_path, monkeypatch):
     img, _, doc = _make_corpus(tmp_path)
-    captured: dict = {}
-    _fake_openai(monkeypatch, captured)
-
-    # vision backend (openai) -> content is a list carrying an image_url block
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-    llm.extract_files_direct([doc, img], backend="openai", root=tmp_path)
-    assert isinstance(captured["messages"][1]["content"], list)
-
-    # non-vision backend (deepseek) -> pixels stripped, content is a plain string
-    captured.clear()
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
-    llm.extract_files_direct([doc, img], backend="deepseek", root=tmp_path)
-    content = captured["messages"][1]["content"]
-    assert isinstance(content, str) and "sub/diagram.png" in content
+    for backend in ("openai", "deepseek"):
+        with pytest.raises(ValueError, match="reserved for session reconciliation"):
+            llm.extract_files_direct([doc, img], backend=backend, root=tmp_path)

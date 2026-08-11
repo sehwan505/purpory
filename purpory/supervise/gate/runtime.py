@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from purpory.llm.helpers import (
+    BACKENDS,
+    _default_model_for_backend,
+    _format_backend_env_keys,
+    _get_backend_api_key,
+)
 from purpory.ollama import ollama_urls
 from purpory.supervise.gate.provider import GateProvider
 from purpory.supervise.gate.qwen import (
@@ -23,6 +30,7 @@ from purpory.supervise.gate.qwen import (
 DEFAULT_START_TIMEOUT_SECONDS = 300.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_HTTP_RESPONSE_BYTES = 1_048_576
+RECONCILE_PROVIDERS = tuple(sorted(BACKENDS))
 
 
 @dataclass(frozen=True)
@@ -42,16 +50,42 @@ def _model_config_path() -> Path:
     return (Path(home).expanduser() if home else Path.home() / ".purpory") / "models.json"
 
 
-def _model_config() -> dict[str, str]:
+def _model_config() -> dict[str, Any]:
     try:
         value = json.loads(_model_config_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(value, dict):
+        return {}
     return {
         key: item
         for key, item in value.items()
-        if key in {"gate", "reconcile"} and isinstance(item, str)
-    } if isinstance(value, dict) else {}
+        if key in {"gate", "reconcile"}
+        and (
+            isinstance(item, str)
+            or (
+                key == "reconcile"
+                and isinstance(item, dict)
+                and isinstance(item.get("provider"), str)
+                and isinstance(item.get("model"), str)
+            )
+        )
+    }
+
+
+def configured_provider(role: str) -> str:
+    if role not in {"gate", "reconcile"}:
+        raise ValueError(f"unsupported role: {role}")
+    if role == "gate":
+        return "ollama"
+    configured = _model_config().get(role)
+    stored = str(configured.get("provider", "")) if isinstance(configured, dict) else ""
+    provider = os.environ.get("PURPORY_RECONCILE_PROVIDER", "").strip() or stored or "ollama"
+    if provider not in BACKENDS:
+        raise ValueError(
+            f"PURPORY_RECONCILE_PROVIDER must be one of: {', '.join(RECONCILE_PROVIDERS)}"
+        )
+    return provider
 
 
 def configured_model(role: str) -> str:
@@ -59,16 +93,23 @@ def configured_model(role: str) -> str:
     if role not in defaults:
         raise ValueError(f"unsupported role: {role}")
     environment = f"PURPORY_{role.upper()}_MODEL"
-    model = os.environ.get(environment, "").strip() or _model_config().get(role, "").strip()
-    model = model or defaults[role]
+    provider = configured_provider(role)
+    configured = _model_config().get(role)
+    stored = (
+        str(configured.get("model", "")).strip()
+        if isinstance(configured, dict) and configured.get("provider") == provider
+        else configured.strip() if isinstance(configured, str) and provider == "ollama" else ""
+    )
+    default = defaults[role] if provider == "ollama" else _default_model_for_backend(provider)
+    model = os.environ.get(environment, "").strip() or stored or default
     if not model or len(model) > 255 or any(character.isspace() for character in model):
-        raise ValueError(f"{environment} must be one Ollama model name")
+        raise ValueError(f"{environment} must be one valid model name")
     return model
 
 
-def _save_model(role: str, model: str) -> None:
+def _save_model(role: str, model: str, *, provider: str = "ollama") -> None:
     config = _model_config()
-    config[role] = model
+    config[role] = model if provider == "ollama" else {"provider": provider, "model": model}
     path = _model_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -212,16 +253,68 @@ class GateModelManager:
         except RuntimeError:
             return []
 
-    def select_model(self, model_id: str, *, role: str = "gate") -> dict[str, Any]:
+    def select_model(
+        self,
+        model_id: str,
+        *,
+        role: str = "gate",
+        provider: str = "ollama",
+    ) -> dict[str, Any]:
         selected = model_id.strip()
         if not selected or len(selected) > 255 or any(character.isspace() for character in selected):
             raise ValueError("model must be one valid model name")
         if role not in {"gate", "reconcile"}:
             raise ValueError(f"unsupported role: {role}")
-        if _find_model(_models(timeout_seconds=2.0), selected) is None:
+        provider = provider.strip().lower()
+        if provider not in BACKENDS:
+            raise ValueError(f"unsupported provider: {provider}")
+        if role == "gate" and provider != "ollama":
+            raise ValueError("gate model selection currently supports only Ollama")
+        if provider == "ollama" and _find_model(_models(timeout_seconds=2.0), selected) is None:
             raise RuntimeError(f"model is not installed: {selected}")
-        _save_model(role, selected)
-        return self.status(model=selected)
+        _save_model(role, selected, provider=provider)
+        return self.role_status(role)
+
+    def role_status(self, role: str) -> dict[str, Any]:
+        provider = configured_provider(role)
+        model = configured_model(role)
+        if provider == "ollama":
+            return {**self.status(model=model), "provider": provider}
+        cfg = BACKENDS[provider]
+        key_ready = bool(_get_backend_api_key(provider))
+        endpoint = (
+            os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+            if provider == "azure"
+            else str(cfg.get("base_url") or "")
+        ) or None
+        ready = key_ready and (provider != "azure" or bool(endpoint))
+        missing = f"set {_format_backend_env_keys(provider)}"
+        if provider == "claude-cli":
+            ready = shutil.which("claude") is not None
+            missing = "install and authenticate the claude CLI"
+        elif provider == "bedrock":
+            ready = True
+        elif provider == "azure" and key_ready and not endpoint:
+            missing = "set AZURE_OPENAI_ENDPOINT"
+        return {
+            "installed": True,
+            "running": ready,
+            "ready": ready,
+            "model": model,
+            "revision": None,
+            "runtime": provider,
+            "provider": provider,
+            "endpoint": endpoint,
+            "pid": None,
+            "startedAt": None,
+            "runtimeModel": model if ready else None,
+            "runtimeRevision": None,
+            "logPath": None,
+            "error": None if ready else missing,
+            "installedModels": [],
+            "availablePresets": [],
+            "reconcilePresets": RECOMMENDED_RECONCILE_MODELS,
+        }
 
     def status(
         self,

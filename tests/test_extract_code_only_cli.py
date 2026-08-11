@@ -1,9 +1,4 @@
-"""`purpory extract --code-only` indexes code without an LLM key (#1734).
-
-A mixed repo (code + docs) with no API key configured used to hard-fail on the
-doc/paper/image files. `--code-only` skips the semantic pass so the code graph
-still builds, and the no-key error now points users at the flag.
-"""
+"""Structural extraction ignores non-code files and never needs an LLM key."""
 from __future__ import annotations
 
 import os
@@ -38,7 +33,7 @@ def test_code_only_succeeds_without_key(tmp_path):
     r = _run(repo, "--code-only")
     assert r.returncode == 0, f"--code-only should succeed with no key: {r.stderr}"
     out = r.stdout + r.stderr
-    assert "--code-only: skipping" in out
+    assert "model-backed extraction was removed" in out
     assert not (repo / "purpory-out").exists()
     graph = repo / "graph.json"
     exported = subprocess.run(
@@ -55,8 +50,8 @@ def test_code_only_succeeds_without_key(tmp_path):
     assert any(str(l).startswith("hello") for l in labels), "code was indexed"
 
 
-def test_mixed_repo_without_key_errors_and_points_at_code_only(tmp_path):
+def test_mixed_repo_without_key_uses_structural_extraction(tmp_path):
     repo = _mixed_repo(tmp_path)
-    r = _run(repo)  # no --code-only, no key
-    assert r.returncode != 0, "mixed repo with no key should still error without the flag"
-    assert "--code-only" in r.stderr, "the no-key error must point users at --code-only"
+    r = _run(repo)
+    assert r.returncode == 0, r.stderr
+    assert "model-backed extraction was removed" in r.stdout

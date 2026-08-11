@@ -652,11 +652,17 @@ class ContextService:
     def context_decisions(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.repository.list_gate_decisions(limit=limit)
 
-    def select_model(self, model: str, *, role: str = "gate") -> dict[str, Any]:
+    def select_model(
+        self,
+        model: str,
+        *,
+        role: str = "gate",
+        provider: str = "ollama",
+    ) -> dict[str, Any]:
         from purpory.supervise.gate.runtime import GateModelManager
 
         manager = GateModelManager()
-        manager.select_model(model, role=role)
+        manager.select_model(model, role=role, provider=provider)
         if role == "gate" and self.gate_provider is not None:
             from purpory.supervise.gate.qwen import QwenGateProvider
             if isinstance(self.gate_provider, QwenGateProvider):
@@ -671,11 +677,17 @@ class ContextService:
 
     def model_status(self) -> dict[str, Any]:
         from purpory.supervise.gate.provider import UnavailableGateProvider
-        from purpory.supervise.gate.runtime import GateModelManager, configured_model
+        from purpory.llm.helpers import BACKENDS, _default_model_for_backend
+        from purpory.supervise.gate.runtime import (
+            RECONCILE_PROVIDERS,
+            GateModelManager,
+            configured_model,
+            configured_provider,
+        )
 
         manager = GateModelManager()
         managed = manager.status()
-        reconcile = manager.status(model=configured_model("reconcile"))
+        reconcile = manager.role_status("reconcile")
         provider = self.gate_provider
         environment_url = os.environ.get("PURPORY_GATE_URL", "").strip()
         provider_endpoint = getattr(provider, "endpoint", None)
@@ -702,6 +714,14 @@ class ContextService:
             "selectedModels": {
                 "gate": configured_model("gate"),
                 "reconcile": configured_model("reconcile"),
+            },
+            "selectedProviders": {
+                "gate": "ollama",
+                "reconcile": configured_provider("reconcile"),
+            },
+            "reconcileProviders": list(RECONCILE_PROVIDERS),
+            "reconcileProviderDefaults": {
+                name: _default_model_for_backend(name) for name in BACKENDS
             },
             "models": {"gate": managed, "reconcile": reconcile},
         }

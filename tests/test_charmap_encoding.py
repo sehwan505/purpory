@@ -121,10 +121,10 @@ class TestSubprocessEncoding:
         with patch("shutil.which", return_value="/fake/bin/claude"), \
              patch("subprocess.run", return_value=completed):
             # Should not raise
-            result = llm.extract_files_direct(
-                files=[f], backend="claude-cli", root=tmp_path
+            result = llm._call_llm(
+                f.read_text(encoding="utf-8"), backend="claude-cli", max_tokens=8192
             )
-        assert len(result["nodes"]) >= 1
+        assert '"n1"' in result
 
     def test_call_llm_claude_cli_subprocess_encoding(self, monkeypatch):
         """_call_llm with backend='claude-cli' must also use encoding='utf-8'."""
@@ -286,10 +286,10 @@ class TestSubstitutionValidation:
         except UnicodeEncodeError:
             pass  # Expected — confirms these chars hit the pre-fix failure surface
 
-    def test_subprocess_encoding_kwarg_in_extract_files_direct(
+    def test_subprocess_encoding_kwarg_in_reconcile_adapter(
         self, monkeypatch, tmp_path
     ):
-        """End-to-end path: write unicode file → extract_files_direct → subprocess.
+        """End-to-end path: write unicode text → provider registry → subprocess.
 
         Subprocess must receive encoding='utf-8', not the locale default.
         """
@@ -321,8 +321,8 @@ class TestSubstitutionValidation:
 
         with patch("shutil.which", return_value="/fake/bin/claude"), \
              patch("subprocess.run", return_value=completed) as mock_run:
-            result = llm.extract_files_direct(
-                files=[f], backend="claude-cli", root=tmp_path
+            result = llm._call_llm(
+                f.read_text(encoding="utf-8"), backend="claude-cli", max_tokens=8192
             )
 
         assert mock_run.called
@@ -334,4 +334,4 @@ class TestSubstitutionValidation:
         # Confirm the unicode content was in the input (not truncated/replaced)
         inp = kwargs.get("input", "")
         assert "→" in inp or "✅" in inp or "≥" in inp
-        assert len(result["nodes"]) >= 1
+        assert "u_chunk" in result

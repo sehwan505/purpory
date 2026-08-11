@@ -6,6 +6,7 @@ from pathlib import Path
 from purpory.supervise.library import ContextService
 from purpory.supervise.session_reconcile import (
     HierarchicalReconciler,
+    ProviderReconcileModel,
     _split_text,
     apply_candidates,
     chunk_messages,
@@ -49,6 +50,40 @@ class FakeModel:
             ),
             "sourceIds": [item["id"] for item in candidates],
         }
+
+
+def test_external_reconcile_model_uses_existing_provider_registry(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def call(prompt: str, **kwargs) -> str:
+        captured.update(prompt=prompt, **kwargs)
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "key": "intent.model.provider",
+                        "kind": "decision",
+                        "value": "External models are allowed.",
+                        "evidenceIds": ["U000001"],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setenv("PURPORY_RECONCILE_MODEL", "gpt-4.1-mini")
+    monkeypatch.setattr("purpory.llm._call_llm", call)
+
+    result = ProviderReconcileModel(provider="openai", context_tokens=8_192).extract(
+        "[U000001 USER]\nExternal models are allowed.",
+        {"U000001"},
+    )
+
+    assert result[0]["key"] == "intent.model.provider"
+    assert captured["backend"] == "openai"
+    assert captured["model"] == "gpt-4.1-mini"
+    assert "OUTPUT JSON SCHEMA" in str(captured["prompt"])
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
