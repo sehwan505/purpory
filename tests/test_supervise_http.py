@@ -113,7 +113,7 @@ def test_model_status_api_reports_managed_runtime_state(
 ) -> None:
     monkeypatch.setattr(
         "purpory.supervise.gate.runtime.GateModelManager.status",
-        lambda _self: {"installed": False, "endpoint": None},
+        lambda _self, **_kwargs: {"installed": False, "endpoint": None},
     )
 
     status, body = _request(context_server, "GET", "/api/model/status?t=read-secret")

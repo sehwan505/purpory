@@ -1,4 +1,4 @@
-"""Qwen 3.6 gate adapter for OpenAI-compatible runtimes."""
+"""Qwen gate adapter for OpenAI-compatible runtimes."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from purpory.supervise.gate.contract import (
 from purpory.supervise.gate.provider import GateProviderError
 
 DEFAULT_MODEL = "qwen3.5:0.8b"
-DEFAULT_RECONCILE_MODEL = "qwen3.5:4b"
+DEFAULT_RECONCILE_MODEL = "qwen3.5:9b"
 DEFAULT_RECONCILE_KEEP_ALIVE_SECONDS = 120.0
 DEFAULT_TIMEOUT_SECONDS = 2.0
 DEFAULT_MAX_INPUT_TOKENS = 20_000
@@ -38,8 +38,8 @@ RECOMMENDED_GATE_MODELS = [
 ]
 
 RECOMMENDED_RECONCILE_MODELS = [
-    "qwen3.5:4b",
     "qwen3.5:9b",
+    "qwen3.5:4b",
     "qwen3.5:27b",
 ]
 

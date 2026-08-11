@@ -94,14 +94,25 @@ Pass `--project` only when the integration should apply to the current repositor
 These are Purpory's only host-specific integrations. Other agents can call the generic `prepare`
 CLI or HTTP API without a dedicated installer.
 
-Both installers register one native `UserPromptSubmit` preflight and install the same
-`purpory-reconcile` skill. The skill keeps every explicit, durable, consequential project intent or
-confirmed fact, previews changes, and applies them in conflict-checked batches. It does not use a
-fixed item count or persist an opaque importance score. The hook calls the same
+Both installers register a native `UserPromptSubmit` preflight and a `SessionEnd` reconciliation
+hook. The end hook snapshots the transcript and exits quickly; a detached local worker processes
+every bounded segment with the selected reconcile model, hierarchically consolidates evidence-backed
+memories, and applies them in conflict-checked project batches. Failed jobs remain queued for retry.
+The prompt hook calls the same
 `ContextService.prepare` operation as the CLI and HTTP API, then either injects retrieved context,
 instructs the agent to ask one clarification, or passes the prompt through. Codex requires the user
 to review and trust installed hooks with `/hooks`. See
 [`docs/AGENT_PREFLIGHT.md`](docs/AGENT_PREFLIGHT.md).
+
+The default reconciliation model is `qwen3.5:9b`. Install or select it independently from routing:
+
+```bash
+purpory model install --role reconcile
+purpory model select qwen3.5:9b --role reconcile
+```
+
+The dashboard exposes both routing and reconciliation selectors. Selection is persisted under
+Purpory's home directory so detached session workers use the same model.
 
 ## Agent API
 

@@ -48,6 +48,10 @@ def _parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("status", help="show installation and runtime health")
 
+    select = subparsers.add_parser("select", help="persist the model used for a role")
+    select.add_argument("model")
+    select.add_argument("--role", choices=("gate", "reconcile"), default="gate")
+
     logs = subparsers.add_parser("logs", help="show recent model server logs")
     logs.add_argument("--lines", type=int, default=100)
     return parser
@@ -117,12 +121,16 @@ def dispatch_model(arguments: Sequence[str] | None = None) -> None:
         elif options.verb == "stop":
             result = manager.stop(wait_seconds=options.wait, force=options.force)
         elif options.verb == "status":
+            from purpory.supervise.gate.runtime import configured_model
+
             result = manager.status()
             result["models"] = {
                 "gate": result.copy(),
-                "reconcile": manager.status(model=DEFAULT_RECONCILE_MODEL),
+                "reconcile": manager.status(model=configured_model("reconcile")),
                 "embedding": manager.status(model=DEFAULT_EMBEDDING_MODEL),
             }
+        elif options.verb == "select":
+            result = manager.select_model(options.model, role=options.role)
         elif options.verb == "logs":
             result = manager.logs(lines=options.lines)
         else:

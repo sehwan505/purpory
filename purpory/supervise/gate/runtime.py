@@ -34,10 +34,46 @@ class ModelInstallation:
 
 
 def _configured_model() -> str:
-    model = os.environ.get("PURPORY_GATE_MODEL", DEFAULT_MODEL).strip()
+    return configured_model("gate")
+
+
+def _model_config_path() -> Path:
+    home = os.environ.get("PURPORY_HOME", "").strip()
+    return (Path(home).expanduser() if home else Path.home() / ".purpory") / "models.json"
+
+
+def _model_config() -> dict[str, str]:
+    try:
+        value = json.loads(_model_config_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        key: item
+        for key, item in value.items()
+        if key in {"gate", "reconcile"} and isinstance(item, str)
+    } if isinstance(value, dict) else {}
+
+
+def configured_model(role: str) -> str:
+    defaults = {"gate": DEFAULT_MODEL, "reconcile": DEFAULT_RECONCILE_MODEL}
+    if role not in defaults:
+        raise ValueError(f"unsupported role: {role}")
+    environment = f"PURPORY_{role.upper()}_MODEL"
+    model = os.environ.get(environment, "").strip() or _model_config().get(role, "").strip()
+    model = model or defaults[role]
     if not model or len(model) > 255 or any(character.isspace() for character in model):
-        raise ValueError("PURPORY_GATE_MODEL must be one Ollama model name")
+        raise ValueError(f"{environment} must be one Ollama model name")
     return model
+
+
+def _save_model(role: str, model: str) -> None:
+    config = _model_config()
+    config[role] = model
+    path = _model_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _request_json(
@@ -49,6 +85,8 @@ def _request_json(
 ) -> dict[str, Any]:
     root, _ = ollama_urls()
     parsed = urlsplit(root)
+    if parsed.hostname is None:  # ollama_urls validates this; keep the type boundary explicit.
+        raise RuntimeError("Ollama URL omitted a hostname")
     connection = HTTPConnection(parsed.hostname, parsed.port, timeout=timeout_seconds)
     encoded = json.dumps(body, separators=(",", ":")).encode("utf-8") if body else None
     try:
@@ -178,14 +216,11 @@ class GateModelManager:
         selected = model_id.strip()
         if not selected or len(selected) > 255 or any(character.isspace() for character in selected):
             raise ValueError("model must be one valid model name")
+        if role not in {"gate", "reconcile"}:
+            raise ValueError(f"unsupported role: {role}")
         if _find_model(_models(timeout_seconds=2.0), selected) is None:
             raise RuntimeError(f"model is not installed: {selected}")
-        if role == "gate":
-            os.environ["PURPORY_GATE_MODEL"] = selected
-        elif role == "reconcile":
-            os.environ["PURPORY_RECONCILE_MODEL"] = selected
-        else:
-            raise ValueError(f"unsupported role: {role}")
+        _save_model(role, selected)
         return self.status(model=selected)
 
     def status(
