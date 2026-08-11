@@ -20,7 +20,11 @@ from purpory.install import _resolve_purpory_exe
 from purpory.supervise.gate.qwen import (
     DEFAULT_RECONCILE_KEEP_ALIVE_SECONDS,
 )
-from purpory.supervise.gate.runtime import _request_json, configured_model
+from purpory.supervise.gate.runtime import (
+    _request_json,
+    configured_model,
+    configured_provider,
+)
 from purpory.supervise.library import ContextService
 from purpory.supervise.provisioning import estimate_tokens
 from purpory.supervise.repository import TOPIC_KINDS, validate_topic_key
@@ -319,6 +323,40 @@ class OllamaReconcileModel:
         return candidate
 
 
+class ProviderReconcileModel(OllamaReconcileModel):
+    """Run the same reconcile contract through Purpory's existing LLM registry."""
+
+    def __init__(self, *, provider: str, context_tokens: int | None = None) -> None:
+        super().__init__(context_tokens=context_tokens)
+        self.provider = provider
+
+    def _complete(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        from purpory.llm import _call_llm
+        from purpory.llm.helpers import _parse_llm_json
+
+        raw = _call_llm(
+            _SYSTEM_PROMPT
+            + "\n\nOUTPUT JSON SCHEMA\n"
+            + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+            + "\n\nTASK\n"
+            + prompt,
+            backend=self.provider,
+            model=self.model,
+            max_tokens=min(8_192, self.context_tokens // 3),
+        )
+        value = _parse_llm_json(raw)
+        if not isinstance(value, dict):  # pragma: no cover - parser guarantees this
+            raise RuntimeError("reconcile provider returned a non-object response")
+        return value
+
+
+def configured_reconcile_model() -> OllamaReconcileModel:
+    provider = configured_provider("reconcile")
+    if provider == "ollama":
+        return OllamaReconcileModel()
+    return ProviderReconcileModel(provider=provider)
+
+
 def _validate_candidate(value: object, allowed_evidence: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError("reconcile candidate must be an object")
@@ -353,7 +391,7 @@ def _validate_candidate(value: object, allowed_evidence: set[str]) -> dict[str, 
 class HierarchicalReconciler:
     """Map every transcript chunk, then hierarchically reduce candidates by stable key."""
 
-    def __init__(self, model: OllamaReconcileModel) -> None:
+    def __init__(self, model: Any) -> None:
         self.model = model
         self.input_budget = model.context_tokens // 2
         overhead = estimate_tokens(_SYSTEM_PROMPT) + 512
@@ -471,12 +509,12 @@ def apply_candidates(
     return {"applied": True, "project": project, "changes": results}
 
 
-def reconcile_job(job: dict[str, Any], *, model: OllamaReconcileModel | None = None) -> dict[str, Any]:
+def reconcile_job(job: dict[str, Any], *, model: Any | None = None) -> dict[str, Any]:
     transcript = Path(str(job["transcript"]))
     messages = read_transcript(transcript)
     if not any(message["role"] == "user" for message in messages):
         return {"applied": True, "project": None, "changes": []}
-    selected_model = model or OllamaReconcileModel()
+    selected_model = model or configured_reconcile_model()
     candidates = HierarchicalReconciler(selected_model).propose(messages)
     if not candidates:
         return {"applied": True, "project": None, "changes": []}
@@ -580,7 +618,7 @@ def _acquire_lock(lock: Path) -> bool:
     return True
 
 
-def drain_queue(*, model: OllamaReconcileModel | None = None) -> dict[str, int]:
+def drain_queue(*, model: Any | None = None) -> dict[str, int]:
     root = _queue_root()
     pending = root / "pending"
     completed = root / "completed"

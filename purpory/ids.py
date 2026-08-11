@@ -4,7 +4,7 @@ Three independent producers must agree on node IDs or the graph splits a single
 entity into disconnected ghost nodes:
 
 1. The AST extractor (``extract._make_id``) — deterministic, per-language.
-2. The semantic LLM extraction path — follows the same canonical node-ID spec.
+2. Imported structural graph fragments — follow the same canonical node-ID spec.
 3. The graph builder (``build._normalize_id``) — reconciles edge endpoints when
    the LLM emits IDs with slightly different punctuation or casing than the AST.
 

@@ -17,6 +17,7 @@ from purpory.prs import (
     compute_pr_impact,
     fetch_worktrees,
     format_prs_text,
+    render_triage,
     _detect_default_branch,
 )
 
@@ -90,6 +91,17 @@ class TestClassify:
         # WRONG-BASE takes precedence over everything else
         pr = make_pr(base_branch="master", ci_status="FAILURE")
         assert _classify(pr, base="v8") == "WRONG-BASE"
+
+
+def test_triage_is_deterministic_and_never_calls_a_model(capsys):
+    ready = make_pr(number=2)
+    failing = make_pr(number=1, ci_status="FAILURE")
+
+    render_triage([ready, failing], "v8")
+
+    output = capsys.readouterr().out
+    assert "(deterministic)" in output
+    assert output.index("#1 — fix failing CI") < output.index("#2 — review now")
 
 
 # ── _parse_ci ─────────────────────────────────────────────────────────────────

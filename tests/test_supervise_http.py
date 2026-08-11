@@ -152,6 +152,39 @@ def test_model_install_api_uses_existing_model_manager(
     }
 
 
+def test_model_select_api_passes_external_reconcile_provider(
+    context_server: ContextHTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected: dict[str, str] = {}
+
+    def select(model: str, *, role: str, provider: str) -> dict[str, str]:
+        selected.update(model=model, role=role, provider=provider)
+        return selected
+
+    monkeypatch.setattr(context_server.service, "select_model", select)
+
+    status, body = _request(
+        context_server,
+        "POST",
+        "/api/model/select",
+        body=json.dumps(
+            {"model": "gpt-4.1-mini", "role": "reconcile", "provider": "openai"}
+        ),
+        headers={
+            "Content-Type": "application/json",
+            "X-Purpory-Token": "write-secret",
+        },
+    )
+
+    assert status == 200
+    assert body == {
+        "model": "gpt-4.1-mini",
+        "role": "reconcile",
+        "provider": "openai",
+    }
+
+
 def test_graph_api_imports_snapshot_and_bounds_response(
     context_server: ContextHTTPServer,
     tmp_path: Path,

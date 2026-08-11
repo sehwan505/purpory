@@ -537,7 +537,7 @@ def suggest_questions(
                 "Not enough signal to generate questions. "
                 "This usually means the corpus has no AMBIGUOUS edges, no bridge nodes, "
                 "no INFERRED relationships, and all communities are tightly cohesive. "
-                "Add more files or run with --mode deep to extract richer edges."
+                "Add more source files to extract richer edges."
             ),
         }]
 

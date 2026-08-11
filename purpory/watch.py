@@ -442,6 +442,7 @@ def _reconcile_existing_graph(
         edge_evicted_source_identities = set(deleted_source_identities)
         if not full_rebuild:
             node_evicted_source_identities.update(rebuilt_source_identities)
+            edge_evicted_source_identities.update(rebuilt_source_identities)
 
         # Reconcile every rebuild against the current watched corpus. Hook change
         # lists can contain only a rename destination, so explicit paths alone
@@ -490,16 +491,14 @@ def _reconcile_existing_graph(
                 "Run a full re-extraction to purge them if the exclusion is intentional."
             )
 
-        # A full re-extraction owns every AST node under watch_root. Incremental
-        # extraction owns only nodes from rebuilt or deleted sources. Semantic
-        # nodes lack the AST origin marker and remain preserved.
+        # A full rebuild owns every node under watch_root. Incremental extraction
+        # owns nodes from rebuilt or deleted sources, regardless of old provenance.
         preserved_nodes = [
             node
             for node in existing.get("nodes", [])
             if node["id"] not in new_ast_ids
             and not (
-                node.get("_origin") == "ast"
-                and (
+                (
                     (
                         not node.get("source_file")
                         and (full_rebuild or not code_files)
@@ -514,12 +513,6 @@ def _reconcile_existing_graph(
         ]
         all_ids = new_ast_ids | {node["id"] for node in preserved_nodes}
 
-        # Edges are owned by source_file, but ownership is tier-scoped: the AST
-        # pass replaces a re-extracted source's AST edges, while that source's
-        # semantic/LLM edges — which the AST pass cannot regenerate — survive
-        # until a semantic re-extraction supersedes them. Same provenance rule
-        # the node reconciliation above applies via _origin (#1865). Deletion
-        # eviction stays provenance-blind.
         preserved_edges = [
             edge
             for edge in existing.get("links", existing.get("edges", []))
@@ -527,8 +520,7 @@ def _reconcile_existing_graph(
             and edge.get("target") in all_ids
             and not source_paths.is_evicted(edge, edge_evicted_source_identities)
             and not (
-                edge.get("_origin") == "ast"
-                and source_paths.is_evicted(edge, rebuilt_source_identities)
+                full_rebuild and source_paths.in_watch_root(edge.get("source_file"))
             )
         ]
 
@@ -674,9 +666,8 @@ def _check_shrink(
 
     When False, cleans up *tmp* if provided and prints a warning to stderr.
 
-    The shrink-guard exists to catch SILENT shrinkage from failed extraction
-    chunks (a half-written semantic pass leaving thousands of nodes
-    unaccounted for). When ``had_explicit_deletions`` is True, the caller
+    The shrink-guard catches silent shrinkage during incremental extraction.
+    When ``had_explicit_deletions`` is True, the caller
     has declared which files were removed (e.g. the post-commit hook saw
     a ``D`` in ``git diff --name-only``) and a smaller graph is the expected
     outcome — skip the guard so legitimate refactors don't require ``--force``.
@@ -872,62 +863,6 @@ def _rebuild_code(
             print("[purpory update] No code files found - nothing to rebuild.")
             return False
 
-        # #1915: a document that already carries SEMANTIC (LLM) nodes in the
-        # existing graph must not ALSO be AST-quick-scanned — otherwise every
-        # rebuild mints heading nodes on top of the preserved semantic nodes
-        # and the doc is represented twice (~4x graph bloat vs the CLI update
-        # path, which AST-extracts only code). Semantic supersedes AST per doc
-        # source: the quick-scan stays as a fallback for docs with no semantic
-        # layer (the no-LLM doc-structure feature, #09b33b7) and for brand-new
-        # docs the graph has never seen. These docs stay in ``code_files`` so
-        # corpus membership (#1795 fail-closed deletion evidence) and the
-        # shrink accounting below still cover them — a previously-bloated
-        # graph must be allowed to self-heal on a full rebuild without the
-        # shrink-guard refusing the smaller write.
-        semantic_doc_files: set[Path] = set()
-        if ast_doc_files and existing_graph_data:
-            try:
-                prior = existing_graph_data
-                prior_paths = _StoredSourcePaths(
-                    prior,
-                    out=out,
-                    project_root=project_root,
-                    watch_root=watch_root,
-                    normalize_source=_nsf,
-                )
-                # Semantic doc nodes lack the AST origin marker. Gate on the
-                # doc-shaped subset of the six-value file_type enum
-                # (document/concept/rationale/paper, matching build.py's
-                # canonical set minus code/image) rather than "document"
-                # alone: per the extraction spec, a doc full of named
-                # concepts may be represented with ONLY concept/rationale
-                # nodes and no separate "document" node — that's still
-                # evidence of a semantic layer, not a marker-less AST node
-                # (#1954). The narrower pre-#1954 check under-recognized
-                # exactly that doc shape, letting it be re-quick-scanned
-                # every rebuild. A pre-#1865 graph whose AST nodes lack the
-                # ``_origin`` marker still isn't misread as semantic-backed,
-                # since "code" stays outside this set.
-                semantic_doc_identities: set[str] = set()
-                for node in prior.get("nodes", []):
-                    if node.get("_origin") == "ast":
-                        continue
-                    if node.get("file_type") not in (
-                        "document", "concept", "rationale", "paper"
-                    ):
-                        continue
-                    identity = prior_paths.identity(node.get("source_file"))
-                    if identity:
-                        semantic_doc_identities.add(identity)
-                if semantic_doc_identities:
-                    semantic_doc_files = {
-                        p for p in ast_doc_files
-                        if prior_paths.absolute_identity(str(p), project_root)
-                        in semantic_doc_identities
-                    }
-            except Exception:
-                semantic_doc_files = set()
-
         # Incremental path: when the caller passed an explicit change list,
         # extract only changed-and-still-existing files. Deleted paths are
         # tracked separately so their stale nodes can be evicted below.
@@ -940,12 +875,6 @@ def _rebuild_code(
 
         if changed_paths is not None:
             code_set = {Path(os.path.abspath(p)) for p in code_files}
-            # #1915: semantic-backed docs are never AST-quick-scanned; their
-            # semantic nodes are the sole representation. Mirroring #1865's
-            # tier-scoped edge rule at the node level, they also must NOT
-            # enter extract_targets (hence rebuilt/node-evicted identities) on
-            # an incremental rebuild, or their semantic nodes would be wiped.
-            semantic_doc_set = {Path(os.path.abspath(p)) for p in semantic_doc_files}
             wanted: list[Path] = []
             change_root = Path.cwd().resolve()
             for raw in changed_paths:
@@ -956,7 +885,7 @@ def _rebuild_code(
                 )
                 tracked = next((cand for cand in candidates if cand.exists() and cand in code_set), None)
                 if tracked is not None:
-                    if tracked not in wanted and tracked not in semantic_doc_set:
+                    if tracked not in wanted:
                         wanted.append(tracked)
                     continue
 
@@ -986,12 +915,7 @@ def _rebuild_code(
                 return True
             extract_targets = wanted
         else:
-            # Full rebuild: skip the AST quick-scan for semantic-backed docs
-            # (#1915). They remain in code_files, so stale _origin=="ast"
-            # heading nodes from a previously-bloated graph are dropped by the
-            # full-rebuild AST ownership rule while the shrink accounting
-            # below still counts the doc as a rebuilt source.
-            extract_targets = [p for p in code_files if p not in semantic_doc_files]
+            extract_targets = code_files
 
         commit = _git_head()
         result = extract(extract_targets, cache_root=watch_root) if extract_targets else {
@@ -1000,8 +924,7 @@ def _rebuild_code(
         }
         _rebase_relative_source_files(result, watch_root, project_root)
 
-        # Preserve semantic nodes/edges from a previous full run.
-        # AST-only rebuild replaces nodes for changed files; everything else is kept.
+        # Structural rebuild replaces nodes for changed files; everything else is kept.
         # Filter by node ID membership in the new AST output, not by file_type —
         # INFERRED/AMBIGUOUS nodes extracted from code files also carry file_type="code"
         # and would be wrongly dropped by a file_type-based filter.
@@ -1062,7 +985,9 @@ def _rebuild_code(
             if not same_graph:
                 if not _check_shrink(
                     force, existing_graph_data, candidate_graph_data,
-                    had_explicit_deletions=bool(deleted_paths),
+                    # A full structural rebuild is authoritative for the watched
+                    # scope. It may intentionally purge legacy semantic nodes.
+                    had_explicit_deletions=bool(deleted_paths) or changed_paths is None,
                     rebuilt_sources=rebuilt_sources,
                 ):
                     return False
@@ -1183,7 +1108,7 @@ def _rebuild_code(
         else:
             if not _check_shrink(
                 force, existing_graph_data, candidate_graph_data,
-                had_explicit_deletions=bool(deleted_paths),
+                had_explicit_deletions=bool(deleted_paths) or changed_paths is None,
                 rebuilt_sources=rebuilt_sources,
             ):
                 return False
@@ -1229,33 +1154,3 @@ def _rebuild_code(
     except Exception as exc:
         print(f"[purpory update] Rebuild failed: {exc}")
         return False
-
-
-def check_update(watch_path: Path) -> bool:
-    """Check for pending semantic update flag and notify the user if set.
-
-    Cron-safe: always returns True so cron jobs do not alarm.
-    Non-code file changes (docs, papers, images) require LLM-backed
-    re-extraction via `/purpory --update` — this function only signals
-    that the update is needed.
-    """
-    from purpory.supervise.structural import project_state_directory
-
-    flag = project_state_directory(watch_path) / _PURPORY_OUT / "needs_update"
-    if flag.exists():
-        print(f"[purpory check-update] Pending non-code changes in {watch_path}.")
-        print("[purpory check-update] Run `/purpory --update` to apply semantic re-extraction.")
-    return True
-
-
-def _notify_only(watch_path: Path) -> None:
-    """Write a flag file and print a notification (fallback for non-code-only corpora)."""
-    from purpory.supervise.structural import project_state_directory
-
-    flag = project_state_directory(watch_path) / _PURPORY_OUT / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1", encoding="utf-8")
-    print(f"\n[purpory update] New or changed files detected in {watch_path}")
-    print("[purpory update] Non-code files changed - semantic re-extraction requires LLM.")
-    print("[purpory update] Run `/purpory --update` in your AI assistant to update the graph.")
-    print(f"[purpory update] Flag written to {flag}")

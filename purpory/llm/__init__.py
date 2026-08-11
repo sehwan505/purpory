@@ -166,19 +166,23 @@ def extract_files_direct(
         backend = detect_backend()
         if backend is None:
             raise ValueError(
-                "No LLM backend configured. Set one of: GEMINI_API_KEY, ANTHROPIC_API_KEY, "
-                "OPENAI_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY, "
-                "AZURE_OPENAI_API_KEY+AZURE_OPENAI_ENDPOINT, OLLAMA_BASE_URL, "
-                "or AWS credentials. Pass backend= explicitly to select a provider."
+                "Local semantic extraction is not configured. Set OLLAMA_BASE_URL "
+                "or pass backend='ollama'. Hosted providers are reserved for "
+                "session reconciliation."
             )
     if backend not in BACKENDS:
         raise ValueError(f"Unknown backend {backend!r}. Available: {sorted(BACKENDS)}")
+    if backend != "ollama":
+        raise ValueError(
+            "Hosted LLMs are reserved for session reconciliation; "
+            "semantic extraction supports only backend='ollama'."
+        )
 
     cfg = BACKENDS[backend]
     key = api_key or _get_backend_api_key(backend)
     if not key and backend == "ollama":
         ollama_url = os.environ.get("OLLAMA_BASE_URL", cfg.get("base_url", ""))
-        _validate_ollama_base_url(ollama_url)
+        _validate_ollama_base_url(str(ollama_url))
         print(
             "[purpory] WARNING: ollama backend selected with no OLLAMA_API_KEY set; "
             f"sending corpus to {ollama_url}. Set OLLAMA_API_KEY (any non-empty value) "
@@ -248,7 +252,7 @@ def _call_llm(
     key = _get_backend_api_key(backend)
     if not key and backend == "ollama":
         ollama_url = os.environ.get("OLLAMA_BASE_URL", cfg.get("base_url", ""))
-        _validate_ollama_base_url(ollama_url)
+        _validate_ollama_base_url(str(ollama_url))
         key = "ollama"
     if not key and backend not in ("bedrock", "claude-cli"):
         raise ValueError(
@@ -464,7 +468,7 @@ def _extract_with_adaptive_retry(
 
 def extract_corpus_parallel(
     files: list[Path],
-    backend: str = "kimi",
+    backend: str = "ollama",
     api_key: str | None = None,
     model: str | None = None,
     root: Path = Path("."),
@@ -896,8 +900,16 @@ def generate_community_labels(
     if not backend:
         if not quiet:
             print(
-                "[purpory label] no LLM backend configured; keeping Community N "
-                "placeholders. Set an API key (e.g. GOOGLE_API_KEY) or pass --backend.",
+                "[purpory label] local Ollama is not configured; keeping Community N "
+                "placeholders. Set OLLAMA_BASE_URL or pass --backend ollama.",
+                file=sys.stderr,
+            )
+        return _placeholder_community_labels(communities), "placeholder"
+    if backend != "ollama":
+        if not quiet:
+            print(
+                "[purpory label] hosted LLMs are reserved for session reconciliation; "
+                "use --backend ollama or deterministic hub labels.",
                 file=sys.stderr,
             )
         return _placeholder_community_labels(communities), "placeholder"

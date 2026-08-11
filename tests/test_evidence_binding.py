@@ -35,7 +35,7 @@ def _run(files, nodes, tmp_path):
     provider = MagicMock()
     provider.call_direct.return_value = result
     with patch("purpory.llm.providers.get_provider", return_value=provider):
-        return llm.extract_files_direct(files, backend="kimi", api_key="k", root=tmp_path)
+        return llm.extract_files_direct(files, backend="ollama", api_key="k", root=tmp_path)
 
 
 def _by_label(out):

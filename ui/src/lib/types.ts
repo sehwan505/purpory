@@ -327,8 +327,11 @@ export type ModelStatus = {
   availablePresets?: string[]
   reconcilePresets?: string[]
   selectedModels?: { gate: string; reconcile: string }
+  selectedProviders?: { gate: string; reconcile: string }
+  reconcileProviders?: string[]
+  reconcileProviderDefaults?: Record<string, string>
   models?: {
-    gate: Pick<ModelStatus, "installed" | "ready" | "model" | "revision">
-    reconcile: Pick<ModelStatus, "installed" | "ready" | "model" | "revision">
+    gate: Pick<ModelStatus, "installed" | "ready" | "model" | "revision" | "runtime" | "endpoint" | "error">
+    reconcile: Pick<ModelStatus, "installed" | "ready" | "model" | "revision" | "runtime" | "endpoint" | "error">
   }
 }

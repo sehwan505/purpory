@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 import pytest
 
-from purpory.watch import _notify_only, _WATCHED_EXTENSIONS, _rebuild_lock, _check_shrink
+from purpory.watch import _WATCHED_EXTENSIONS, _rebuild_lock, _check_shrink
 
 
 def _state_out(root: Path) -> Path:
@@ -28,27 +28,6 @@ def _store_graph(root: Path, graph: dict) -> None:
     from purpory.supervise.structural import store_structural_graph
 
     store_structural_graph(graph, root=root)
-
-
-# --- _notify_only ---
-
-def test_notify_only_creates_flag(tmp_path):
-    _notify_only(tmp_path)
-    flag = _state_out(tmp_path) / "needs_update"
-    assert flag.exists()
-    assert flag.read_text() == "1"
-
-def test_notify_only_creates_flag_dir(tmp_path):
-    # purpory-out dir does not exist yet
-    assert not _state_out(tmp_path).exists()
-    _notify_only(tmp_path)
-    assert _state_out(tmp_path).is_dir()
-
-def test_notify_only_idempotent(tmp_path):
-    _notify_only(tmp_path)
-    _notify_only(tmp_path)
-    flag = _state_out(tmp_path) / "needs_update"
-    assert flag.read_text() == "1"
 
 
 # --- _WATCHED_EXTENSIONS ---
@@ -74,36 +53,6 @@ def test_watched_extensions_excludes_noise():
     assert ".sh" in _WATCHED_EXTENSIONS
     assert ".pyc" not in _WATCHED_EXTENSIONS
     assert ".log" not in _WATCHED_EXTENSIONS
-
-
-# --- watch() import error without watchdog ---
-
-def test_check_update_no_flag_returns_true(tmp_path):
-    """check_update returns True and is silent when needs_update flag is absent."""
-    from purpory.watch import check_update
-    assert check_update(tmp_path) is True
-
-
-def test_check_update_with_flag_returns_true_and_prints(tmp_path, capsys):
-    """check_update returns True and prints notification when flag exists."""
-    from purpory.watch import check_update
-    flag = _state_out(tmp_path) / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1")
-    result = check_update(tmp_path)
-    assert result is True
-    out = capsys.readouterr().out
-    assert "purpory --update" in out
-
-
-def test_check_update_does_not_clear_flag(tmp_path):
-    """check_update never removes the needs_update flag (clearing is LLM's job)."""
-    from purpory.watch import check_update
-    flag = _state_out(tmp_path) / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1")
-    check_update(tmp_path)
-    assert flag.exists()
 
 
 # --- _rebuild_lock (GH-858) ---
@@ -450,11 +399,10 @@ def test_rebuild_code_preserves_hyperedges_for_rebuilt_surviving_source(
     [None, [Path("auth.md")]],
     ids=["full-update", "incremental-doc-update"],
 )
-def test_rebuild_code_preserves_semantic_edges_from_reextracted_doc(
+def test_rebuild_code_removes_legacy_semantic_edges_from_reextracted_doc(
     tmp_path, changed_paths
 ):
-    """#1865: AST-only updates must not evict semantic edges whose source_file
-    is a re-extracted document; only that source's AST-tier edges are replaced."""
+    """A structural update replaces every legacy edge owned by its source."""
     from purpory.watch import _rebuild_code
 
     corpus = tmp_path / "corpus"
@@ -504,7 +452,7 @@ def test_rebuild_code_preserves_semantic_edges_from_reextracted_doc(
     }
     assert (
         "auth_token_validation", "login_session_verification", "semantically_similar_to"
-    ) in relations, "semantic edge from a re-extracted doc must survive an AST-only update"
+    ) not in relations
     assert (
         "auth_token_validation", "login_session_verification", "references"
     ) not in relations, "stale AST-tier edge of a re-extracted source must be evicted"
@@ -552,12 +500,9 @@ def test_rebuild_code_prunes_final_deleted_file(tmp_path, changed_paths):
 
     after = _graph(corpus)
     assert not any(n.get("source_file") == "only.py" for n in after["nodes"])
-    assert {"docs_topic", "shared_concept"} <= {n["id"] for n in after["nodes"]}
-    assert any(
-        e.get("source") == "docs_topic" and e.get("target") == "shared_concept"
-        for e in after["links"]
-    )
-    assert {he["id"] for he in after["hyperedges"]} == {"semantic_context"}
+    assert not ({"docs_topic", "shared_concept"} & {n["id"] for n in after["nodes"]})
+    assert not after["links"]
+    assert not after["hyperedges"]
     assert "sourceless_ast_stub" not in {n["id"] for n in after["nodes"]}
 
 
@@ -651,7 +596,7 @@ def test_rebuild_code_prunes_renamed_ast_backed_document(tmp_path):
 def test_rebuild_code_evicts_removed_symbol_from_surviving_file(tmp_path):
     """#1116: purpory update (_rebuild_code with no changed_paths) must prune a
     symbol removed from a file that still exists — and its inbound call edge —
-    without dropping genuine semantic nodes that share the surviving file."""
+    while also dropping legacy semantic nodes owned by that file."""
     import json
     from purpory.watch import _rebuild_code
 
@@ -686,9 +631,7 @@ def test_rebuild_code_evicts_removed_symbol_from_surviving_file(tmp_path):
         for e in edges(data)
     ), "cross-file caller->foo call edge must exist before removal"
 
-    # Pre-seed a semantic node on the surviving a.py (no AST id, no _origin
-    # marker). A naive "evict every re-extracted file's nodes by source_file"
-    # fix would wrongly delete this; the identity-based fix must keep it.
+    # Pre-seed a legacy semantic node on the surviving source.
     data["nodes"].append({
         "id": "a_authconcept",
         "label": "AuthConcept",
@@ -714,16 +657,11 @@ def test_rebuild_code_evicts_removed_symbol_from_surviving_file(tmp_path):
     ), "dangling edge to the removed symbol must be dropped"
     assert "bar()" in after, "surviving symbol in the same file must be kept"
     assert "caller()" in after, "unchanged file's nodes must be kept"
-    assert "AuthConcept" in after, "semantic node on a surviving file must not be evicted"
+    assert "AuthConcept" not in after, "legacy semantic node must be evicted"
 
 
-def test_rebuild_code_preupgrade_marker_less_node_one_cycle_lag(tmp_path):
-    """#1118 backward-compat: a graph.json built before #1116 has no `_origin`
-    markers. On the first `purpory update` after upgrading, a symbol removed
-    from a surviving file is NOT pruned that cycle — its old node carries no
-    marker, so the new drop-rule skips it. This is a deliberate one-cycle lag
-    (no data loss); it self-heals once the node has been stamped `_origin="ast"`
-    (which a full re-extraction does for every surviving symbol)."""
+def test_rebuild_code_prunes_preupgrade_marker_less_node(tmp_path):
+    """A full structural rebuild immediately prunes stale marker-less nodes."""
     import json
     from purpory.watch import _rebuild_code
 
@@ -750,29 +688,10 @@ def test_rebuild_code_preupgrade_marker_less_node_one_cycle_lag(tmp_path):
     })
     _store_graph(corpus, data)
 
-    # First update after "upgrade" (full rebuild, no changed_paths): the stale
-    # node has no marker, so the drop-rule skips it and it survives this cycle.
-    assert _rebuild_code(corpus, acquire_lock=False, force=True) is True
+    assert _rebuild_code(corpus, acquire_lock=False) is True
     after = _graph(corpus)
-    assert "foo()" in labels(after), (
-        "pre-upgrade marker-less stale node must survive the first update — "
-        "documented one-cycle backward-compat lag (#1118)"
-    )
-
-    # Once stamped (a full re-extraction stamps every surviving symbol), the
-    # drop-rule applies on the next update and the stale node self-heals away.
-    for n in after["nodes"]:
-        if n["label"] == "foo()":
-            n["_origin"] = "ast"
-    _store_graph(corpus, after)
-
-    assert _rebuild_code(corpus, acquire_lock=False, force=True) is True
-    healed = _graph(corpus)
-    assert "foo()" not in labels(healed), (
-        "once carrying _origin=ast, the stale node is pruned on the next "
-        "update (self-heal)"
-    )
-    assert "bar()" in labels(healed), "surviving symbol must be kept throughout"
+    assert "foo()" not in labels(after)
+    assert "bar()" in labels(after)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl-only (POSIX)")
@@ -868,9 +787,7 @@ def test_watch_handler_honors_purporyignore(tmp_path, monkeypatch):
     (watch_root / "build").mkdir()
 
     rebuild_calls: list[Path] = []
-    notify_calls: list[Path] = []
     monkeypatch.setattr(watch_mod, "_rebuild_code", lambda p, **kw: rebuild_calls.append(p) or True)
-    monkeypatch.setattr(watch_mod, "_notify_only", lambda p: notify_calls.append(p))
 
     # Run watch() in a thread with a short debounce so we can verify the
     # post-debounce dispatch path actually runs on real events.
@@ -888,7 +805,6 @@ def test_watch_handler_honors_purporyignore(tmp_path, monkeypatch):
     (watch_root / "build" / "out.py").write_text("x = 1\n", encoding="utf-8")
     time.sleep(1.0)
     assert rebuild_calls == [], "ignored writes triggered a rebuild"
-    assert notify_calls == [], "ignored writes triggered a notify"
 
     # Non-ignored write — handler must accept and (after debounce) dispatch.
     (watch_root / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
@@ -921,8 +837,6 @@ def test_watch_loads_purporyignore_once(tmp_path, monkeypatch):
     # Patch the symbol the watch module imported at module-load time.
     monkeypatch.setattr(watch_mod, "_load_purporyignore", counting_loader)
     monkeypatch.setattr(watch_mod, "_rebuild_code", lambda p, **kw: True)
-    monkeypatch.setattr(watch_mod, "_notify_only", lambda p: None)
-
     t = threading.Thread(target=watch_mod.watch, args=(tmp_path,), kwargs={"debounce": 0.2}, daemon=True)
     t.start()
     time.sleep(0.5)
@@ -1243,8 +1157,7 @@ def test_rebuild_code_subdir_survives_absolute_to_relative_invocation(tmp_path):
 
         assert _rebuild_code(Path("src"), no_cluster=True, acquire_lock=False) is True
         rebased = _graph(src)
-        semantic = next(n for n in rebased["nodes"] if n["id"] == "local_semantic")
-        assert semantic["source_file"] == "src/old.py"
+        assert "local_semantic" not in {n["id"] for n in rebased["nodes"]}
 
         old.rename(src / "renamed.py")
 
@@ -1767,11 +1680,8 @@ def _seed_semantic_doc_graph_concept_only(corpus):
     return corpus
 
 
-def test_rebuild_code_semantic_doc_not_double_represented_on_full_rebuild(tmp_path):
-    """#1915: a full _rebuild_code must not AST-quick-scan a doc whose semantic
-    (LLM) nodes already represent it. Before the fix the quick-scan minted
-    heading nodes ON TOP of the preserved semantic nodes, representing every
-    doc twice (~4x bloated graph vs the CLI update path)."""
+def test_rebuild_code_replaces_legacy_semantic_doc_on_full_rebuild(tmp_path):
+    """A full rebuild replaces a legacy LLM document layer with structure."""
     from purpory.watch import _rebuild_code
 
     corpus = tmp_path / "corpus"
@@ -1782,21 +1692,15 @@ def test_rebuild_code_semantic_doc_not_double_represented_on_full_rebuild(tmp_pa
 
     after = _graph(corpus)
     after_ids = {n["id"] for n in after["nodes"]}
-    assert _SEMANTIC_GUIDE_IDS <= after_ids, "semantic doc nodes must be preserved"
-    assert not (_AST_GUIDE_IDS & after_ids), (
-        "AST heading nodes minted for a semantic-backed doc (#1915)"
-    )
-    assert len(after["nodes"]) == len(before["nodes"]), (
-        f"node count inflated {len(before['nodes'])} -> {len(after['nodes'])} (#1915)"
-    )
+    assert not (_SEMANTIC_GUIDE_IDS & after_ids)
+    assert _AST_GUIDE_IDS <= after_ids
+    assert len(after["nodes"]) != len(before["nodes"])
 
 
-def test_rebuild_code_concept_only_semantic_doc_not_double_represented_on_full_rebuild(
+def test_rebuild_code_replaces_concept_only_semantic_doc_on_full_rebuild(
     tmp_path,
 ):
-    """#1954: a doc represented ONLY by concept/rationale nodes (no
-    file_type=="document" node) must also be recognized as semantic-backed
-    and skipped by the AST quick-scan — not just docs with a "document" node."""
+    """Concept-only legacy document nodes are replaced too."""
     from purpory.watch import _rebuild_code
 
     corpus = tmp_path / "corpus"
@@ -1807,13 +1711,9 @@ def test_rebuild_code_concept_only_semantic_doc_not_double_represented_on_full_r
 
     after = _graph(corpus)
     after_ids = {n["id"] for n in after["nodes"]}
-    assert _CONCEPT_ONLY_GUIDE_IDS <= after_ids, "semantic doc nodes must be preserved"
-    assert not (_AST_GUIDE_IDS & after_ids), (
-        "AST heading nodes minted for a concept-only semantic-backed doc (#1954)"
-    )
-    assert len(after["nodes"]) == len(before["nodes"]), (
-        f"node count inflated {len(before['nodes'])} -> {len(after['nodes'])} (#1954)"
-    )
+    assert not (_CONCEPT_ONLY_GUIDE_IDS & after_ids)
+    assert _AST_GUIDE_IDS <= after_ids
+    assert len(after["nodes"]) != len(before["nodes"])
 
 
 @pytest.mark.parametrize(
@@ -1821,12 +1721,10 @@ def test_rebuild_code_concept_only_semantic_doc_not_double_represented_on_full_r
     [[Path("guide.md")], [Path("guide.md"), Path("app.py")]],
     ids=["doc-only", "doc-plus-code"],
 )
-def test_rebuild_code_incremental_preserves_semantic_doc_nodes_and_edges(
+def test_rebuild_code_incremental_replaces_semantic_doc_nodes_and_edges(
     tmp_path, changed
 ):
-    """#1915: an incremental rebuild whose change set includes a semantic-backed
-    doc must not wipe the doc's semantic nodes or their edges — re-extraction
-    owns only a source's AST tier (node-level mirror of #1865's edge rule)."""
+    """An incremental rebuild replaces the changed source's legacy LLM layer."""
     from purpory.watch import _rebuild_code
 
     corpus = tmp_path / "corpus"
@@ -1838,23 +1736,14 @@ def test_rebuild_code_incremental_preserves_semantic_doc_nodes_and_edges(
 
     after = _graph(corpus)
     after_ids = {n["id"] for n in after["nodes"]}
-    assert _SEMANTIC_GUIDE_IDS <= after_ids, (
-        "semantic doc nodes wiped by an incremental rebuild"
-    )
+    assert not (_SEMANTIC_GUIDE_IDS & after_ids)
     relations = {
         (e.get("source"), e.get("target"), e.get("relation"))
         for e in after["links"]
     }
-    assert ("guide_doc", "auth_flow", "explains") in relations, (
-        "semantic doc edge dropped by an incremental rebuild"
-    )
-    assert any(
-        src == "auth_flow" and rel == "implemented_by"
-        for src, _tgt, rel in relations
-    ), "doc-to-code semantic edge dropped by an incremental rebuild"
-    assert not (_AST_GUIDE_IDS & after_ids), (
-        "incremental rebuild AST-quick-scanned a semantic-backed doc (#1915)"
-    )
+    assert ("guide_doc", "auth_flow", "explains") not in relations
+    assert not any(src == "auth_flow" for src, _tgt, _rel in relations)
+    assert _AST_GUIDE_IDS <= after_ids
 
 
 @pytest.mark.parametrize(
@@ -1862,12 +1751,10 @@ def test_rebuild_code_incremental_preserves_semantic_doc_nodes_and_edges(
     [[Path("guide.md")], [Path("guide.md"), Path("app.py")]],
     ids=["doc-only", "doc-plus-code"],
 )
-def test_rebuild_code_incremental_preserves_concept_only_semantic_doc_nodes_and_edges(
+def test_rebuild_code_incremental_replaces_concept_only_semantic_doc_nodes_and_edges(
     tmp_path, changed
 ):
-    """#1954: incremental analogue — a concept/rationale-only semantic doc
-    must not lose its nodes/edges nor get AST-quick-scanned on an incremental
-    rebuild, mirroring the #1915 doc-node case above."""
+    """Incremental replacement also handles concept-only legacy documents."""
     from purpory.watch import _rebuild_code
 
     corpus = tmp_path / "corpus"
@@ -1879,23 +1766,14 @@ def test_rebuild_code_incremental_preserves_concept_only_semantic_doc_nodes_and_
 
     after = _graph(corpus)
     after_ids = {n["id"] for n in after["nodes"]}
-    assert _CONCEPT_ONLY_GUIDE_IDS <= after_ids, (
-        "concept-only semantic doc nodes wiped by an incremental rebuild"
-    )
+    assert not (_CONCEPT_ONLY_GUIDE_IDS & after_ids)
     relations = {
         (e.get("source"), e.get("target"), e.get("relation"))
         for e in after["links"]
     }
-    assert ("auth_flow", "session_model", "explains") in relations, (
-        "concept-only semantic doc edge dropped by an incremental rebuild"
-    )
-    assert any(
-        src == "auth_flow" and rel == "implemented_by"
-        for src, _tgt, rel in relations
-    ), "doc-to-code semantic edge dropped by an incremental rebuild"
-    assert not (_AST_GUIDE_IDS & after_ids), (
-        "incremental rebuild AST-quick-scanned a concept-only semantic-backed doc (#1954)"
-    )
+    assert ("auth_flow", "session_model", "explains") not in relations
+    assert not any(src == "auth_flow" for src, _tgt, _rel in relations)
+    assert _AST_GUIDE_IDS <= after_ids
 
 
 def test_rebuild_code_quick_scans_doc_without_semantic_nodes(tmp_path):
@@ -1921,10 +1799,7 @@ def test_rebuild_code_quick_scans_doc_without_semantic_nodes(tmp_path):
 
 
 def test_rebuild_code_polluted_graph_self_heals_on_full_rebuild(tmp_path):
-    """#1915: a graph already bloated by the bug (semantic doc nodes PLUS stale
-    _origin=="ast" heading nodes for the same doc) sheds the heading nodes on
-    the next full rebuild via the AST ownership rule — and the shrink guard
-    accepts the smaller write without --force."""
+    """A full rebuild drops the legacy layer and keeps fresh structural nodes."""
     from purpory.watch import _rebuild_code
 
     corpus = tmp_path / "corpus"
@@ -1959,8 +1834,6 @@ def test_rebuild_code_polluted_graph_self_heals_on_full_rebuild(tmp_path):
 
     after = _graph(corpus)
     after_ids = {n["id"] for n in after["nodes"]}
-    assert {"guide_doc", "auth_flow"} <= after_ids
-    assert not (_AST_GUIDE_IDS & after_ids), (
-        "stale AST heading nodes for a semantic-backed doc must self-heal away"
-    )
+    assert not ({"guide_doc", "auth_flow"} & after_ids)
+    assert _AST_GUIDE_IDS <= after_ids
     assert len(after["nodes"]) < nodes_before, "polluted graph should shrink"

@@ -14,13 +14,13 @@ from purpory.supervise.gate.qwen import (
     RECOMMENDED_GATE_MODELS,
     RECOMMENDED_RECONCILE_MODELS,
 )
-from purpory.supervise.gate.runtime import GateModelManager
+from purpory.supervise.gate.runtime import RECONCILE_PROVIDERS, GateModelManager
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="purpory model",
-        description="Manage the local gate and reconcile models in the shared Ollama runtime.",
+        description="Manage gate and reconcile model selection.",
         epilog="Global option accepted anywhere: --json",
     )
     subparsers = parser.add_subparsers(dest="verb", required=True)
@@ -51,6 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     select = subparsers.add_parser("select", help="persist the model used for a role")
     select.add_argument("model")
     select.add_argument("--role", choices=("gate", "reconcile"), default="gate")
+    select.add_argument("--provider", choices=RECONCILE_PROVIDERS)
 
     logs = subparsers.add_parser("logs", help="show recent model server logs")
     logs.add_argument("--lines", type=int, default=100)
@@ -108,6 +109,8 @@ def dispatch_model(arguments: Sequence[str] | None = None) -> None:
                 "models": models,
             }
         elif options.verb == "list":
+            from purpory.llm.helpers import _default_model_for_backend
+
             installed = manager.list_installed_models()
             result = {
                 "installed": installed,
@@ -115,22 +118,32 @@ def dispatch_model(arguments: Sequence[str] | None = None) -> None:
                 "reconcilePresets": RECOMMENDED_RECONCILE_MODELS,
                 "defaultGate": DEFAULT_MODEL,
                 "defaultReconcile": DEFAULT_RECONCILE_MODEL,
+                "reconcileProviders": list(RECONCILE_PROVIDERS),
+                "reconcileProviderDefaults": {
+                    provider: _default_model_for_backend(provider)
+                    for provider in RECONCILE_PROVIDERS
+                },
             }
         elif options.verb == "start":
             result = manager.start(port=options.port, wait_seconds=options.wait)
         elif options.verb == "stop":
             result = manager.stop(wait_seconds=options.wait, force=options.force)
         elif options.verb == "status":
-            from purpory.supervise.gate.runtime import configured_model
-
             result = manager.status()
             result["models"] = {
                 "gate": result.copy(),
-                "reconcile": manager.status(model=configured_model("reconcile")),
+                "reconcile": manager.role_status("reconcile"),
                 "embedding": manager.status(model=DEFAULT_EMBEDDING_MODEL),
             }
         elif options.verb == "select":
-            result = manager.select_model(options.model, role=options.role)
+            from purpory.supervise.gate.runtime import configured_provider
+
+            provider = options.provider or configured_provider(options.role)
+            result = manager.select_model(
+                options.model,
+                role=options.role,
+                provider=provider,
+            )
         elif options.verb == "logs":
             result = manager.logs(lines=options.lines)
         else:

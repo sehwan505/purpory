@@ -866,7 +866,6 @@ def build(
     *,
     directed: bool = False,
     dedup: bool = True,
-    dedup_llm_backend: str | None = None,
     root: str | Path | None = None,
 ) -> nx.Graph:
     """Merge multiple extraction results into one graph.
@@ -874,8 +873,6 @@ def build(
     directed=True produces a DiGraph that preserves edge direction (source→target).
     directed=False (default) produces an undirected Graph for backward compatibility.
     dedup=True (default) runs entity deduplication before building the graph.
-    dedup_llm_backend: if set (e.g. "gemini", "claude", or "kimi"), uses LLM to resolve
-        ambiguous pairs in the 75–92 Jaro-Winkler score zone.
     root: if given, absolute source_file paths are made relative to root (#932).
 
     Extractions are merged in order. For nodes with the same ID, the last
@@ -903,7 +900,6 @@ def build(
             combined["nodes"],
             combined["edges"],
             communities={},
-            dedup_llm_backend=dedup_llm_backend,
         )
     return build_from_json(combined, directed=directed, root=root)
 
@@ -978,7 +974,6 @@ def build_merge(
     graph_data: dict | None = None,
     directed: bool = False,
     dedup: bool = True,
-    dedup_llm_backend: str | None = None,
     root: str | Path | None = None,
 ) -> nx.Graph:
     """Merge new chunks into an existing structural graph.
@@ -1076,9 +1071,7 @@ def build_merge(
     base = [{"nodes": existing_nodes, "edges": existing_edges}] if had_graph else []
 
     all_chunks = base + list(new_chunks)
-    G = build(
-        all_chunks, directed=directed, dedup=dedup, dedup_llm_backend=dedup_llm_backend, root=root
-    )
+    G = build(all_chunks, directed=directed, dedup=dedup, root=root)
 
     # Prune set for deleted source files — both the raw form (matches nodes that
     # kept absolute source_file) and the normalised relative form (matches nodes

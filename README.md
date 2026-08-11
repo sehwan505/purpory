@@ -114,6 +114,19 @@ purpory model select qwen3.5:9b --role reconcile
 The dashboard exposes both routing and reconciliation selectors. Selection is persisted under
 Purpory's home directory so detached session workers use the same model.
 
+Reconciliation can also use any existing Purpory LLM adapter. The model ID is free-form; credentials
+and custom endpoints continue to use that adapter's environment variables:
+
+```bash
+OPENAI_API_KEY=... purpory model select gpt-4.1-mini --role reconcile --provider openai
+# OPENAI_BASE_URL can point the same adapter at an OpenAI-compatible service.
+```
+
+Supported providers are listed by `purpory model list`. Ollama remains the default and the only
+provider managed by `purpory model install`; external API keys are never stored in `models.json`.
+Hosted adapters are intentionally available only to session reconciliation. Structural extraction,
+community labels, entity deduplication, and PR triage are deterministic and do not call a model.
+
 ## Agent API
 
 Agents use one preparation route with `X-Purpory-Agent-Token`:
@@ -171,7 +184,7 @@ purpory embed --limit 32
 ## Code Graph
 
 ```bash
-uv run purpory extract . --code-only
+uv run purpory extract .
 uv run purpory query "what connects authentication to billing?"
 uv run purpory explain "PaymentService"
 uv run purpory path "Checkout" "PaymentService"

@@ -19,7 +19,6 @@ _COMMANDS = {
     "add": "fetch a URL and update the graph",
     "affected": "find nodes affected by a symbol",
     "benchmark": "benchmark graph queries",
-    "check-update": "check for pending semantic updates",
     "claude": "manage Claude Code integration",
     "cluster-only": "rerun graph clustering",
     "codex": "manage Codex integration",
@@ -27,7 +26,7 @@ _COMMANDS = {
     "embed": "materialize embeddings for used context",
     "explain": "explain a graph node",
     "export": "export json, report, wiki, or push to a graph database",
-    "extract": "run structural and semantic extraction",
+    "extract": "run structural extraction",
     "hook": "manage Git hooks",
     "import": "import a graph.json compatibility artifact",
     "label": "label graph communities",
@@ -120,67 +119,6 @@ def _networkx_graph(graph: dict, *, directed: bool = False):
         return json_graph.node_link_graph(raw, edges="links")
     except TypeError:
         return json_graph.node_link_graph(raw)
-
-
-def _stamped_manifest_files(
-    files_by_type: dict[str, list[str]],
-    sem_result: dict,
-    root: Path,
-    partial_source_files: "set[str] | None" = None,
-) -> dict[str, list[str]]:
-    """Manifest-safe files dict: only stamp semantic files that actually
-    produced output (cache hit or fresh extraction). Files whose chunk failed
-    have no source_file entry in sem_result — leaving their semantic_hash
-    empty so detect_incremental re-queues them (#933).
-
-    A file in ``partial_source_files`` DID produce output this run, but only a
-    truncated fragment of it, so it is excluded from stamping too — otherwise
-    detect_incremental would see it "done" and never re-dispatch it, leaving the
-    incomplete node set live forever on the warm-incremental path. Same #933
-    mechanism: leave it unstamped and it is re-queued next run.
-
-    Both sides of the membership test are resolved against the scan ``root``
-    before comparing (#1897): node/edge/hyperedge ``source_file`` values are
-    root-relative on a fresh extraction while ``files_by_type`` entries are
-    absolute (from detect()), so a raw string comparison never matched and
-    every freshly-extracted semantic doc was dropped from the manifest.
-    Mirrors the #1890 path normalization in purpory.llm.
-
-    Hyperedges are counted as output (#1920): a chunk whose only result for a
-    document is a hyperedge (3+ nodes sharing a concept) is valid output that
-    the semantic cache persists per-``source_file`` — omitting it here left the
-    doc unstamped, so detect_incremental re-queued it on every run. The stamping
-    condition mirrors the cache-write keying (a hyperedge carries its own
-    ``source_file``); do not derive it from member nodes.
-    """
-    root = Path(root)
-
-    def _resolve(value: str) -> Path:
-        p = Path(value)
-        if not p.is_absolute():
-            p = root / p
-        try:
-            return p.resolve()
-        except (OSError, RuntimeError):
-            return p
-
-    sem_extracted: set[Path] = set()
-    for coll in ("nodes", "edges", "hyperedges"):
-        for item in sem_result.get(coll, []):
-            sf = item.get("source_file", "")
-            if sf:
-                sem_extracted.add(_resolve(sf))
-    partial_resolved = {_resolve(p) for p in (partial_source_files or set())}
-    sem_types = {"document", "paper", "image"}
-    return {
-        ftype: [
-            f
-            for f in flist
-            if ftype not in sem_types
-            or (_resolve(f) in sem_extracted and _resolve(f) not in partial_resolved)
-        ]
-        for ftype, flist in files_by_type.items()
-    }
 
 
 def _stale_graph_sources(
@@ -779,43 +717,24 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             sys.exit(1)
 
     elif cmd in ("cluster-only", "label"):
-        # `label` is `cluster-only` that always (re)generates community names with
-        # the configured backend, even when a .purpory_labels.json already exists.
+        # `label` is `cluster-only` that always regenerates deterministic hub names.
         force_relabel = cmd == "label"
         # Mirror the tree/export arg-parsing pattern: walk argv so flags and
         # the optional positional path can appear in any order (#724).
         no_label = "--no-label" in argv
         missing_only = "--missing-only" in argv
         co_timing = "--timing" in argv
-        _backend_arg = next((a for a in argv if a.startswith("--backend=")), None)
-        label_backend = _backend_arg.split("=", 1)[1] if _backend_arg else None
-        _model_arg = next((a for a in argv if a.startswith("--model=")), None)
-        label_model = _model_arg.split("=", 1)[1] if _model_arg else None
         args = argv[2:]
         watch_path: Path | None = None
         graph_override: Path | None = None
         co_resolution: float = 1.0
         co_exclude_hubs: float | None = None
-        label_max_concurrency: int = 4
-        label_batch_size: int = 100
         i_arg = 0
         while i_arg < len(args):
             a = args[i_arg]
             if a == "--graph" and i_arg + 1 < len(args):
                 graph_override = Path(args[i_arg + 1])
                 i_arg += 2
-            elif a == "--backend" and i_arg + 1 < len(args):
-                label_backend = args[i_arg + 1]
-                i_arg += 2
-            elif a.startswith("--backend="):
-                label_backend = a.split("=", 1)[1]
-                i_arg += 1
-            elif a == "--model" and i_arg + 1 < len(args):
-                label_model = args[i_arg + 1]
-                i_arg += 2
-            elif a.startswith("--model="):
-                label_model = a.split("=", 1)[1]
-                i_arg += 1
             elif a == "--resolution" and i_arg + 1 < len(args):
                 co_resolution = float(args[i_arg + 1])
                 i_arg += 2
@@ -827,18 +746,6 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 i_arg += 2
             elif a.startswith("--exclude-hubs="):
                 co_exclude_hubs = float(a.split("=", 1)[1])
-                i_arg += 1
-            elif a == "--max-concurrency" and i_arg + 1 < len(args):
-                label_max_concurrency = int(args[i_arg + 1])
-                i_arg += 2
-            elif a.startswith("--max-concurrency="):
-                label_max_concurrency = int(a.split("=", 1)[1])
-                i_arg += 1
-            elif a == "--batch-size" and i_arg + 1 < len(args):
-                label_batch_size = int(args[i_arg + 1])
-                i_arg += 2
-            elif a.startswith("--batch-size="):
-                label_batch_size = int(a.split("=", 1)[1])
                 i_arg += 1
             elif a in ("--no-viz", "--missing-only") or a.startswith("--min-community-size="):
                 i_arg += 1
@@ -893,9 +800,6 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             for node in _raw.get("nodes", [])
             if node.get("community") is not None and node.get("community_name")
         }
-        # Accumulate token usage from the labeling LLM calls so cluster-only mode
-        # reports real cost instead of a hardcoded zero (#1694). Stays {0, 0} on
-        # the reuse / no-label paths, which make no LLM calls.
         label_token_usage = {"input": 0, "output": 0}
         if existing_labels and not force_relabel:
             # Reuse saved labels, but don't blindly trust them: the graph may have
@@ -903,10 +807,8 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             # covers a DIFFERENT community and its old (LLM) name is wrong (#label-stale).
             # Validate each community against the membership signature saved beside the
             # labels; any community that changed (or has no saved label) is renamed by
-            # its current hub — deterministic and correct-by-construction — and the user
-            # is told to `purpory label` for fresh LLM names. Unchanged communities keep
-            # their saved label. When no signature sidecar exists (labels predate this),
-            # fall back to hub-filling only the communities missing a label.
+            # its current hub. Unchanged communities keep their saved label. When no
+            # signature sidecar exists, fill only communities missing a label.
             from purpory.cluster import community_member_sigs, label_communities_by_hub
 
             stored_analysis = _raw.get("analysis", {})
@@ -946,49 +848,19 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 print(
                     f"[purpory] community set changed since labeling "
                     f"({len(existing_labels)} saved labels, {len(communities)} communities now; "
-                    f"renamed {changed} community(ies) by their hub). "
-                    f"Run `purpory label` to refresh names with the LLM.",
+                    f"renamed {changed} community(ies) by their hub).",
                     file=sys.stderr,
                 )
         elif no_label and not force_relabel:
             labels = {cid: f"Community {cid}" for cid in communities}
         else:
-            # No labels file yet (or `purpory label` forced a refresh), so
-            # auto-name communities rather than leave "Community N" (#1097).
             from purpory.cluster import label_communities_by_hub
-            from purpory.llm import generate_community_labels
 
             print("Labeling communities...")
-            # Deterministic, LLM-free base labels: name each community after its
-            # highest-degree hub, so the report is readable even with no backend
-            # (previously bare "Community N"). A configured LLM backend overrides these
-            # with richer names below; its no-backend placeholder fallback does NOT.
             hub_labels = label_communities_by_hub(G, communities)
-            label_communities_input = communities
             labels = dict(hub_labels)
             if missing_only:
                 labels = {cid: existing_labels.get(cid, hub_labels[cid]) for cid in communities}
-                label_communities_input = {
-                    cid: members
-                    for cid, members in communities.items()
-                    if cid not in existing_labels or existing_labels.get(cid) == f"Community {cid}"
-                }
-            generated_labels, _ = generate_community_labels(
-                G,
-                label_communities_input,
-                backend=label_backend,
-                model=label_model,
-                gods=gods,
-                max_concurrency=label_max_concurrency,
-                batch_size=label_batch_size,
-                usage_out=label_token_usage,
-            )
-            # Only let the LLM OVERRIDE where it produced a real name — its no-backend
-            # fallback returns "Community {cid}" placeholders, which must not clobber
-            # the deterministic hub labels.
-            labels.update(
-                {cid: v for cid, v in generated_labels.items() if v and v != f"Community {cid}"}
-            )
         stages.mark("label")
         questions = suggest_questions(G, communities, labels)
         from purpory.cluster import community_member_sigs
@@ -1053,19 +925,7 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
         # exiting silently when a hook-driven rebuild happens to be running.
         ok = _rebuild_code(watch_path, force=force, no_cluster=no_cluster, block_on_lock=True)
         if ok:
-            print(
-                "Code graph updated. For doc/paper/image changes run /purpory --update in your AI assistant."
-            )
-            if not (
-                os.environ.get("GEMINI_API_KEY")
-                or os.environ.get("GOOGLE_API_KEY")
-                or os.environ.get("MOONSHOT_API_KEY")
-                or os.environ.get("DEEPSEEK_API_KEY")
-                or os.environ.get("PURPORY_NO_TIPS")
-            ):
-                print(
-                    "Tip: set GEMINI_API_KEY or GOOGLE_API_KEY to use Gemini for semantic extraction."
-                )
+            print("Code graph updated.")
         else:
             print(
                 "Nothing to update or rebuild failed — check output above.",
@@ -1073,14 +933,6 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             )
             sys.exit(1)
 
-    elif cmd == "check-update":
-        if len(argv) < 3:
-            print("Usage: purpory check-update <path>", file=sys.stderr)
-            sys.exit(1)
-        from purpory.watch import check_update
-
-        check_update(Path(argv[2]).resolve())
-        sys.exit(0)
     elif cmd == "export":
         import argparse
 
@@ -1241,17 +1093,12 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
         print_benchmark(result)
 
     elif cmd == "extract":
-        # Headless full-pipeline extraction for CI / scripts (#698).
-        # Runs detect -> AST extraction on code -> semantic LLM extraction on
-        # docs/papers/images -> merge -> build -> cluster -> write outputs.
-        # Calls extract_corpus_parallel directly using whichever backend has an
-        # API key set.
+        # Headless structural extraction for CI / scripts.
         if len(argv) < 3:
             print(
-                "Usage: purpory extract <path> [--backend gemini|kimi|claude|openai|deepseek|ollama] "
-                "[--model M] [--mode deep] [--out DIR] [--google-workspace] [--no-cluster] "
-                "[--max-workers N] [--token-budget N] [--max-concurrency N] "
-                "[--api-timeout S] [--postgres DSN] [--cargo] [--allow-partial] [--timing]",
+                "Usage: purpory extract <path> [--out DIR] [--google-workspace] "
+                "[--no-cluster] [--max-workers N] [--postgres DSN] [--cargo] "
+                "[--allow-partial] [--timing]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -1266,29 +1113,20 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 print(f"error: path not found: {target}", file=sys.stderr)
                 sys.exit(1)
 
-        backend: str | None = None
-        model: str | None = None
-        extract_mode: str | None = None
         out_dir: Path | None = None
         cli_postgres_dsn: str | None = None
         cli_cargo: bool = False
         cli_allow_partial: bool = False
         no_cluster = False
-        dedup_llm = False
         google_workspace = False
-        code_only = False
-        # Performance/tuning knobs (issue #792). None means "use library default".
         cli_max_workers: int | None = None
-        cli_token_budget: int | None = None
-        cli_max_concurrency: int | None = None
-        cli_api_timeout: float | None = None
         # Clustering tuning knobs
         cli_resolution: float = 1.0
         cli_exclude_hubs: float | None = None
         cli_excludes: list[str] = []
         cli_timing: bool = False
         # --force parity with `purpory update`: the flag or PURPORY_FORCE=1
-        # disables the incremental gate and skips semantic-cache reads (#1894).
+        # disables the incremental gate.
         force = os.environ.get("PURPORY_FORCE", "").lower() in ("1", "true", "yes")
 
         def _parse_int(name: str, raw: str) -> int:
@@ -1314,28 +1152,30 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             return v
 
         args = argv[3:] if has_path else argv[2:]
+        removed_llm_flags = (
+            "--backend",
+            "--model",
+            "--mode",
+            "--dedup-llm",
+            "--token-budget",
+            "--max-concurrency",
+            "--api-timeout",
+        )
+        if any(
+            argument == flag or argument.startswith(f"{flag}=")
+            for argument in args
+            for flag in removed_llm_flags
+        ):
+            print(
+                "error: model-backed extraction, labeling, and deduplication were removed; "
+                "LLM providers are used only for session reconciliation",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         i = 0
         while i < len(args):
             a = args[i]
-            if a == "--backend" and i + 1 < len(args):
-                backend = args[i + 1]
-                i += 2
-            elif a.startswith("--backend="):
-                backend = a.split("=", 1)[1]
-                i += 1
-            elif a == "--model" and i + 1 < len(args):
-                model = args[i + 1]
-                i += 2
-            elif a.startswith("--model="):
-                model = a.split("=", 1)[1]
-                i += 1
-            elif a == "--mode" and i + 1 < len(args):
-                extract_mode = args[i + 1]
-                i += 2
-            elif a.startswith("--mode="):
-                extract_mode = a.split("=", 1)[1]
-                i += 1
-            elif a == "--out" and i + 1 < len(args):
+            if a == "--out" and i + 1 < len(args):
                 out_dir = Path(args[i + 1])
                 i += 2
             elif a.startswith("--out="):
@@ -1344,11 +1184,8 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             elif a == "--no-cluster":
                 no_cluster = True
                 i += 1
-            elif a == "--dedup-llm":
-                dedup_llm = True
-                i += 1
             elif a == "--code-only":
-                code_only = True
+                # Kept as a compatibility no-op: extraction is structural-only.
                 i += 1
             elif a == "--google-workspace":
                 google_workspace = True
@@ -1358,24 +1195,6 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 i += 2
             elif a.startswith("--max-workers="):
                 cli_max_workers = _parse_int("--max-workers", a.split("=", 1)[1])
-                i += 1
-            elif a == "--token-budget" and i + 1 < len(args):
-                cli_token_budget = _parse_int("--token-budget", args[i + 1])
-                i += 2
-            elif a.startswith("--token-budget="):
-                cli_token_budget = _parse_int("--token-budget", a.split("=", 1)[1])
-                i += 1
-            elif a == "--max-concurrency" and i + 1 < len(args):
-                cli_max_concurrency = _parse_int("--max-concurrency", args[i + 1])
-                i += 2
-            elif a.startswith("--max-concurrency="):
-                cli_max_concurrency = _parse_int("--max-concurrency", a.split("=", 1)[1])
-                i += 1
-            elif a == "--api-timeout" and i + 1 < len(args):
-                cli_api_timeout = _parse_float("--api-timeout", args[i + 1])
-                i += 2
-            elif a.startswith("--api-timeout="):
-                cli_api_timeout = _parse_float("--api-timeout", a.split("=", 1)[1])
                 i += 1
             elif a == "--resolution" and i + 1 < len(args):
                 cli_resolution = _parse_float("--resolution", args[i + 1])
@@ -1420,21 +1239,6 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             print("error: must specify a path to scan or a --postgres DSN", file=sys.stderr)
             sys.exit(1)
 
-        _VALID_MODES = {"deep"}
-        if extract_mode is not None and extract_mode not in _VALID_MODES:
-            print(
-                f"error: unknown --mode '{extract_mode}'. "
-                f"Available: {', '.join(sorted(_VALID_MODES))}",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        deep_mode = extract_mode == "deep"
-        if deep_mode:
-            print("[purpory extract] deep mode enabled: richer semantic extraction")
-
-        # CLI flag wins over the provider's environment default.
-        if cli_api_timeout is not None:
-            os.environ["PURPORY_API_TIMEOUT"] = str(cli_api_timeout)
         if cli_max_workers is not None:
             os.environ["PURPORY_MAX_WORKERS"] = str(cli_max_workers)
 
@@ -1462,20 +1266,14 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
 
         manifest_path = purpory_out / "manifest.json"
         existing_graph_data = load_structural_graph(target)
-        # #1925: a missing manifest.json must not degrade to a full scan that
-        # discards the existing graph's semantic layer. An existing graph.json
-        # is a sufficient incremental baseline: detect_incremental treats an
-        # absent manifest as "everything is new" (re-extract all, nothing
-        # deleted), and build_merge + _stale_graph_sources reconcile replaced
-        # and genuinely-deleted sources against the current corpus, so doc/
-        # paper/image nodes survive a --code-only rebuild instead of being
-        # dropped with the rest of the committed graph.
+        # A missing manifest still uses the existing graph as the incremental
+        # baseline so structural nodes are replaced instead of duplicated.
         incremental_mode = existing_graph_data is not None if has_path else False
         # --force: full scan, not the manifest-gated incremental diff — a warm
         # unchanged tree would otherwise dispatch zero files (#1894).
         incremental_mode = incremental_mode and not force
         if force:
-            print("[purpory extract] --force: full re-scan, semantic cache reads skipped")
+            print("[purpory extract] --force: full structural re-scan")
         elif incremental_mode and not manifest_path.exists():
             print(
                 "[purpory extract] manifest.json missing; using existing "
@@ -1538,45 +1336,18 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             graph_stale_sources = []
             unchanged_total = 0
 
-        semantic_files = doc_files + paper_files + image_files
-        # --code-only: index code (pure local AST, no key) and skip the semantic
-        # (doc/paper/image) pass entirely, so a mixed repo doesn't hard-fail when no
-        # LLM backend is configured (#1734). Report what was skipped rather than
-        # silently dropping it.
-        if code_only and semantic_files:
+        from purpory.extract import _get_extractor
+
+        ast_doc_files = [path for path in doc_files if _get_extractor(path) is not None]
+        structural_files = code_files + ast_doc_files
+        non_code_files = doc_files + paper_files + image_files
+        skipped_files = [path for path in doc_files if path not in ast_doc_files] + paper_files + image_files
+        if skipped_files:
             print(
-                f"[purpory extract] --code-only: skipping {len(semantic_files)} "
-                f"non-code file(s) ({len(doc_files)} docs, {len(paper_files)} papers, "
-                f"{len(image_files)} images) — no LLM extraction"
+                f"[purpory extract] skipping {len(skipped_files)} non-structural file(s) "
+                f"({len(doc_files) - len(ast_doc_files)} docs, {len(paper_files)} papers, "
+                f"{len(image_files)} images); model-backed extraction was removed"
             )
-            semantic_files = []
-            doc_files = []
-            paper_files = []
-            image_files = []
-        if deep_mode and incremental_mode and not code_only:
-            # Deep mode reads/writes its own cache namespace
-            # (cache/semantic-deep/), so the manifest's changed-file gate is
-            # not a valid proxy for deep coverage: over a warm unchanged tree
-            # it dispatches zero files and `--mode deep` silently no-ops
-            # (#1894). Widen the semantic pass to the FULL live
-            # doc/paper/image set (``files_by_type`` from detect_incremental,
-            # which already excludes excluded files) and let the
-            # mode-namespaced cache decide hits/misses — the first deep run
-            # re-dispatches everything (deep namespace cold), later deep runs
-            # hit the deep cache.
-            _deep_all = [
-                Path(p)
-                for _ftype in ("document", "paper", "image")
-                for p in files_by_type.get(_ftype, [])
-            ]
-            if len(_deep_all) != len(semantic_files):
-                print(
-                    f"[purpory extract] deep mode: widening semantic pass from "
-                    f"{len(semantic_files)} changed to {len(_deep_all)} live "
-                    f"doc/paper/image file(s); the deep semantic cache decides "
-                    f"what is re-extracted"
-                )
-            semantic_files = _deep_all
         if incremental_mode:
             # Excluded-but-alive files are reported separately from deletions
             # (#1908): they still exist on disk, the scan just stopped
@@ -1607,105 +1378,7 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             )
         stages.mark("detect")
 
-        # Resolve the LLM backend only now that we know whether the corpus
-        # needs one. A code-only corpus is pure local AST and must not require
-        # an API key; the key is enforced below only when there's LLM work.
-        from purpory.llm import (
-            BACKENDS as _BACKENDS,
-            detect_backend as _detect_backend,
-            estimate_cost as _estimate_cost,
-            extract_corpus_parallel as _extract_corpus_parallel,
-            _format_backend_env_keys,
-            _get_backend_api_key,
-        )
-
-        needs_llm = bool(semantic_files) or dedup_llm
-        if backend is None and needs_llm:
-            backend = _detect_backend()
-        if backend is not None and backend not in _BACKENDS:
-            print(
-                f"error: unknown backend '{backend}'. Available: {', '.join(sorted(_BACKENDS))}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if needs_llm:
-            if backend is None:
-                reasons = []
-                if semantic_files:
-                    reasons.append(
-                        f"{len(semantic_files)} doc/paper/image file(s) need semantic extraction"
-                    )
-                if dedup_llm:
-                    reasons.append("--dedup-llm was passed")
-                hint = ""
-                if semantic_files:
-                    hint = (
-                        " Or pass --code-only to index just the code "
-                        "(local AST, no key) and skip the non-code files."
-                    )
-                print(
-                    "error: no LLM API key found (" + "; ".join(reasons) + "). "
-                    "Set GEMINI_API_KEY or GOOGLE_API_KEY (gemini), MOONSHOT_API_KEY "
-                    "(kimi), ANTHROPIC_API_KEY (claude), OPENAI_API_KEY (openai), "
-                    "DEEPSEEK_API_KEY (deepseek), or pass --backend. A code-only "
-                    "corpus needs no key." + hint,
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            if backend == "ollama":
-                from purpory.llm import _validate_ollama_base_url
-
-                _oll_url = os.environ.get(
-                    "OLLAMA_BASE_URL", _BACKENDS["ollama"].get("base_url", "")
-                )
-                try:
-                    _validate_ollama_base_url(_oll_url, warn=False)
-                except ValueError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    sys.exit(2)
-            if not _get_backend_api_key(backend):
-                allow_no_key = False
-                if backend == "ollama":
-                    from urllib.parse import urlparse
-
-                    ollama_url = os.environ.get(
-                        "OLLAMA_BASE_URL",
-                        _BACKENDS["ollama"].get("base_url", ""),
-                    )
-                    try:
-                        host = (urlparse(ollama_url).hostname or "").lower()
-                    except Exception:
-                        host = ""
-                    allow_no_key = host in ("localhost", "127.0.0.1", "::1") or host.startswith(
-                        "127."
-                    )
-                elif backend == "bedrock":
-                    allow_no_key = bool(
-                        os.environ.get("AWS_PROFILE")
-                        or os.environ.get("AWS_REGION")
-                        or os.environ.get("AWS_DEFAULT_REGION")
-                        or os.environ.get("AWS_ACCESS_KEY_ID")
-                    )
-                elif backend == "claude-cli":
-                    import shutil as _shutil
-
-                    allow_no_key = _shutil.which("claude") is not None
-                    if not allow_no_key:
-                        print(
-                            "error: backend 'claude-cli' requires the `claude` CLI on $PATH "
-                            "(install Claude Code and run `claude` once to authenticate).",
-                            file=sys.stderr,
-                        )
-                        sys.exit(1)
-                if not allow_no_key:
-                    print(
-                        f"error: backend '{backend}' requires {_format_backend_env_keys(backend)} to be set.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-
-        # Track whether this run's extraction was incomplete (a whole extractor
-        # pass crashed, or some semantic chunks failed). A partial result must not
+        # Track whether this run's extraction was incomplete. A partial result must not
         # be force-written over a good complete graph — the final write falls back
         # to the #479 shrink guard unless --allow-partial is set.
         _extraction_incomplete = False
@@ -1716,10 +1389,9 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
         if detection.get("walk_errors"):
             _extraction_incomplete = True
 
-        # AST extraction on code files. Empty code list (docs-only corpus) is
-        # the issue #698 case — skip cleanly instead of crashing inside extract().
+        # Structural extraction covers code and documents with native parsers.
         ast_result: dict = {"nodes": [], "edges": [], "input_tokens": 0, "output_tokens": 0}
-        if code_files:
+        if structural_files:
             from purpory.extract import extract as _ast_extract
 
             # Anchor the cache at the output root, not the scanned project:
@@ -1730,211 +1402,13 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             ast_kwargs: dict = {"cache_root": out_root, "root": target}
             if cli_max_workers is not None:
                 ast_kwargs["max_workers"] = cli_max_workers
-            print(f"[purpory extract] AST extraction on {len(code_files)} code files...")
+            print(f"[purpory extract] structural extraction on {len(structural_files)} files...")
             try:
-                ast_result = _ast_extract(code_files, **ast_kwargs)
+                ast_result = _ast_extract(structural_files, **ast_kwargs)
             except Exception as exc:
                 print(f"[purpory extract] AST extraction failed: {exc}", file=sys.stderr)
                 sys.exit(1)
         stages.mark("AST extract")
-
-        # Semantic extraction on docs/papers/images. Check cache first.
-        from purpory.cache import (
-            check_semantic_cache as _check_semantic_cache,
-            prune_semantic_cache as _prune_semantic_cache,
-            save_semantic_cache as _save_semantic_cache,
-        )
-
-        sem_result: dict = {
-            "nodes": [],
-            "edges": [],
-            "hyperedges": [],
-            "input_tokens": 0,
-            "output_tokens": 0,
-        }
-        # Semantic files whose extraction truncated this run. They are left
-        # unstamped in the manifest so detect_incremental re-queues them next run
-        # (mirrors the #933 failed-chunk handling); captured below before the
-        # _partial markers are stripped from the corpus.
-        _partial_semantic_files: set[str] = set()
-        sem_cache_hits = 0
-        sem_cache_misses = 0
-        # Deep mode uses its own namespace (cache/semantic-deep/) so deep and
-        # standard results for the same content never shadow each other (#1894).
-        sem_cache_mode = "deep" if deep_mode else None
-        # Entries are attributed to the extraction prompt that produced them, so
-        # a release that changes the prompt re-extracts rather than replaying the
-        # older vintage alongside the new one (#1939). Read and write must pass
-        # the same prompt, or the write lands where the next read won't look.
-        from purpory.llm import _extraction_system as _sem_prompt_for
-
-        sem_prompt = _sem_prompt_for(deep=deep_mode)
-        if semantic_files:
-            sem_paths_str = [str(p) for p in semantic_files]
-            if force:
-                # --force: skip the cache READ so every semantic file is
-                # re-dispatched; the save below still runs so the fresh
-                # results replace the stale entries.
-                cached_nodes, cached_edges, cached_hyperedges = [], [], []
-                uncached_paths = list(sem_paths_str)
-            else:
-                cached_nodes, cached_edges, cached_hyperedges, uncached_paths = (
-                    _check_semantic_cache(
-                        sem_paths_str,
-                        root=target,
-                        mode=sem_cache_mode,
-                        prompt=sem_prompt,
-                        cache_root=out_root,
-                    )
-                )
-            sem_cache_hits = len(semantic_files) - len(uncached_paths)
-            sem_cache_misses = len(uncached_paths)
-            sem_result["nodes"].extend(cached_nodes)
-            sem_result["edges"].extend(cached_edges)
-            sem_result["hyperedges"].extend(cached_hyperedges)
-            if sem_cache_hits:
-                print(
-                    f"[purpory extract] semantic cache: {sem_cache_hits} hit / {sem_cache_misses} miss"
-                )
-
-            if uncached_paths:
-                print(
-                    f"[purpory extract] semantic extraction on {len(uncached_paths)} files via {backend}..."
-                )
-                corpus_kwargs: dict = {
-                    "backend": backend,
-                    "model": model,
-                    "root": target,
-                    "cache_root": out_root,
-                }
-                if deep_mode:
-                    corpus_kwargs["deep_mode"] = True
-                if cli_token_budget is not None:
-                    corpus_kwargs["token_budget"] = cli_token_budget
-                if cli_max_concurrency is not None:
-                    corpus_kwargs["max_concurrency"] = cli_max_concurrency
-
-                # Minimal progress callback so the CLI is no longer silent
-                # during long local-inference runs (issue #792 addendum).
-                # Also track per-chunk success so we can fail loudly when
-                # every chunk errors (e.g. missing backend SDK package).
-                _chunk_stats = {"total": 0, "succeeded": 0}
-
-                def _progress(idx: int, total: int, _result: dict) -> None:
-                    _chunk_stats["total"] = total
-                    _chunk_stats["succeeded"] += 1
-                    print(
-                        f"[purpory extract] chunk {idx + 1}/{total} done",
-                        flush=True,
-                    )
-
-                corpus_kwargs["on_chunk_done"] = _progress
-
-                try:
-                    fresh = _extract_corpus_parallel(
-                        [Path(p) for p in uncached_paths],
-                        **corpus_kwargs,
-                    )
-                except ImportError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    sys.exit(1)
-                except Exception as exc:
-                    print(
-                        f"[purpory extract] semantic extraction failed: {exc}",
-                        file=sys.stderr,
-                    )
-                    fresh = {
-                        "nodes": [],
-                        "edges": [],
-                        "hyperedges": [],
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                    }
-                    _extraction_incomplete = True  # the semantic pass crashed
-
-                # on_chunk_done only fires after a chunk succeeds. If fresh
-                # semantic extraction was requested and no chunks completed,
-                # fail instead of writing an AST-only graph with exit 0.
-                if uncached_paths and _chunk_stats["succeeded"] == 0:
-                    print(
-                        f"[purpory extract] error: all semantic chunks failed "
-                        f"for backend '{backend}' ({len(uncached_paths)} uncached files) - "
-                        f"see per-chunk errors above. If you see 'requires the X package', "
-                        f"run `pip install X` and retry.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                # Some (but not all) chunks failed — the graph is missing nodes
-                # from the failed chunks, so it must not clobber a larger complete
-                # graph without an explicit --allow-partial override.
-                if _chunk_stats["total"] and _chunk_stats["succeeded"] < _chunk_stats["total"]:
-                    _extraction_incomplete = True
-                # Which files truncated this run (item markers + the empty-parse
-                # _partial_files set). Computed BEFORE the save so it can be passed
-                # as partial_source_files: without it, a file whose only truncated
-                # chunk parsed empty (so it has no item markers here) would be
-                # written as a complete cache entry, re-promoting it (#1950).
-                from purpory.llm import (
-                    _partial_source_files as _partial_sf,
-                    _strip_partial_markers as _strip_partial,
-                )
-
-                _partial_semantic_files = set(_partial_sf(fresh))
-                try:
-                    _save_semantic_cache(
-                        fresh.get("nodes", []),
-                        fresh.get("edges", []),
-                        fresh.get("hyperedges", []),
-                        root=target,
-                        allowed_source_files=uncached_paths,
-                        mode=sem_cache_mode,
-                        prompt=sem_prompt,
-                        partial_source_files=_partial_semantic_files or None,
-                        cache_root=out_root,
-                    )
-                except Exception as exc:
-                    print(
-                        f"[purpory extract] warning: could not write semantic cache: {exc}",
-                        file=sys.stderr,
-                    )
-                # Strip the markers before the corpus feeds the graph so the
-                # internal flag never leaks into graph.json.
-                _strip_partial(fresh)
-                sem_result["nodes"].extend(fresh.get("nodes", []))
-                sem_result["edges"].extend(fresh.get("edges", []))
-                sem_result["hyperedges"].extend(fresh.get("hyperedges", []))
-                sem_result["input_tokens"] += fresh.get("input_tokens", 0)
-                sem_result["output_tokens"] += fresh.get("output_tokens", 0)
-
-        # Prune orphaned semantic cache entries. The semantic cache is
-        # content-hash-keyed and unversioned, so it is never swept by the AST
-        # version-cleanup: every content change or file deletion leaves a
-        # permanent orphan that accumulates unbounded (#1527). Sweep it against
-        # the FULL live document set (``files_by_type`` — present in both the
-        # incremental and full branches), NOT the incremental ``semantic_files``
-        # changed-subset, which would delete every unchanged doc's valid entry.
-        # Best-effort: a prune failure must never break extraction.
-        try:
-            from purpory.cache import file_hash as _file_hash
-
-            _live_hashes: set[str] = set()
-            for _kind in ("document", "paper", "image"):
-                for _fp in files_by_type.get(_kind, []):
-                    _abs = Path(_fp)
-                    if not _abs.is_absolute():
-                        _abs = target / _abs
-                    if not _abs.is_file():
-                        continue  # deleted/missing — leave out so its entry is pruned
-                    try:
-                        _live_hashes.add(_file_hash(_abs, target, cache_root=out_root))
-                    except OSError:
-                        pass
-            _prune_semantic_cache(target, _live_hashes, cache_root=out_root)
-        except Exception as exc:
-            print(
-                f"[purpory extract] warning: could not prune semantic cache: {exc}", file=sys.stderr
-            )
-        stages.mark("semantic extract")
 
         pg_result: dict = {"nodes": [], "edges": []}
         if cli_postgres_dsn is not None:
@@ -1966,56 +1440,29 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 f"{len(cargo_result['edges'])} edges"
             )
 
-        # Merge AST + semantic + pg_result + cargo_result. Order matters for deduplication: passing AST
-        # first means semantic node attributes win on collision (richer labels
-        # for symbols also referenced in docs). Hyperedges only come from the
-        # semantic side.
+        # Merge structural sources only. Model-backed semantic extraction is not
+        # part of the graph pipeline.
         merged: dict = {
             "nodes": list(ast_result.get("nodes", []))
-            + list(sem_result.get("nodes", []))
             + list(pg_result.get("nodes", []))
             + list(cargo_result.get("nodes", [])),
             "edges": list(ast_result.get("edges", []))
-            + list(sem_result.get("edges", []))
             + list(pg_result.get("edges", []))
             + list(cargo_result.get("edges", [])),
-            "hyperedges": list(sem_result.get("hyperedges", [])),
-            "input_tokens": ast_result.get("input_tokens", 0) + sem_result.get("input_tokens", 0),
-            "output_tokens": ast_result.get("output_tokens", 0)
-            + sem_result.get("output_tokens", 0),
+            "hyperedges": [],
+            "input_tokens": 0,
+            "output_tokens": 0,
         }
 
-        # Build a manifest-safe files dict: only stamp semantic_hash for files
-        # that actually produced output (cache hit or fresh extraction). Files
-        # whose chunk failed have no source_file entry in sem_result — leaving
-        # their semantic_hash empty so detect_incremental re-queues them (#933).
-        # Path normalization against the scan root happens inside the helper
-        # (#1897) so fresh root-relative source_files match detect()'s
-        # absolute file lists.
-        _manifest_files = _stamped_manifest_files(
-            files_by_type, sem_result, target, partial_source_files=_partial_semantic_files
+        _manifest_files = {
+            "code": list(files_by_type.get("code", [])),
+            "document": list(files_by_type.get("document", [])),
+        }
+        _scan_corpus = (
+            {path for paths in _manifest_files.values() for path in paths}
+            if has_path else None
         )
-
-        # Files dispatched this run but dropped by _stamped_manifest_files
-        # above (failed chunk, LLM omission, or any future exclusion) still
-        # carry a stale semantic_hash from a prior successful run in the
-        # on-disk manifest; save_manifest's seed loop would otherwise copy it
-        # verbatim and mask the omission (#1948). Derived from semantic_files
-        # — what was actually SENT to the backend this run (narrowed by the
-        # incremental gate and --code-only, widened by deep mode) — NOT from
-        # files_by_type: the full live corpus includes untouched files that
-        # were never dispatched, and clearing those would blank the whole
-        # manifest on every partial incremental run, forcing a full-corpus
-        # re-extraction on the next one.
-        _stamped_semantic = {f for _flist in _manifest_files.values() for f in _flist}
-        _cleared_semantic = {str(p) for p in semantic_files} - _stamped_semantic
-
-        # Full-scan manifest saves prune rows for in-root files that left the
-        # scan corpus but still exist on disk (#1908). The corpus must be the
-        # RAW detect output (files_by_type), NOT the #933-stamp-filtered
-        # _manifest_files above — pruning to the filtered set would erase
-        # failed-chunk/omitted-doc rows and every doc row on --code-only runs.
-        _scan_corpus = {f for _fl in files_by_type.values() for f in _fl} if has_path else None
+        legacy_semantic_sources = [str(path) for path in non_code_files]
 
         if no_cluster:
             # --no-cluster: dump the raw merged extraction as graph.json.
@@ -2027,8 +1474,7 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             from purpory.build import dedupe_edges as _dedupe_edges, dedupe_nodes as _dedupe_nodes
             if (
                 incremental_mode
-                and not code_files
-                and not semantic_files
+                and not structural_files
                 and not deleted_files
                 and not pg_result.get("nodes")
                 and not pg_result.get("edges")
@@ -2039,9 +1485,10 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 # are deliberately NOT in deleted_files, #1908) but must still
                 # scrub the newly-excluded sources from the raw graph (#1909).
                 # This path never runs build_merge, so prune in place.
-                if graph_stale_sources:
+                prune_sources = graph_stale_sources + legacy_semantic_sources
+                if prune_sources:
                     _n_pruned = _prune_graph_sources(
-                        existing_graph_data or {}, graph_stale_sources
+                        existing_graph_data or {}, prune_sources
                     )
                     if _n_pruned:
                         from purpory.supervise.structural import store_structural_graph
@@ -2049,8 +1496,7 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                         store_structural_graph(existing_graph_data or {}, root=target)
                         print(
                             f"[purpory extract] pruned {_n_pruned} node(s) from "
-                            f"{len(graph_stale_sources)} source file(s) no longer "
-                            "in the scan (deleted or excluded)."
+                            f"{len(prune_sources)} source file(s) outside the structural graph."
                         )
                 print(
                     "[purpory extract] no incremental changes detected "
@@ -2060,10 +1506,9 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                     _save_manifest(
                         _manifest_files,
                         manifest_path=str(manifest_path),
-                        kind="both",
+                        kind="ast",
                         root=target,
                         scan_corpus=_scan_corpus,
-                        clear_semantic=_cleared_semantic,
                     )
                 except Exception as exc:
                     print(
@@ -2075,8 +1520,7 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
 
             merged["nodes"] = _dedupe_nodes(merged["nodes"])
             merged["edges"] = _dedupe_edges(merged["edges"])
-            # Backfill source_file from endpoint nodes — this raw path bypasses
-            # build_from_json's backfill, and semantic edges sometimes omit it (#1279).
+            # Backfill source_file from endpoint nodes on the raw path.
             _node_sf = {n.get("id"): n.get("source_file") for n in merged["nodes"]}
             for _e in merged["edges"]:
                 if not _e.get("source_file"):
@@ -2088,7 +1532,7 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 from purpory.export import graph_data as _graph_data
 
                 _prune_sources = list(deleted_files)
-                for _src in list(excluded_files) + graph_stale_sources:
+                for _src in list(excluded_files) + graph_stale_sources + legacy_semantic_sources:
                     if _src not in _prune_sources:
                         _prune_sources.append(_src)
                 _graph = _build_merge(
@@ -2109,8 +1553,8 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 _existing_n = len((existing_graph_data or {}).get("nodes", []))
                 if len(merged["nodes"]) < _existing_n:
                     print(
-                        "[purpory extract] error: extraction was incomplete (an AST/"
-                        "semantic pass failed) and the resulting --no-cluster graph is "
+                        "[purpory extract] error: AST extraction was incomplete and the "
+                        "resulting --no-cluster graph is "
                         f"smaller than the existing SQLite graph "
                         f"({len(merged['nodes'])} < {_existing_n} nodes). "
                         "Refusing to overwrite a complete graph with a partial one. Re-run after "
@@ -2122,28 +1566,19 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
 
             store_structural_graph(merged, root=target)
             stages.mark("write")
-            cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
             print(
                 "[purpory extract] stored SQLite graph — "
                 f"{len(merged['nodes'])} nodes, "
                 f"{len(merged.get('links', merged.get('edges', [])))} edges "
                 f"(no clustering)"
             )
-            if merged["input_tokens"] or merged["output_tokens"]:
-                print(
-                    f"[purpory extract] tokens: "
-                    f"{merged['input_tokens']:,} in / "
-                    f"{merged['output_tokens']:,} out, "
-                    f"est. cost: ${cost:.4f}"
-                )
             try:
                 _save_manifest(
                     _manifest_files,
                     manifest_path=str(manifest_path),
-                    kind="both",
+                    kind="ast",
                     root=target,
                     scan_corpus=_scan_corpus,
-                    clear_semantic=_cleared_semantic,
                 )
             except Exception as exc:
                 print(
@@ -2161,14 +1596,13 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
         from purpory.cluster import cluster as _cluster, score_all as _score_all
         from purpory.analyze import god_nodes as _god_nodes, surprising_connections as _surprising
 
-        dedup_backend = backend if dedup_llm else None
         if incremental_mode:
             # Prune everything the current scan no longer covers: genuinely
             # deleted manifest rows, excluded-but-alive manifest rows (#1908),
             # and the graph's own stale sources — which catches files that
             # became excluded without ever being manifest-listed (#1909).
             _prune_sources: list[str] = list(deleted_files)
-            for _src in list(excluded_files) + graph_stale_sources:
+            for _src in list(excluded_files) + graph_stale_sources + legacy_semantic_sources:
                 if _src not in _prune_sources:
                     _prune_sources.append(_src)
             G = _build_merge(
@@ -2176,17 +1610,15 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
                 graph_data=existing_graph_data,
                 prune_sources=_prune_sources or None,
                 dedup=True,
-                dedup_llm_backend=dedup_backend,
                 root=target,
             )
         else:
-            G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
+            G = _build([merged], dedup=True, root=target)
         stages.mark("build")
         if G.number_of_nodes() == 0:
             print(
                 "[purpory extract] graph is empty — extraction produced no nodes. "
-                "Possible causes: all files skipped, binary-only corpus, or LLM "
-                "returned no edges.",
+                "Possible causes: all files were skipped or the corpus is binary-only.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -2213,8 +1645,8 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             and G.number_of_nodes() < existing_node_count
         ):
             print(
-                "[purpory extract] error: extraction was incomplete (an AST/semantic "
-                "pass failed) and the resulting graph is smaller than the existing "
+                "[purpory extract] error: AST extraction was incomplete and the "
+                "resulting graph is smaller than the existing "
                 f"SQLite graph ({G.number_of_nodes()} < {existing_node_count} nodes). "
                 "Refusing to overwrite a complete graph with a "
                 "partial one. Re-run after fixing the failures, or pass --allow-partial "
@@ -2223,10 +1655,6 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             )
             sys.exit(1)
         stages.mark("store")
-        if merged.get("output_tokens", 0) > 0:
-            (purpory_out / ".purpory_semantic_marker").write_text(
-                json.dumps({"output_tokens": merged["output_tokens"]}), encoding="utf-8"
-            )
         analysis = {
             "communities": {str(k): v for k, v in communities.items()},
             "cohesion": {str(k): v for k, v in cohesion.items()},
@@ -2246,15 +1674,13 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             _save_manifest(
                 _manifest_files,
                 manifest_path=str(manifest_path),
-                kind="both",
+                kind="ast",
                 root=target,
                 scan_corpus=_scan_corpus,
-                clear_semantic=_cleared_semantic,
             )
         except Exception as exc:
             print(f"[purpory extract] warning: could not write manifest: {exc}", file=sys.stderr)
 
-        cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
         print(
             "[purpory extract] stored SQLite graph: "
             f"{G.number_of_nodes()} nodes, {G.number_of_edges()} edges, "
@@ -2264,20 +1690,9 @@ def dispatch_command(cmd: str, arguments: list[str] | tuple[str, ...] = ()) -> N
             _excl_note = f", {len(excluded_files)} excluded" if excluded_files else ""
             print(
                 f"[purpory extract] incremental summary: "
-                f"{sem_cache_hits + unchanged_total} files cached/unchanged, "
-                f"{len(code_files) + sem_cache_misses} re-extracted, "
+                f"{unchanged_total} files unchanged, "
+                f"{len(code_files)} re-extracted, "
                 f"{len(deleted_files)} deleted{_excl_note}"
-            )
-        elif sem_cache_hits:
-            print(
-                f"[purpory extract] semantic cache: {sem_cache_hits} cached, {sem_cache_misses} re-extracted"
-            )
-        if merged["input_tokens"] or merged["output_tokens"]:
-            print(
-                f"[purpory extract] tokens: "
-                f"{merged['input_tokens']:,} in / "
-                f"{merged['output_tokens']:,} out, "
-                f"est. cost (~{backend}): ${cost:.4f}"
             )
         stages.total()
 

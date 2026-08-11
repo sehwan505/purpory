@@ -269,7 +269,7 @@ def _file_node_id(rel_path: Path) -> str:
     one parent directory level, no extension. ``rel_path`` MUST be relative to
     the project root so top-level files collapse to a bare stem (``setup.py`` ->
     ``setup``) instead of picking up the root directory name. This must equal the
-    ID semantic extraction generates, or AST and semantic extraction split a file
+    ID an imported graph fragment generates, or two structural extractors split a file
     into two disconnected ghost nodes (#1033)."""
     return _make_id(_file_stem(rel_path))
 

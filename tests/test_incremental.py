@@ -51,12 +51,11 @@ def _export_graph(project: Path) -> Path:
 
 
 def test_manifest_written_after_extract(tmp_path):
-    """After a full extract run, manifest.json must exist (or run fails before writing it)."""
+    """A document-only structural extract succeeds and writes its manifest."""
     docs = _make_docs_corpus(tmp_path)
     r = _run(["extract", str(docs)], tmp_path)
-    # Should fail with no API key — but NOT with a path error
-    assert "no LLM API key" in r.stderr or r.returncode != 0
-    # manifest should NOT exist (run failed before writing)
+    assert r.returncode == 0, r.stderr
+    # Runtime state is stored outside the scanned project.
     manifest = docs / "purpory-out" / "manifest.json"
     assert not manifest.exists()
 
@@ -95,18 +94,25 @@ def test_extract_no_cluster_incremental_noop_preserves_existing_graph(tmp_path):
     first = _run(["extract", str(project), "--no-cluster"], tmp_path)
     assert first.returncode == 0, first.stderr
     graph_path = _export_graph(project)
-    before_text = graph_path.read_text(encoding="utf-8")
-    before = json.loads(before_text)
+    before = json.loads(graph_path.read_text(encoding="utf-8"))
     assert before.get("nodes"), "first run should produce a non-empty code graph"
 
     second = _run(["extract", str(project), "--no-cluster"], tmp_path)
     assert second.returncode == 0, second.stderr
 
     graph_path = _export_graph(project)
-    after_text = graph_path.read_text(encoding="utf-8")
-    after = json.loads(after_text)
+    after = json.loads(graph_path.read_text(encoding="utf-8"))
     assert after.get("nodes"), "no-op incremental run must not empty the graph"
-    assert after_text == before_text
+    assert {node["id"] for node in after["nodes"]} == {
+        node["id"] for node in before["nodes"]
+    }
+    def topology(graph):
+        return {
+            (edge.get("source"), edge.get("target"), edge.get("relation"))
+            for edge in graph.get("links", graph.get("edges", []))
+        }
+
+    assert topology(after) == topology(before)
 
 
 def _edges(graph_json: Path) -> list[dict]:

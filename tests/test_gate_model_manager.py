@@ -8,7 +8,11 @@ import pytest
 
 from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
 from purpory.ollama import ollama_urls
-from purpory.supervise.gate.runtime import GateModelManager, _request_json
+from purpory.supervise.gate.runtime import (
+    GateModelManager,
+    _request_json,
+    configured_provider,
+)
 from purpory.supervise.model_cli import dispatch_model
 
 
@@ -138,6 +142,29 @@ def test_model_selection_persists_for_detached_workers(
     assert configured_model("reconcile") == "custom:7b"
     assert json.loads((tmp_path / "models.json").read_text(encoding="utf-8")) == {
         "reconcile": "custom:7b"
+    }
+
+
+def test_external_reconcile_selection_uses_provider_registry_without_ollama(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PURPORY_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    result = GateModelManager().select_model(
+        "gpt-4.1-mini",
+        role="reconcile",
+        provider="openai",
+    )
+
+    from purpory.supervise.gate.runtime import configured_model
+
+    assert result["provider"] == "openai"
+    assert result["ready"] is True
+    assert configured_provider("reconcile") == "openai"
+    assert configured_model("reconcile") == "gpt-4.1-mini"
+    assert json.loads((tmp_path / "models.json").read_text(encoding="utf-8")) == {
+        "reconcile": {"model": "gpt-4.1-mini", "provider": "openai"}
     }
 
 

@@ -476,11 +476,14 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
         elif method == "POST" and path == "/api/model/select":
             model = str(payload.get("model", "")).strip()
             role = str(payload.get("role", "gate")).strip()
+            provider = str(payload.get("provider", "ollama")).strip()
             if not model:
                 self._error(HTTPStatus.BAD_REQUEST, "model parameter is required")
                 return
-            result = service.select_model(model, role=role)
-            self.server.events.publish("model", {"model": model, "role": role})
+            result = service.select_model(model, role=role, provider=provider)
+            self.server.events.publish(
+                "model", {"model": model, "role": role, "provider": provider}
+            )
             self._json(result)
         elif method == "POST" and path == "/api/model/install":
             model = str(payload.get("model", "")).strip()
