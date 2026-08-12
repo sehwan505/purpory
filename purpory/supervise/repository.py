@@ -4054,7 +4054,7 @@ class ContextGraphRepository:
             rows = connection.execute(
                 "SELECT key FROM deliveries WHERE session_id = ?"
                 + (" AND project = ?" if project is not None else "")
-                + " ORDER BY key ASC",
+                + " ORDER BY delivered_at DESC, key ASC",
                 (normalized, project) if project is not None else (normalized,),
             ).fetchall()
         return [str(row["key"]) for row in rows]

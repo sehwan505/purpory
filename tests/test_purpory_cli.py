@@ -51,7 +51,7 @@ def test_prepare_emits_machine_readable_context_result(monkeypatch, capsys, tmp_
         [
             "purpory",
             "prepare",
-            "database",
+            "decision.database",
             "--session",
             "cli-session",
             "--db",
@@ -70,7 +70,10 @@ def test_prepare_emits_machine_readable_context_result(monkeypatch, capsys, tmp_
     result = json.loads(capsys.readouterr().out)
     assert result["action"] == "retrieve"
     assert result["proposal"]["reasonCode"] == "GATE_UNAVAILABLE"
-    assert ContextGraphRepository(database).list_gate_decisions()[0]["inputText"] == "database"
+    assert (
+        ContextGraphRepository(database).list_gate_decisions()[0]["inputText"]
+        == "decision.database"
+    )
 
 
 def test_remember_stores_human_context(monkeypatch, capsys, tmp_path) -> None:

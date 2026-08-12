@@ -75,6 +75,24 @@ def _service_with_graph(tmp_path: Path) -> ContextService:
     return service
 
 
+def _use_semantic_hits(monkeypatch, service: ContextService, *identifiers: str) -> None:
+    nodes = service.repository.search_retrieval_nodes(
+        project=service.project_id,
+        memory_project=service.project_id,
+        code_projects=[service.project_id],
+        terms=identifiers,
+    )
+    assert len(nodes) == len(identifiers)
+    hits = [
+        {"nodeId": node["id"], "similarity": 0.9 - rank / 100}
+        for rank, node in enumerate(nodes)
+    ]
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings",
+        lambda *args, **kwargs: hits,
+    )
+
+
 def test_catalog_is_compact_and_never_copies_memory_values(tmp_path: Path) -> None:
     service = _service_with_graph(tmp_path)
 
@@ -88,9 +106,10 @@ def test_catalog_is_compact_and_never_copies_memory_values(tmp_path: Path) -> No
 
 
 def test_search_connects_distinct_concepts_through_the_context_graph(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     service = _service_with_graph(tmp_path)
+    _use_semantic_hits(monkeypatch, service, "AuthService", "DatabasePool")
 
     result = service._provisioner().search(
         "auth database",
@@ -113,9 +132,10 @@ def test_search_connects_distinct_concepts_through_the_context_graph(
 
 
 def test_search_uses_only_terms_present_in_the_context_vocabulary(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     service = _service_with_graph(tmp_path)
+    _use_semantic_hits(monkeypatch, service, "AuthService", "DatabasePool")
 
     result = service._provisioner().search(
         "인증과 데이터베이스 연결",
@@ -202,9 +222,10 @@ def test_context_steps_are_internal_to_prepare(tmp_path: Path) -> None:
 
 
 def test_search_expands_korean_developer_terms_without_an_llm(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     service = _service_with_graph(tmp_path)
+    _use_semantic_hits(monkeypatch, service, "AuthService", "DatabasePool")
 
     result = service._provisioner().search(
         "인증과 데이터베이스를 찾아줘",
@@ -223,8 +244,11 @@ def test_search_expands_korean_developer_terms_without_an_llm(
     assert "database" in expansions["데이터베이스를"]
 
 
-def test_session_scope_can_recall_previously_delivered_memory(tmp_path: Path) -> None:
+def test_session_scope_can_recall_previously_delivered_memory(
+    tmp_path: Path, monkeypatch
+) -> None:
     service = _service_with_graph(tmp_path)
+    _use_semantic_hits(monkeypatch, service, "decision.auth.ttl")
     memory_search = service._provisioner().search(
         "token expiry",
         session_id="agent-a",
@@ -265,7 +289,7 @@ def test_deliver_records_project_local_reconciled_memory(tmp_path: Path) -> None
     assert applied["changes"][0]["action"] == "created"
 
     search = service._provisioner().search(
-        "long term autonomy durable intent",
+        key,
         session_id="agent-a",
         scopes=["human"],
         connect=False,
@@ -342,10 +366,14 @@ def test_memory_body_text_requires_semantic_evidence(
     assert result["candidates"] == []
 
 
-def test_search_result_covers_distinct_terms_before_filling_by_score(
-    tmp_path: Path,
+def test_natural_language_does_not_use_identifier_graph_fallback(
+    tmp_path: Path, monkeypatch
 ) -> None:
     service = _service_with_graph(tmp_path)
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings",
+        lambda *args, **kwargs: [],
+    )
 
     result = service._provisioner().search(
         "auth token database",
@@ -355,15 +383,30 @@ def test_search_result_covers_distinct_terms_before_filling_by_score(
         connect=False,
     )
 
-    assert {term for item in result["candidates"] for term in item["matchedTerms"]} == {
-        "auth",
-        "token",
-        "database",
-    }
-    assert {item["namespace"] for item in result["candidates"]} == {
-        "memory",
-        "material",
-    }
+    assert result["candidates"] == []
+    assert result["connections"] == []
+    assert result["exploration"]["frontier"] == []
+    assert result["awareness"] == []
+
+
+def test_project_name_is_not_an_identifier_anchor(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "purpory"
+    root.mkdir()
+    service = _service_with_graph(root)
+    service.set_topic("intent.purpory", value="Purpory product purpose")
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings",
+        lambda *args, **kwargs: [],
+    )
+
+    result = service._provisioner().search(
+        "What is Purpory product purpose?",
+        session_id="agent-a",
+        scopes=["human", "material"],
+        connect=False,
+    )
+
+    assert result["candidates"] == []
 
 
 def test_expand_is_relation_filtered_and_bounded(tmp_path: Path) -> None:
@@ -417,7 +460,7 @@ def test_deliver_records_exact_context_and_deduplicates_per_session(
 
 
 def test_prepare_includes_ready_context_without_public_primitives(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     from purpory.supervise.gate.contract import GateProposal, GateRequest, ProviderResult
 
@@ -443,6 +486,7 @@ def test_prepare_includes_ready_context_without_public_primitives(
 
     service = _service_with_graph(tmp_path)
     service.gate_provider = Provider()
+    _use_semantic_hits(monkeypatch, service, "AuthService", "DatabasePool")
 
     result = service.prepare(
         "인증 흐름이 DB와 어떻게 연결돼?",
@@ -546,7 +590,7 @@ def test_prepare_surfaces_new_hint_when_direct_anchor_was_already_delivered(
 
 
 def test_search_surfaces_cross_session_associations_as_awareness_not_evidence(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     service = _service_with_graph(tmp_path)
     service.set_topic(
@@ -558,6 +602,7 @@ def test_search_surfaces_cross_session_associations_as_awareness_not_evidence(
         "knowledge.audit-constraint", project=service.project_id
     )
     assert auth is not None and audit is not None
+    _use_semantic_hits(monkeypatch, service, "decision.auth.ttl")
     service._provisioner().deliver(
         [auth["id"], audit["id"]], session_id="past-session", token_budget=1_000
     )
