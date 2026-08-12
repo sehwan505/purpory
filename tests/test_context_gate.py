@@ -98,6 +98,119 @@ def test_search_with_evidence_retrieves_and_records_exact_delivery(tmp_path: Pat
     )
 
 
+def test_gate_receives_bounded_human_orientation_without_exposing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict = {}
+
+    class InspectingProvider:
+        def propose(self, request: GateRequest) -> ProviderResult:
+            captured["orientation"] = request.context_catalog["orientation"]
+            return ProviderResult(
+                proposal=_proposal(
+                    "search",
+                    query=request.message,
+                    scopes=["human", "session"],
+                    reason="CONTEXT_SEARCH_REQUIRED",
+                ),
+                model_id="stub/qwen",
+                model_revision="test",
+                latency_ms=1,
+            )
+
+    service = ContextService(
+        db_path=tmp_path / "context.db",
+        root=tmp_path,
+        gate_provider=InspectingProvider(),
+    )
+    monkeypatch.setattr(
+        "purpory.supervise.embeddings.EmbeddingService.run",
+        lambda *args, **kwargs: {},
+    )
+    service.set_topic(
+        "intent.phase-two",
+        value="2차 개선은 human intent를 먼저 찾아 gate에 제공한다.",
+        kind="decision",
+    )
+    topic = service.repository.get_topic(
+        "intent.phase-two", project=service.project_id
+    )
+    assert topic is not None
+
+    def semantic_hits(*args, **kwargs):
+        assert kwargs["include_memory"] is True
+        assert kwargs["include_code"] is False
+        assert "minimum_similarity" not in kwargs
+        return [{"nodeId": topic["id"], "similarity": 0.95}]
+
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings", semantic_hits
+    )
+
+    result = service.prepare("2차가 정확히 뭐야?", session_id="session-a")
+
+    assert len(captured["orientation"]) == 1
+    assert captured["orientation"][0]["key"] == "intent.phase-two"
+    assert "human intent" in captured["orientation"][0]["preview"]
+    assert result["action"] == "retrieve"
+    assert [item["key"] for item in result["delivery"]] == ["intent.phase-two"]
+    assert "orientation" not in result["context"]["manifest"]
+    assert "human intent" not in json.dumps(result["context"]["manifest"])
+
+
+def test_recent_human_delivery_orients_follow_up_at_the_default_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict = {}
+
+    class InspectingProvider:
+        def propose(self, request: GateRequest) -> ProviderResult:
+            captured["orientation"] = request.context_catalog["orientation"]
+            return ProviderResult(
+                proposal=_proposal("skip", reason="SELF_CONTAINED"),
+                model_id="stub/qwen",
+                model_revision="test",
+                latency_ms=1,
+            )
+
+    service = ContextService(
+        db_path=tmp_path / "context.db",
+        root=tmp_path,
+        gate_provider=InspectingProvider(),
+    )
+    monkeypatch.setattr(
+        "purpory.supervise.embeddings.EmbeddingService.run",
+        lambda *args, **kwargs: {},
+    )
+    service.set_topic(
+        "decision.phase-two",
+        value="2차 개선은 최근 session intent를 gate에 제공한다.",
+        kind="decision",
+    )
+    topic = service.repository.get_topic(
+        "decision.phase-two", project=service.project_id
+    )
+    assert topic is not None
+    service.repository.record_node_delivery(
+        "session-a",
+        topic["id"],
+        topic["key"],
+        topic["value"],
+        project=service.project_id,
+        session_context={"projectId": service.project_id},
+    )
+    monkeypatch.setattr(
+        "purpory.supervise.provisioning.search_embeddings",
+        lambda *args, **kwargs: [],
+    )
+
+    service.prepare("그 2차가 뭐였지?", session_id="session-a")
+
+    assert [item["key"] for item in captured["orientation"]] == [
+        "decision.phase-two"
+    ]
+
+
 def test_gate_retrieves_structural_nodes_without_seed_topics(tmp_path: Path) -> None:
     output = tmp_path / "purpory-out"
     output.mkdir()
@@ -143,6 +256,12 @@ def test_gate_retrieves_structural_nodes_without_seed_topics(tmp_path: Path) -> 
     assert result["delivery"][0]["origin"] == "structural"
     assert "TokenService" in result["delivery"][0]["rendered"]
     assert service.repository.list_topics() == []
+
+    unanchored = service.prepare(
+        "Where is token handling implemented?", session_id="session-b"
+    )
+    assert unanchored["action"] == "ask"
+    assert unanchored["delivery"] == []
 
 
 def test_search_without_evidence_asks_and_deduplicates_gap(tmp_path: Path) -> None:
@@ -264,6 +383,24 @@ def test_skip_never_searches_or_injects(tmp_path: Path) -> None:
     assert service.repository.session_view() == []
 
 
+def test_greeting_skips_without_calling_the_gate_model(tmp_path: Path) -> None:
+    class UnexpectedProvider:
+        def propose(self, request: GateRequest) -> ProviderResult:
+            raise AssertionError("greetings must bypass the gate model")
+
+    service = ContextService(
+        db_path=tmp_path / "context.db",
+        root=tmp_path,
+        gate_provider=UnexpectedProvider(),
+    )
+
+    result = service.prepare("안녕하세요", session_id="session-a")
+
+    assert result["action"] == "skip"
+    assert result["proposal"]["reasonCode"] == "SELF_CONTAINED"
+    assert result["delivery"] == []
+
+
 def test_provider_failure_uses_audited_conservative_search(tmp_path: Path) -> None:
     service = ContextService(
         db_path=tmp_path / "context.db",
@@ -276,6 +413,7 @@ def test_provider_failure_uses_audited_conservative_search(tmp_path: Path) -> No
 
     assert result["action"] == "retrieve"
     assert result["proposal"]["reasonCode"] == "GATE_UNAVAILABLE"
+    assert "material" not in result["proposal"]["scopes"]
     assert "synthetic timeout" in result["fallback"]
 
 
@@ -390,7 +528,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
                     "choices": [
                         {
                             "message": {
-                                "content": "SEARCH\n"
+                                "content": captured.get("response", "SEARCH")
                             }
                         }
                     ]
@@ -417,23 +555,55 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
         session_id="session-a",
         project="demo",
         working_directory="/tmp/demo",
+        context_catalog={
+            "orientation": [
+                {
+                    "key": "decision.auth",
+                    "label": "Authentication policy",
+                    "kind": "decision",
+                    "preview": "Use short-lived access tokens.",
+                }
+            ]
+        },
     )
 
     result = provider.propose(request)
 
     assert result.proposal.action == "search"
     assert result.proposal.query == "전에 정한 인증 정책"
-    assert result.proposal.scopes == ("human", "material", "resource", "session")
+    assert result.proposal.scopes == ("human", "resource", "session")
     assert result.proposal.reason_code == "CONTEXT_SEARCH_REQUIRED"
     assert "response_format" not in captured["body"]
-    assert "temperature" not in captured["body"]
+    assert captured["body"]["temperature"] == 0
     assert captured["body"]["max_tokens"] == 8
     assert captured["body"]["reasoning_effort"] == "none"
-    assert captured["body"]["messages"][1]["content"] == "전에 정한 인증 정책"
+    classifier_message = captured["body"]["messages"][1]["content"]
+    assert "CURRENT REQUEST:\n전에 정한 인증 정책" in classifier_message
+    assert "decision.auth" in classifier_message
+    assert "Use short-lived access tokens." in classifier_message
     system_prompt = captured["body"]["messages"][0]["content"]
     assert "exactly one word" in system_prompt
-    assert "SKIP, SEARCH, or ASK" in system_prompt
+    assert "SKIP, SEARCH, LOOKUP, or ASK" in system_prompt
     assert captured["closed"] is True
+
+    captured["response"] = "LOOKUP"
+    lookup_request = GateRequest.create(
+        message="현재 코드의 gate parser를 확인해줘",
+        session_id="session-a",
+        project="demo",
+        working_directory="/tmp/demo",
+    )
+
+    lookup_result = provider.propose(lookup_request)
+
+    assert lookup_result.proposal.action == "search"
+    assert lookup_result.proposal.scopes == (
+        "human",
+        "material",
+        "resource",
+        "session",
+    )
+    assert lookup_result.proposal.reason_code == "CODE_CONTEXT_REQUIRED"
 
     class SizedIds:
         def __len__(self) -> int:
@@ -455,7 +625,7 @@ def test_qwen_provider_expands_strict_model_classification(monkeypatch) -> None:
     with pytest.raises(GateProviderError, match="exceeding operating limit 19"):
         provider.propose(long_request)
 
-    assert captured["calls"] == 1
+    assert captured["calls"] == 2
 
 
 def test_qwen_provider_rejects_non_classifier_response(monkeypatch) -> None:

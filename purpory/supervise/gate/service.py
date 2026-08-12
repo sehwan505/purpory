@@ -19,6 +19,12 @@ from purpory.supervise.provisioning import MAX_AWARENESS_HINTS, ContextProvision
 from purpory.supervise.repository import ContextGraphRepository
 
 MAX_DIRECT_EVIDENCE = 2
+MAX_ORIENTATION_HINTS = 2
+
+
+def _is_greeting(message: str) -> bool:
+    normalized = message.strip().lower().rstrip("!?. ")
+    return normalized in {"hi", "hello", "hey", "안녕", "안녕하세요", "반가워"}
 
 
 def render_awareness(hints: Sequence[dict[str, Any]]) -> str:
@@ -83,9 +89,7 @@ def _select_delivery_hints(
 
 
 def _fallback_proposal(request: GateRequest) -> GateProposal:
-    normalized = request.message.strip().lower().rstrip("!?. ")
-    greetings = {"hi", "hello", "hey", "안녕", "안녕하세요", "반가워"}
-    if normalized in greetings:
+    if _is_greeting(request.message):
         return GateProposal.from_mapping(
             {
                 "action": "skip",
@@ -111,7 +115,7 @@ def _fallback_proposal(request: GateRequest) -> GateProposal:
         {
             "action": "search",
             "query": request.message,
-            "scopes": ["human", "resource", "material", "session"],
+            "scopes": ["human", "resource", "session"],
             "keywords": [],
             "reasonCode": "GATE_UNAVAILABLE",
             "clarification": None,
@@ -163,6 +167,47 @@ class GatewayService:
             session_id, project=project
         )[:1_000]
         catalog = provisioner.catalog(session_id=session_id)
+        orientation: list[dict[str, Any]] = []
+        if catalog["counts"]["human"]:
+            orientation_result = provisioner.search(
+                message,
+                session_id=session_id,
+                scopes=["human", "session"],
+                active_paths=active_paths,
+                previous_deliveries=previous,
+                reference_query=message,
+                limit=MAX_ORIENTATION_HINTS,
+                connect=False,
+            )
+            orientation = [
+                {
+                    "key": candidate["key"],
+                    "label": candidate["label"],
+                    "kind": candidate["kind"],
+                    "source": candidate.get("source"),
+                    "preview": candidate.get("preview"),
+                }
+                for candidate in orientation_result["candidates"][:MAX_ORIENTATION_HINTS]
+            ]
+        oriented_keys = {item["key"] for item in orientation}
+        for delivered_key in previous:
+            if len(orientation) >= MAX_ORIENTATION_HINTS:
+                break
+            topic_key = delivered_key.removeprefix("memory:")
+            if topic_key in oriented_keys:
+                continue
+            topic = self.repository.get_topic(topic_key, project=project)
+            if topic is None:
+                continue
+            orientation.append(
+                {
+                    "key": topic["key"],
+                    "label": topic["key"],
+                    "kind": topic["kind"],
+                    "source": topic.get("source"),
+                    "preview": str(topic.get("value") or "")[:240] or None,
+                }
+            )
         namespaces = [str(item["name"]) for item in catalog["topicNamespaces"]][:MAX_NAMESPACES]
         request = GateRequest.create(
             message=message,
@@ -173,12 +218,15 @@ class GatewayService:
             previous_deliveries=previous,
             available_namespaces=namespaces,
             token_budget=token_budget,
-            context_catalog=catalog,
+            context_catalog={**catalog, "orientation": orientation},
         )
 
         provider_result = None
         fallback_reason = None
-        if self.provider is not None:
+        greeting = _is_greeting(message)
+        if greeting:
+            proposal = _fallback_proposal(request)
+        elif self.provider is not None:
             limit_check = getattr(self.provider, "input_limit_reason", None)
             try:
                 limit_reason = limit_check(request) if callable(limit_check) else None
@@ -193,7 +241,8 @@ class GatewayService:
                 fallback_reason = f"{limit_reason}; model invocation skipped"
         else:
             fallback_reason = "gate provider is not configured"
-        proposal = provider_result.proposal if provider_result else _fallback_proposal(request)
+        if not greeting:
+            proposal = provider_result.proposal if provider_result else _fallback_proposal(request)
 
         delivery: list[dict[str, Any]] = []
         omitted: list[dict[str, Any]] = []
@@ -221,6 +270,7 @@ class GatewayService:
                 keywords=proposal.keywords,
                 active_paths=active_paths,
                 previous_deliveries=previous,
+                reference_query=message,
             )
             delivery_candidates = list(
                 search_result["candidates"][:MAX_DIRECT_EVIDENCE]

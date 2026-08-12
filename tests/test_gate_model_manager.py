@@ -239,7 +239,14 @@ def test_prepare_auto_discovers_managed_provider(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["purpory", "prepare", "hello", "--db", str(tmp_path / "context.db"), "--json"],
+        [
+            "purpory",
+            "prepare",
+            "What is the project status?",
+            "--db",
+            str(tmp_path / "context.db"),
+            "--json",
+        ],
     )
 
     from purpory.__main__ import main

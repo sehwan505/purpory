@@ -276,7 +276,7 @@ def test_agent_token_can_prepare_context_but_cannot_curate_topics(
 ) -> None:
     payload = json.dumps(
         {
-            "message": "database",
+            "message": "decision.database",
             "sessionId": "agent-session",
             "tokenBudget": 512,
         }

@@ -359,7 +359,7 @@ def test_retrieval_combines_selected_views_from_multiple_git_resources(
         scopes=("material",),
     )
     resources = service._provisioner().search(
-        "Secondary service",
+        '"secondary"',
         session_id="multi-resource",
         scopes=("resource",),
     )

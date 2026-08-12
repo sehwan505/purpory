@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 GATE_SCHEMA_VERSION = 1
-PROMPT_VERSION = "purpory-gate-v3"
+PROMPT_VERSION = "purpory-gate-v5"
 
 MODEL_ACTIONS = frozenset({"skip", "search", "ask"})
 FINAL_ACTIONS = frozenset({"skip", "retrieve", "ask"})

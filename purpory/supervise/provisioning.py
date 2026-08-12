@@ -17,6 +17,16 @@ from purpory.supervise.resolve import rendered_injection, resolve_topic
 
 CONTEXT_SCHEMA_VERSION = 2
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[가-힣]{2,}")
+EXPLICIT_REFERENCE_RE = re.compile(
+    r"(?:"
+    r"(?:@(?:repo|root)/)?[A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+"
+    r"|[A-Z][A-Za-z0-9]*"
+    r"|[A-Z][A-Z0-9_]*"
+    r"|_?[a-z][A-Za-z0-9]*_[A-Za-z0-9_]+"
+    r"|\.?[A-Za-z_][A-Za-z0-9_]*\(\)"
+    r"|(?:[a-z][a-z0-9_-]*\.)+[A-Za-z0-9_()-]+"
+    r")"
+)
 SEARCH_STOPWORDS = frozenset(
     {
         "a",
@@ -188,6 +198,22 @@ def _tokens(values: Iterable[str]) -> list[str]:
             expanded.append(variant)
             expanded.extend(SEARCH_TERM_ALIASES.get(variant, ()))
     return list(dict.fromkeys(expanded))
+
+
+def _explicit_references(query: str, *, excluded: Iterable[str] = ()) -> list[str]:
+    excluded_names = {value.lower() for value in excluded}
+    quoted = re.findall(r'["`]([^"`]+)["`]', query)
+    unquoted = re.sub(r'["`][^"`]+["`]', " ", query)
+    parts = [part.strip(".,:;!?`'\"[]{}") for part in unquoted.split()]
+    references = [
+        part
+        for part in parts[:64]
+        if EXPLICIT_REFERENCE_RE.fullmatch(part)
+        and part.lower() not in excluded_names
+        and part.lower() not in SEARCH_STOPWORDS
+        and (len(parts) == 1 or not re.fullmatch(r"[A-Z][a-z0-9]+", part))
+    ]
+    return list(dict.fromkeys((*quoted, *references)))
 
 
 def _normalize_path(value: object) -> str:
@@ -404,6 +430,7 @@ class ContextProvisioningService:
         keywords: Sequence[str] = (),
         active_paths: Sequence[str | Path] = (),
         previous_deliveries: Sequence[str] = (),
+        reference_query: str | None = None,
         limit: int = 12,
         connect: bool = True,
     ) -> dict[str, Any]:
@@ -435,6 +462,20 @@ class ContextProvisioningService:
             term: _tokens((term,)) for term in raw_input_terms if term not in SEARCH_STOPWORDS
         }
         active = {self._active_path(path) for path in selected_paths}
+        project_names = {
+            self.root.name,
+            Path(self.graph_project).name,
+            *(Path(project).name for project in self.graph_projects),
+        }
+        identifier_terms = _explicit_references(
+            normalized_query if reference_query is None else reference_query.strip(),
+            excluded=project_names,
+        )
+        lookup_paths = [
+            self._active_path(reference)
+            for reference in identifier_terms
+            if "/" in reference or "\\" in reference
+        ]
         semantic_failed = False
         try:
             semantic_hits = search_embeddings(
@@ -459,8 +500,8 @@ class ContextProvisioningService:
                 memory_project=self.project,
                 code_projects=self.graph_projects,
                 resource_node_ids=self.resource_node_ids,
-                terms=expanded_input_terms,
-                active_paths=sorted(active),
+                terms=identifier_terms,
+                active_paths=lookup_paths,
                 include_memory=("human" in selected_scopes or "session" in selected_scopes),
                 include_code="material" in selected_scopes,
                 include_resources="resource" in selected_scopes,
@@ -970,7 +1011,6 @@ class ContextProvisioningService:
             str(node.get("label") or ""),
             str(node.get("source") or ""),
             str(node.get("type") or ""),
-            str(node.get("value") or ""),
         ]
         return " ".join(values).lower()
 
