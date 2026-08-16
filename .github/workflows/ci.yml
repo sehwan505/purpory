@@ -2,60 +2,71 @@ name: CI
 
 on:
   push:
-    branches: ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "main"]
   pull_request:
-    branches: ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "main"]
-  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  cli:
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
-
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./internal/cli ./internal/launch
+      - run: go build ./cmd/purpory
+      - name: Test local CLI installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          install_root=$(mktemp -d)
+          PURPORY_BIN_DIR="$install_root/bin" ./install.sh cli --local
+          "$install_root/bin/purpory" version
+          PURPORY_BIN_DIR="$install_root/bin" ./install.sh cli --uninstall
+          test ! -e "$install_root/bin/purpory"
+      - name: Test local CLI installer on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PURPORY_BIN_DIR = Join-Path $env:RUNNER_TEMP "purpory-bin"
+          ./install.ps1 -Component cli -Local
+          & "$env:PURPORY_BIN_DIR/purpory.exe" version
+          ./install.ps1 -Component cli -Uninstall
+          if (Test-Path "$env:PURPORY_BIN_DIR/purpory.exe") { throw "CLI uninstall failed" }
 
-      # --frozen installs straight from the committed uv.lock without re-resolving
-      # or rewriting it, so CI never churns the lock.
-      - name: Install dependencies
-        run: uv sync --all-extras --frozen
-
-      - name: Run tests
-        run: uv run --frozen pytest tests/ -q --tb=short
-
-      - name: Verify CLI works end-to-end
-        run: uv run --frozen purpory --help
-
-  security-scan:
-    # The dev deps include bandit and pip-audit. Run them in CI so a new
-    # HIGH-severity finding or vulnerable dependency is caught on the PR that
-    # introduces it, rather than at the next manual audit.
-    # Non-blocking for now (continue-on-error) to avoid breaking CI on
-    # pre-existing findings; remove continue-on-error after the initial
-    # cleanup pass.
-    runs-on: ubuntu-latest
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: bandit (static security analysis)
-        continue-on-error: true
-        run: uv run --frozen bandit -r purpory -ll
-
-      - name: pip-audit (dependency vulnerabilities)
-        continue-on-error: true
-        run: uv run --frozen pip-audit --strict
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+      - name: Build application
+        if: runner.os != 'Linux'
+        run: wails build -clean
+      - name: Build application on Linux
+        if: runner.os == 'Linux'
+        run: wails build -clean -tags webkit2_41
