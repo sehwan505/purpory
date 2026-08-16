@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Resolve artifact architecture
+        id: target
+        shell: bash
+        run: |
+          case "$RUNNER_ARCH" in
+            ARM64) echo "arch=arm64" >> "$GITHUB_OUTPUT" ;;
+            X64) echo "arch=amd64" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unsupported runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+      - name: Package standalone CLI
+        if: runner.os != 'Windows'
+        run: |
+          for arch in amd64 arm64; do
+            mkdir -p "release-assets/cli-$arch"
+            CGO_ENABLED=0 GOOS=${{ matrix.platform }} GOARCH=$arch go build -o "release-assets/cli-$arch/purpory" ./cmd/purpory
+            tar -C "release-assets/cli-$arch" -czf "release-assets/purpory-cli-${{ matrix.platform }}-$arch.tar.gz" purpory
+          done
+      - name: Package standalone CLI on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($arch in @("amd64", "arm64")) {
+            New-Item -ItemType Directory -Force "release-assets/cli-$arch" | Out-Null
+            $env:CGO_ENABLED = "0"
+            $env:GOOS = "windows"
+            $env:GOARCH = $arch
+            go build -o "release-assets/cli-$arch/purpory.exe" ./cmd/purpory
+            Compress-Archive -Path "release-assets/cli-$arch/purpory.exe" -DestinationPath "release-assets/purpory-cli-windows-$arch.zip"
+          }
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+      - run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+      - name: Build macOS application
+        if: runner.os == 'macOS'
+        run: wails build -clean -platform darwin/universal
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        run: |
+          ditto build/bin/purpory.app release-assets/Purpory.app
+          ditto -c -k --sequesterRsrc --keepParent release-assets/Purpory.app release-assets/purpory-desktop-darwin-universal.zip
+      - name: Build Linux application
+        if: runner.os == 'Linux'
+        run: wails build -clean -tags webkit2_41
+      - name: Package Linux application
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p release-assets/desktop
+          cp build/bin/purpory release-assets/desktop/purpory-desktop
+          cp build/appicon.png release-assets/desktop/purpory.png
+          tar -C release-assets/desktop -czf release-assets/purpory-desktop-linux-${{ steps.target.outputs.arch }}.tar.gz purpory-desktop purpory.png
+      - name: Build Windows application
+        if: runner.os == 'Windows'
+        run: wails build -clean
+      - name: Package Windows application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item build/bin/purpory.exe release-assets/purpory-desktop.exe
+          Compress-Archive -Path release-assets/purpory-desktop.exe -DestinationPath release-assets/purpory-desktop-windows-${{ steps.target.outputs.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: purpory-${{ runner.os }}
+          path: release-assets/purpory-*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: purpory-*
+          merge-multiple: true
+          path: release
+      - name: Add installers and checksums
+        run: |
+          cp install.sh install.ps1 release/
+          cd release
+          sha256sum purpory-* > checksums.txt
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --generate-notes

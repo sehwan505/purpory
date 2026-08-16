@@ -1,261 +1,135 @@
 # Purpory
 
-**Give every AI agent the context you already have.**
+Purpory is a local project-context engine with separate Go CLI and Wails desktop
+applications. It discovers a project's Materials, preserves authored knowledge,
+and prepares the right context for the current task. Source code is one Material,
+not a product boundary. The preserved Python implementation lives at `../purpory-python` as
+the migration reference.
 
-Purpory is a local-first context graph for people supervising multiple AI agents. Structural code,
-human decisions, intent, constraints, delivery history, and missing-context requests share one
-versioned node, edge, and event model.
+The rewrite follows three rules, in this order:
 
-## Why Purpory
+1. Simplicity: use the standard library and direct code before abstractions.
+2. Consistency: one vocabulary and one path for each operation.
+3. Extensibility: add small consumer-owned interfaces only at real boundaries.
 
-Code explains what a system does. It rarely explains why a decision was made, which constraint must
-survive a refactor, or what another agent already received. Purpory makes both structural and human
-knowledge available without making an LLM the source of truth.
+Read [the architecture](docs/ARCHITECTURE.md), [code conventions](docs/CONVENTIONS.md),
+and [migration scope](docs/MIGRATION.md) before adding code.
 
-- AST-derived code nodes, relationships, communities, and bounded graph traversal.
-- Stable human-owned memory such as `decision.database.engine`.
-- Exact SHA-256-pinned session delivery records.
-- Deterministic recall from recency, corroboration, association, and filesystem cues.
-- An optional local Qwen routing model whose proposal is verified against real evidence.
-- A React, Tailwind CSS, and shadcn-style dashboard served only on loopback.
+## Install
 
-## Quick Start
+Install both the CLI and desktop app on macOS or Linux:
 
-```bash
-uv sync --dev
-npm --prefix ui install
-npm --prefix ui run build
-
-uv run purpory update .
-uv run purpory remember decision.database.engine \
-  --value "PostgreSQL is the transactional source of truth" \
-  --category intent
-
-PURPORY_SESSION=agent-1 uv run purpory prepare \
-  "인증 흐름이 데이터베이스와 어떻게 연결되는지 설명해줘" \
-  --path src/auth
-
-uv run purpory dashboard
+```sh
+curl -fsSL https://raw.githubusercontent.com/sehwan505/purpory/main/install.sh | sh
 ```
 
-The product context surface has three commands:
+Install only one front end by adding `cli` or `app`:
 
-```text
-purpory remember <key> --value <text> | --source <pointer>
-purpory remember <key> --value <text> --category intent|knowledge|reference
-purpory remember <key> --value <text> --global-request --rationale <text>
-purpory remember --list [--prefix <key>]
-purpory remember --batch <changes.json> [--apply]
-purpory prepare "<request>" [--path <active-path>] [--budget 2000] [--no-retain-input]
-purpory dashboard [--port <port>]
+```sh
+curl -fsSL https://raw.githubusercontent.com/sehwan505/purpory/main/install.sh | sh -s -- cli
+curl -fsSL https://raw.githubusercontent.com/sehwan505/purpory/main/install.sh | sh -s -- app
 ```
 
-The dashboard can also create explicit Project contexts and attach Resources to them. Projects,
-intent, knowledge, Resources, and Resource Views are first-class nodes in the same context graph;
-provider registry tables remain operational projections. Git is the first resource provider: a
-remote URL identifies one repository Resource, while each local checkout or worktree is a separate
-Resource View with its own revision and material graph. One Project may select Views from several
-Resources, and one Resource may participate in several Projects. This lets agents combine durable
-project decisions with multiple current materials without allowing one worktree's structural
-snapshot to overwrite another. The model is provider-neutral and can also represent document
-collections, datasets, or other non-code material.
+On Windows, download and run the PowerShell installer:
 
-`prepare` returns ready-to-inject context. If an agent needs more information, it calls `prepare`
-again with the new need and the same session ID. The delivery history suppresses unchanged context
-that session has already received, so the protocol does not require public catalog, search, expand,
-path, pull, or push stages.
-
-Retrieval is precision-first and explainable. Semantic matches retrieve human knowledge, while
-exact identifiers and active paths locate named material without treating incidental body words as
-evidence. A preparation delivers at most two direct anchors. Short graph connections, one-hop
-leads, source-linked project memory, and context repeatedly co-delivered in earlier sessions are
-returned only as compact awareness hints: their labels are visible, but their content is not loaded.
-An agent can follow a useful hint with a narrower `prepare` call and ignore the rest. Session
-delivery history prevents the same evidence or hint from cycling back into later searches. No fixed
-search-iteration limit, full-text fallback, or LLM-generated utility score is used.
-
-Codex and Claude environment session IDs are normalized to the same identities used by preflight,
-so a plain follow-up `purpory prepare "<specific need>"` continues the active search session. This
-loop is built into the existing command and does not require an additional search skill.
-
-Local CLI and Claude Code/Codex preflight requests retain their input text in the decision audit by
-default so feedback can be interpreted. Use `--no-retain-input` for the CLI or set
-`PURPORY_CONTEXT_RETAIN_INPUT=false` for preflight to keep only the SHA-256 hash.
-
-Claude Code and Codex can enforce preparation before every user prompt. Install once at user scope:
-
-```bash
-purpory claude install
-purpory codex install
+```powershell
+$installer = "$env:TEMP\purpory-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/sehwan505/purpory/main/install.ps1 -OutFile $installer
+powershell -ExecutionPolicy Bypass -File $installer -Component all
 ```
 
-Pass `--project` only when the integration should apply to the current repository.
+Use `cli` or `app` instead of `all` for an individual Windows installation.
+Downloaded release assets are verified against the release SHA-256 checksums.
+The CLI goes in the user-local binary directory and the app goes in the user's
+Applications directory, so installation does not require administrator access.
 
-These are Purpory's only host-specific integrations. Other agents can call the generic `prepare`
-CLI or HTTP API without a dedicated installer.
+To build and install from this source checkout:
 
-Both installers register a native `UserPromptSubmit` preflight and a `SessionEnd` reconciliation
-hook. The end hook snapshots the transcript and exits quickly; a detached local worker processes
-every bounded segment with the selected reconcile model, hierarchically consolidates evidence-backed
-memories, and applies them in conflict-checked project batches. Failed jobs remain queued for retry.
-The prompt hook calls the same
-`ContextService.prepare` operation as the CLI and HTTP API, then either injects retrieved context,
-instructs the agent to ask one clarification, or passes the prompt through. Codex requires the user
-to review and trust installed hooks with `/hooks`. See
-[`docs/AGENT_PREFLIGHT.md`](docs/AGENT_PREFLIGHT.md).
-
-The default reconciliation model is `qwen3.5:9b`. Install or select it independently from routing:
-
-```bash
-purpory model install --role reconcile
-purpory model select qwen3.5:9b --role reconcile
+```sh
+make install       # CLI and app
+make install-cli
+make install-app
 ```
 
-The dashboard exposes both routing and reconciliation selectors. Selection is persisted under
-Purpory's home directory so detached session workers use the same model.
+Windows source builds use `./install.ps1 -Component all -Local`. Remove a local
+installation with `make uninstall` or `./install.ps1 -Component all -Uninstall`.
+Uninstalling executables deliberately keeps project data in `~/.purpory`.
 
-Reconciliation can also use any existing Purpory LLM adapter. The model ID is free-form; credentials
-and custom endpoints continue to use that adapter's environment variables:
+You can also choose an individual artifact from the latest GitHub release:
 
-```bash
-OPENAI_API_KEY=... purpory model select gpt-4.1-mini --role reconcile --provider openai
-# OPENAI_BASE_URL can point the same adapter at an OpenAI-compatible service.
+- `purpory-cli-*`: standalone `purpory` executable for `PATH`.
+- `purpory-desktop-*`: extract and open the desktop application.
+
+Both are independent front ends over the same `~/.purpory/purpory.db` data.
+
+Source installation requires Go 1.25+, Node 22+, and Wails v2.13.0:
+
+```sh
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+go build -o build/purpory ./cmd/purpory
+wails build
 ```
 
-Supported providers are listed by `purpory model list`. Ollama remains the default and the only
-provider managed by `purpory model install`; external API keys are never stored in `models.json`.
-Hosted adapters are intentionally available only to session reconciliation. Structural extraction,
-community labels, entity deduplication, and PR triage are deterministic and do not call a model.
+The standalone CLI provides automation-friendly commands:
 
-## Agent API
-
-Agents use one preparation route with `X-Purpory-Agent-Token`:
-
-```http
-POST /api/context/prepare
-Content-Type: application/json
-X-Purpory-Agent-Token: <token>
-
-{
-  "message": "전에 정한 인증 정책을 알려줘",
-  "sessionId": "agent-1",
-  "activePaths": ["src/auth"],
-  "tokenBudget": 2000
-}
-```
-
-The response contains the final `skip | retrieve | ask` action, deterministic evidence metadata,
-ready rendered context, unloaded awareness hints, omissions, audit identity, and optional
-clarification. Internal catalog, search, graph connection, expansion, path, rendering, budgeting,
-hashing, and deduplication remain domain primitives rather than public protocol steps.
-
-Agents may also raise non-authoritative `POST /api/global-memory/requests` and
-`POST /api/memory/reviews` proposals. They cannot edit, approve, reject, or resolve them. Project
-memory writes apply immediately; a global write is impossible until a human inspects every field,
-optionally edits it, and explicitly approves it in the dashboard. Rejected proposals remain in the
-audit.
-
-## Local Model
-
-The routing model is optional. Deterministic fallback remains usable when it is absent.
-
-Install and start Ollama, then:
-
-```bash
-purpory model install
-purpory model start
+```sh
+purpory project add .
+purpory project list
+purpory project remove PROJECT_ID
+purpory update
+purpory update --json
+purpory remember decision.database --kind decision --value "Use SQLite"
+purpory remember decision.database --confirm
+purpory remember --batch changes.json          # preview
+purpory remember --batch changes.json --apply  # optimistic, atomic apply
+purpory query "database decision"
+purpory explain decision.database
+purpory path "service.go" "Service.Update()"
+purpory prepare "How does project update work?"
+purpory prepare "How does project update work?" --session agent-1 --path internal/app --budget 2000 --json
+purpory request list open
+purpory request resolve 12 decision.database
+purpory decision list
+purpory decision feedback 42 incorrect --expected-action retrieve --key decision.database
+purpory review list open
 purpory model status
+purpory model start
+purpory model install qwen3-embedding:0.6b embedding
+purpory model select gate qwen3:4b
+purpory embed
+purpory integration codex install
+purpory integration claude install
 ```
 
-Purpory uses the same `OLLAMA_BASE_URL` runtime as its other local models. The small classifier
-emits exactly one of `SKIP`, `SEARCH`, or `ASK`; Purpory performs
-deterministic retrieval, applies the token budget, and records the exact delivered bytes. See
-[`docs/GATEWAY.md`](docs/GATEWAY.md).
+Register a Project once with `project add` before using project-scoped commands.
+Ordinary CLI commands and agent hooks resolve the working directory against
+registered Projects and never create one implicitly. Hooks silently do nothing
+outside a registered Project.
+`project remove` only unregisters a Project; its stored history is preserved and
+becomes available again if the same ID is registered later.
 
-New or changed human memory is embedded after a normal write, while retrieval embeds only the
-query. If the local model is unavailable, the durable queue is preserved. `purpory embed` drains
-that queue explicitly for bulk imports or backfills:
+The integration commands preserve existing agent configuration while installing
+prompt and session-end hooks. Session-end snapshots are reconciled in a detached
+worker; only explicit user statements may become durable project memory. Failed
+jobs remain queued and are retried by the next worker. Git repositories are observed as one Resource with
+all local worktrees represented as Views; non-Git folders use the same workspace
+model. On first launch, preserved Python workspace, Session history, delivered
+context, durable memories, versions, and reconciliation audits are copied
+read-only from `~/.purpory/context.db` when present.
 
-```bash
-purpory embed --status --json
-purpory embed --limit 32
-```
+`purpory update` discovers all local Materials, fingerprints them, extracts only
+new or changed inputs, resolves project-wide relationships, and publishes the
+new knowledge snapshot atomically. The desktop reads committed state when opened
+or focused and only runs an update when the user explicitly requests one.
 
-## Code Graph
-
-```bash
-uv run purpory extract .
-uv run purpory query "what connects authentication to billing?"
-uv run purpory explain "PaymentService"
-uv run purpory path "Checkout" "PaymentService"
-uv run purpory update .
-```
-
-Extraction, update, clustering, and queries use the canonical SQLite graph directly. Generated
-JSON, reports, and visualizations are opt-in exports:
-
-```bash
-uv run purpory export json --output graph.json
-uv run purpory export report --output GRAPH_REPORT.md
-uv run purpory export html
-```
-
-The dashboard renders a bounded database-backed graph without requiring generated files. Context
-pointers accept `@repo/path` and `@root/path`; realpath sandboxing prevents repository escape.
-
-For an existing checkout that has only legacy artifacts, import once and then use SQLite-backed
-commands normally:
-
-```bash
-uv run purpory import purpory-out/graph.json --root .
-```
-
-Purpory does not delete the legacy directory or read it implicitly after migration. Archive or
-remove it only after verifying `purpory query` and an explicit `purpory export json`.
-
-## Architecture
-
-Purpory is a modular monolith:
-
-- SQLite is the canonical store for structural, human, and experiential context.
-- `graph.json` is an explicit compatibility import/export artifact, never an implicit staging store.
-- NetworkX is an ephemeral analysis representation, not a second source of truth.
-- CLI and HTTP adapters call the same `ContextService`.
-- Claude Code and Codex preflight hooks call that same service before every prompt.
-- The Vite dashboard build is packaged into the Python distribution.
-
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) and
-[`docs/CONTEXT_PLANE.md`](docs/CONTEXT_PLANE.md).
-
-## Security
-
-- The dashboard and managed inference bind only to `127.0.0.1`.
-- Read, human mutation, and agent execution tokens have separate privileges.
-- Agent tokens can raise reviewable proposals but cannot curate or approve human memory.
-- Routing review is exception-based; routine decisions remain auditable without requiring labels.
-- Query tokens never authorize mutations; cross-origin mutations are rejected.
-- Request logs contain only the method and sanitized path.
-- Human-owned memory cannot be overwritten by derived graph seeds.
-- Model proposals are non-authoritative and fail conservatively.
-
-## Development
-
-```bash
-uv run pytest -q tests/test_context_gate.py tests/test_context_provisioning.py tests/test_supervise_http.py
-uv run ruff check purpory/supervise tests/test_context_gate.py tests/test_supervise_http.py
-uv run pyright purpory/supervise tests/test_context_gate.py tests/test_supervise_http.py
-uv run bandit -q -c pyproject.toml -r purpory/supervise
-npm --prefix ui run typecheck
-npm --prefix ui run build
-uv build
-```
-
-## Acknowledgment
-
-Purpory's code-graph foundation began from the excellent open-source
-[Graphify](https://github.com/Graphify-Labs/graphify) project. Purpory is an independent product and
-repository; this acknowledgment is retained with appreciation for the original work.
-
-## License
-
-See [`LICENSE`](LICENSE).
+Data is stored in `~/.purpory/purpory.db`. Set `PURPORY_DATABASE` to use another
+database and `PURPORY_OLLAMA_URL` to use a non-default Ollama endpoint.
+`prepare` works deterministically without a model. Use `model select gate` or set
+`PURPORY_GATE_MODEL` to enable `skip | search | ask` classification;
+remote gate endpoints additionally require `PURPORY_ALLOW_REMOTE_GATE=true`.
+Reconciliation uses `qwen3.5:9b` by default; override it with
+`model select reconcile`, `PURPORY_RECONCILE_MODEL`, or its context with
+`PURPORY_RECONCILE_CONTEXT_TOKENS`. `purpory embed` materializes current memory
+vectors with the selected embedding model. Prepare then combines semantic,
+lexical, active-path, freshness, and proven-usage signals; usage alone never
+makes an unrelated memory relevant.
