@@ -154,6 +154,27 @@ func (s *Service) Status() Status {
 	return Status{Version: "0.1.0", Project: s.project}
 }
 
+func (s *Service) Projects(ctx context.Context) ([]project.Project, error) {
+	return s.store.Projects(ctx)
+}
+
+func (s *Service) SelectProject(ctx context.Context, projectID string) (Status, error) {
+	selected, err := s.store.Project(ctx, strings.TrimSpace(projectID))
+	if err != nil {
+		return Status{}, err
+	}
+	workspace, err := s.workspace.Observe(ctx, selected.Root)
+	if err != nil {
+		return Status{}, err
+	}
+	selected.Root = workspace.Project.Root
+	if err := s.store.SaveWorkspace(ctx, selected.ID, workspace.Resources); err != nil {
+		return Status{}, err
+	}
+	s.project = selected
+	return s.Status(), nil
+}
+
 func (s *Service) Remember(ctx context.Context, key string, kind memory.Kind, value, source *string) (store.SaveResult, error) {
 	entry, err := memory.New(s.project.ID, key, kind, value, source)
 	if err != nil {

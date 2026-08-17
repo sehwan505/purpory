@@ -82,6 +82,48 @@ func TestOpenResolvesRegisteredProjectFromChildDirectory(t *testing.T) {
 	}
 }
 
+func TestSelectProjectSwitchesWorkspaceWithoutMixingProjectData(t *testing.T) {
+	ctx := context.Background()
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	if _, err := RegisterProject(ctx, firstRoot, database, "first", "First"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RegisterProject(ctx, secondRoot, database, "second", "Second"); err != nil {
+		t.Fatal(err)
+	}
+	service, err := Open(ctx, firstRoot, database, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	value := "first project only"
+	if _, err := service.Remember(ctx, "intent.first", memory.Decision, &value, nil); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := service.Projects(ctx)
+	if err != nil || len(projects) != 2 {
+		t.Fatalf("registered projects missing: %#v %v", projects, err)
+	}
+	resolvedSecond, err := filepath.EvalSymlinks(secondRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.SelectProject(ctx, "second")
+	if err != nil || status.Project.ID != "second" || status.Project.Root != resolvedSecond {
+		t.Fatalf("project did not switch: %#v %v", status, err)
+	}
+	workspace, err := service.Workspace(ctx)
+	if err != nil || workspace.Project.ID != "second" {
+		t.Fatalf("workspace did not follow selection: %#v %v", workspace, err)
+	}
+	memories, err := service.Memories(ctx, "")
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("project memory leaked across selection: %#v %v", memories, err)
+	}
+}
+
 func TestWorkspaceObserverKeepsCoreDomainNeutral(t *testing.T) {
 	root := t.TempDir()
 	want := project.Workspace{

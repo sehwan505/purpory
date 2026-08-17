@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	product "github.com/sehwan505/purpory/internal/app"
@@ -10,12 +11,14 @@ import (
 	"github.com/sehwan505/purpory/internal/ollama"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/project"
+	"github.com/sehwan505/purpory/internal/reconcile"
 	"github.com/sehwan505/purpory/internal/store"
 )
 
 type App struct {
 	ctx     context.Context
 	service *product.Service
+	mu      sync.RWMutex
 }
 
 func NewApp(service *product.Service) *App {
@@ -27,97 +30,163 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) Status() product.Status {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Status()
 }
 
+func (a *App) Projects() ([]project.Project, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.service.Projects(a.ctx)
+}
+
+func (a *App) SelectProject(projectID string) (product.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.service.SelectProject(a.ctx, projectID)
+}
+
 func (a *App) Remember(key, kind string, value, source *string) (store.SaveResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Remember(a.ctx, key, memory.Kind(kind), value, source)
 }
 
 func (a *App) Memories(prefix string) ([]memory.Memory, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Memories(a.ctx, prefix)
 }
 
 func (a *App) DeleteMemory(key string) (bool, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.DeleteMemory(a.ctx, key)
 }
 
 func (a *App) ConfirmMemory(key string) (bool, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.ConfirmMemory(a.ctx, key)
 }
 
 func (a *App) NeedsReviews(status string) ([]memory.Review, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.NeedsReviews(a.ctx, status)
 }
 
 func (a *App) ResolveNeedsReview(id int64, outcome string, resultVersionID *int64) (*memory.Review, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.ResolveNeedsReview(a.ctx, id, outcome, resultVersionID)
 }
 
 func (a *App) ContextRequests(status string) ([]contextprepare.ContextRequest, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.ContextRequests(a.ctx, status)
 }
 
 func (a *App) ResolveContextRequest(id int64, key string) (bool, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.ResolveContextRequest(a.ctx, id, key)
 }
 
 func (a *App) ContextDecisions(limit int) ([]contextprepare.Decision, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.ContextDecisions(a.ctx, limit)
 }
 
 func (a *App) ContextFeedback(feedback contextprepare.Feedback) (contextprepare.Feedback, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.ContextFeedback(a.ctx, feedback)
 }
 
 func (a *App) Query(query string, limit int) (product.QueryResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Query(a.ctx, query, limit)
 }
 
 func (a *App) Graph(scope string, limit int) (product.GraphResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Graph(a.ctx, scope, limit)
 }
 
 func (a *App) Prepare(message string, tokenBudget int) (product.PrepareResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Prepare(a.ctx, message, tokenBudget)
 }
 
 func (a *App) Explain(query string) (product.ExplainResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Explain(a.ctx, query)
 }
 
 func (a *App) Path(source, target string) (graph.Path, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Path(a.ctx, source, target)
 }
 
 func (a *App) Update() (product.UpdateResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Update(a.ctx)
 }
 
 func (a *App) ModelState() (product.ModelState, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.ModelState(a.ctx)
 }
 
 func (a *App) StartModels(waitSeconds int) ollama.Status {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.StartModels(a.ctx, time.Duration(waitSeconds)*time.Second)
 }
 
 func (a *App) SelectModel(role, model string) (product.ModelSelection, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.SelectModel(a.ctx, role, model)
 }
 
 func (a *App) InstallModel(model, role string) (product.ModelSelection, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.InstallModel(a.ctx, model, role)
 }
 
 func (a *App) SyncEmbeddings(limit int) (product.EmbeddingSyncResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.SyncEmbeddings(a.ctx, limit)
 }
 
 func (a *App) EmbeddingStatus() (product.EmbeddingStatus, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.EmbeddingStatus(a.ctx)
 }
 
 func (a *App) Workspace() (project.Workspace, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.service.Workspace(a.ctx)
+}
+
+func (a *App) Reconciliations() ([]reconcile.Run, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.service.Reconciliations(a.ctx)
 }

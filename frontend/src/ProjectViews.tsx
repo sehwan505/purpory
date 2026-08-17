@@ -1,6 +1,35 @@
-import type { app, graph, project } from "../wailsjs/go/models";
+import type { app, graph, project, reconcile } from "../wailsjs/go/models";
 
 export type Page = "overview" | "workspace" | "search" | "graph" | "inbox" | "memory" | "settings";
+
+export function ProjectPicker({ current, projects, busy, onSelect }: {
+  current?: project.Project;
+  projects: project.Project[];
+  busy: boolean;
+  onSelect: (projectID: string) => void;
+}) {
+  const currentID = current?.id ?? "";
+  return <details className="projectPicker" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}>
+    <summary aria-label="현재 프로젝트 선택">
+      <span className="projectMark" aria-hidden="true">{current?.name?.slice(0, 1).toUpperCase() || "P"}</span>
+      <span className="projectCurrent"><small>CURRENT PROJECT</small><strong>{current?.name ?? "프로젝트 확인 중"}</strong><em title={current?.root}>{current?.root ?? "등록 정보를 불러오는 중"}</em></span>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
+    </summary>
+    <div className="projectMenu">
+      <div className="projectMenuTitle"><strong>프로젝트</strong><span>{projects.length}개 등록됨</span></div>
+      <div className="projectOptions" role="menu">{projects.map(item => <button type="button" role="menuitemradio" aria-checked={item.id === currentID} key={item.id} disabled={busy} onClick={event => {
+        const details = event.currentTarget.closest("details");
+        if (details) details.open = false;
+        if (item.id !== currentID) onSelect(item.id);
+      }}>
+        <span className="projectMark" aria-hidden="true">{item.name.slice(0, 1).toUpperCase() || "P"}</span>
+        <span><strong>{item.name}</strong><small title={item.root}>{item.root}</small></span>
+        {item.id === currentID && <b>현재</b>}
+      </button>)}</div>
+      {projects.length < 2 && <p>전환하려면 다른 프로젝트를 먼저 등록하세요.</p>}
+    </div>
+  </details>;
+}
 
 export function NavIcon({ page }: { page: Page }) {
   const paths: Record<Page, string> = {
@@ -31,6 +60,9 @@ export function GraphView({ nodes, edges, selectedID, onSelect }: {
 
   return <div className="graphCanvas">
     <div className="graphStats">{visibleNodes.length}/{nodes.length} nodes · {visibleEdges.length}/{edges.length} edges</div>
+    <div className="graphLegend" aria-label="노드 색상 범례">
+      {(["intent", "material", "knowledge"] as const).map(kind => <span key={kind}><i aria-hidden="true" style={{ background: nodeColor(kind) }} />{kind}</span>)}
+    </div>
     <svg viewBox="0 0 480 350" role="img" aria-label="Intent, Material, Knowledge 관계 그래프">
       <defs><pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M 20 0 L 0 0 0 20" fill="none" stroke="#dfe3da" strokeWidth=".5" /></pattern></defs>
       <rect width="480" height="350" fill="url(#grid)" />
@@ -83,14 +115,17 @@ function nodeColor(kind: string) {
   return "#5f7358";
 }
 
-export function WorkspaceTopology({ workspace, selectedViewID, onSelectView }: {
+export function WorkspaceTopology({ workspace, reconciliations, selectedViewID, onSelectView }: {
   workspace: project.Workspace;
+  reconciliations: reconcile.Run[];
   selectedViewID: string;
   onSelectView: (id: string) => void;
 }) {
   const views = workspace.resources.flatMap(resource => resource.views ?? []);
   const sessions = views.flatMap(view => view.sessions ?? []);
   const unmapped = workspace.unmappedSessions ?? [];
+  const reconciliationBySession = new Map<string, reconcile.Run>();
+  for (const run of reconciliations) if (!reconciliationBySession.has(run.sessionId)) reconciliationBySession.set(run.sessionId, run);
   const selected = views.find(view => view.id === selectedViewID) ?? views.find(view => view.root === workspace.project.root) ?? views[0];
   const selectedResource = workspace.resources.find(resource => resource.views?.some(view => view.id === selected?.id));
   return <section className="workspaceLayout">
@@ -108,17 +143,27 @@ export function WorkspaceTopology({ workspace, selectedViewID, onSelectView }: {
       <div className="viewHeader"><div><p className="eyebrow">{selectedResource?.label ?? "VIEW"}</p><h2>{selected.branch || "folder / detached"}</h2><p className="path">{selected.root}</p></div><span className={selected.available ? "status online" : "status"}>{selected.available ? "AVAILABLE" : "MISSING"}</span></div>
       <div className="viewFacts"><div><span>REVISION</span><strong>{selected.revision?.slice(0, 10) || "—"}</strong></div><div><span>WORKTREE</span><strong>{selected.dirty ? "변경 있음" : "Clean"}</strong></div><div><span>OBSERVED</span><strong>{relativeTime(selected.observedAt)}</strong></div></div>
       <div className="detailTitle"><div><p className="eyebrow">SESSIONS</p><h3>이 View의 작업 기록</h3></div><span>{selected.sessions?.length ?? 0}</span></div>
-      <div className="sessionList">{(selected.sessions ?? []).length === 0 ? <p className="empty">이 View에 기록된 Session이 없습니다.</p> : selected.sessions.map(session => <SessionCard key={session.id} session={session} />)}</div>
+      <div className="sessionList">{(selected.sessions ?? []).length === 0 ? <p className="empty">이 View에 기록된 Session이 없습니다.</p> : selected.sessions.map(session => <SessionCard key={session.id} session={session} reconciliation={reconciliationBySession.get(session.id)} />)}</div>
     </> : <p className="empty">발견된 View가 없습니다. 프로젝트 업데이트를 실행해 주세요.</p>}</div>
-    {unmapped.length > 0 && <details className="panel unmapped"><summary>View 연결을 확인할 과거 Session {unmapped.length}개</summary><div className="unmappedGrid">{unmapped.map(session => <SessionCard key={session.id} session={session} />)}</div></details>}
+    <details className="panel unmapped"><summary>View 연결을 확인할 과거 Session {unmapped.length}개</summary>{unmapped.length === 0 ? <p className="empty">View 연결을 확인할 과거 Session이 없습니다.</p> : <div className="unmappedGrid">{unmapped.map(session => <SessionCard key={session.id} session={session} reconciliation={reconciliationBySession.get(session.id)} />)}</div>}</details>
   </section>;
 }
 
-function SessionCard({ session }: { session: project.Session }) {
+function SessionCard({ session, reconciliation }: { session: project.Session; reconciliation?: reconcile.Run }) {
   const items = session.items ?? [];
   return <div className={`sessionNode ${session.status}`}><span>{session.agent} · {session.status}</span><strong>{session.id}</strong><small>{relativeTime(session.updatedAt)} · {items.length}개 Context 전달</small>
+    {reconciliation && <div className={`reconciliation ${reconciliation.phase}`}><b>{reconciliationLabel(reconciliation.phase)}</b><span>{reconciliation.detail || relativeTime(reconciliation.updatedAt)}</span></div>}
     {items.length > 0 && <details><summary>전달된 Context 보기</summary><ul>{items.map((item, index) => <li key={`${item.key}-${item.valueHash}-${index}`}><b>{item.label || item.key}</b><span>{item.kind || "context"}</span>{item.preview && <p>{item.preview}</p>}</li>)}</ul></details>}
   </div>;
+}
+
+export function reconciliationLabel(phase: string) {
+  const labels: Record<string, string> = {
+    queued: "Reconcile 대기", running: "Reconcile 시작", reading: "Transcript 확인",
+    updating: "Material 최신화", proposing: "의도 후보 추출", applying: "메모리 반영",
+    completed: "Reconcile 완료", failed: "Reconcile 실패",
+  };
+  return labels[phase] ?? phase;
 }
 
 export function relativeTime(value: string) {

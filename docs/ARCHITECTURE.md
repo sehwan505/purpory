@@ -87,6 +87,13 @@ Directories are added only when their first behavior is implemented.
 - The desktop is viewer-first: it reads committed state when opened or focused
   and performs writes only after an explicit user action. It never watches the
   project or starts `update` in the background.
+- The desktop lists registered Projects and switches the entire application
+  scope between their independent Workspaces. Memories, Materials, Sessions,
+  reconcile runs, queries, and graphs are never combined across that selection.
+- Reconcile progress remains project-scoped operational state in the private
+  queue. The Workspace may show its current phase on the originating Session,
+  while `reconciliation_events` continues to record only committed durable
+  changes and the canonical graph remains free of Workspace topology.
 - Model assistance is optional. Structural indexing and stored-memory queries
   continue to work when Ollama is absent.
 - `prepare` owns the complete context gateway: bounded input validation,

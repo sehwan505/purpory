@@ -113,11 +113,16 @@ func (s *Service) ProcessReconciliation(ctx context.Context, jobPath string) err
 		if job.DBPath != s.databasePath || job.ProjectID != s.project.ID {
 			return errors.New("process reconciliation: job scope does not match service")
 		}
-		return s.reconcileJob(ctx, job)
+		return s.reconcileJob(ctx, job, func(phase, detail string) error {
+			return reconcile.SetPhase(jobPath, phase, detail)
+		})
 	})
 }
 
-func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job) error {
+func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job, report func(string, string) error) error {
+	if err := report(reconcile.PhaseReading, "transcript 확인"); err != nil {
+		return err
+	}
 	messages, err := reconcile.ReadTranscript(job.TranscriptPath)
 	if err != nil {
 		return err
@@ -127,7 +132,10 @@ func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job) error {
 		hasUser = hasUser || message.Role == "user"
 	}
 	if !hasUser {
-		return nil
+		return report(reconcile.PhaseCompleted, "저장할 사용자 근거 없음")
+	}
+	if err := report(reconcile.PhaseUpdating, "Material 최신화"); err != nil {
+		return err
 	}
 	if _, err := s.Update(ctx); err != nil {
 		return fmt.Errorf("refresh reconciliation materials: %w", err)
@@ -142,8 +150,17 @@ func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job) error {
 		return err
 	}
 	model.materials = materialRefs
+	if err := report(reconcile.PhaseProposing, fmt.Sprintf("Material 후보 %d개 · 메모리 후보 추출", len(materialRefs))); err != nil {
+		return err
+	}
 	candidates, err := reconcile.Propose(ctx, messages, model, materialRefs)
 	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		return report(reconcile.PhaseCompleted, "지속 메모리 후보 없음")
+	}
+	if err := report(reconcile.PhaseApplying, fmt.Sprintf("후보 %d개 저장", len(candidates))); err != nil {
 		return err
 	}
 	for start := 0; start < len(candidates); start += 20 {
@@ -152,7 +169,11 @@ func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job) error {
 			return err
 		}
 	}
-	return nil
+	return report(reconcile.PhaseCompleted, fmt.Sprintf("후보 %d개 처리 완료", len(candidates)))
+}
+
+func (s *Service) Reconciliations(_ context.Context) ([]reconcile.Run, error) {
+	return reconcile.Runs(s.project.ID, 20)
 }
 
 func (s *Service) reconcileModel(ctx context.Context) (ollamaReconcileModel, error) {
