@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 	_ "modernc.org/sqlite"
 )
@@ -33,6 +34,8 @@ var ErrMemoryConflict = errors.New("reconcile memory: concurrent change")
 type MemoryProposal struct {
 	Memory       memory.Memory
 	ExpectedHash *string
+	EvidenceIDs  []string
+	Links        []graph.Link
 }
 
 func DefaultPath() (string, error) {
@@ -73,13 +76,6 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
-}
-
-func firstError(value, fallback error) error {
-	if value != nil {
-		return value
-	}
-	return fallback
 }
 
 func escapeLike(value string) string {

@@ -59,6 +59,10 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	if err != nil {
 		return PrepareResult{}, err
 	}
+	links, err := s.store.Links(ctx, s.project.ID)
+	if err != nil {
+		return PrepareResult{}, err
+	}
 	workspace, err := s.store.Workspace(ctx, s.project)
 	if err != nil {
 		return PrepareResult{}, err
@@ -109,7 +113,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		result.Action = "ask"
 		result.Clarification = proposal.Clarification
 	default:
-		if err := s.searchAndDeliver(ctx, request, nodes, claims, memories, workspace, prior, &result); err != nil {
+		if err := s.searchAndDeliver(ctx, request, nodes, claims, links, memories, workspace, prior, &result); err != nil {
 			return PrepareResult{}, err
 		}
 	}
@@ -157,6 +161,7 @@ func (s *Service) searchAndDeliver(
 	request contextprepare.Request,
 	nodes []graph.Node,
 	claims []graph.Claim,
+	links []graph.Link,
 	memories []memory.Memory,
 	workspace project.Workspace,
 	prior map[string]string,
@@ -167,10 +172,19 @@ func (s *Service) searchAndDeliver(
 		query = *result.Proposal.Query
 	}
 	candidates := prepareCandidates(s.project.Root, result.Proposal.Scopes, memories, nodes, workspace)
+	allCandidates := prepareCandidates(s.project.Root, nil, memories, nodes, workspace)
+	for _, node := range nodes {
+		if node.Kind == "material" && node.Content == "" {
+			allCandidates = append(allCandidates, prepareNodeCandidate(node))
+		}
+	}
 	if err := s.enrichMemoryRanking(ctx, query, candidates, memories); err != nil {
 		return err
 	}
 	ranked, terms := contextprepare.Rank(candidates, query, result.Proposal.Keywords, request.ActivePaths, mapKeys(prior))
+	projected := newContextGraph(memories, nodes, resolve.Claims(nodes, claims), links)
+	linked := newContextGraph(memories, nodes, nil, links)
+	ranked = expandLinkedCandidates(ranked, allCandidates, linked.edges)
 	search := &contextprepare.Search{Query: query, Scopes: normalizedScopes(result.Proposal.Scopes), Terms: terms, Candidates: ranked}
 	result.Context.Search = search
 
@@ -198,7 +212,7 @@ func (s *Service) searchAndDeliver(
 	if err != nil {
 		return err
 	}
-	result.Awareness = prepareAwareness(awarenessCandidates, selected, candidates, nodes, resolve.Claims(nodes, claims), associations, prior, exposed)
+	result.Awareness = prepareAwareness(awarenessCandidates, selected, allCandidates, projected.edges, associations, prior, exposed)
 
 	if len(sessionDeliveries) > 0 {
 		agent := sessionAgent(request.SessionID)
@@ -331,14 +345,7 @@ func prepareCandidates(root string, scopes []string, memories []memory.Memory, n
 			if node.Kind == "material" && node.Content == "" {
 				continue
 			}
-			source := node.MaterialURI
-			if node.Locator != "" {
-				source += "#" + node.Locator
-			}
-			result = append(result, contextprepare.Candidate{
-				NodeID: node.ID, Key: "material." + node.ID[:min(20, len(node.ID))], Namespace: "material",
-				Label: node.Label, Kind: node.Kind, Origin: "structural", Source: source, Content: node.Content, Mode: "context-graph",
-			})
+			result = append(result, prepareNodeCandidate(node))
 		}
 	}
 	if selected["resource"] {
@@ -349,6 +356,67 @@ func prepareCandidates(root string, scopes []string, memories []memory.Memory, n
 			})
 		}
 	}
+	return result
+}
+
+func prepareNodeCandidate(node graph.Node) contextprepare.Candidate {
+	source := node.MaterialURI
+	if node.Locator != "" {
+		source += "#" + node.Locator
+	}
+	return contextprepare.Candidate{
+		NodeID: node.ID, Key: "material." + node.ID[:min(20, len(node.ID))], Namespace: "material",
+		Label: node.Label, Kind: node.Kind, Origin: "structural", Source: source, Content: node.Content, Mode: "context-graph",
+	}
+}
+
+func expandLinkedCandidates(ranked, all []contextprepare.Candidate, edges []graph.Edge) []contextprepare.Candidate {
+	byID := map[string]contextprepare.Candidate{}
+	for _, candidate := range all {
+		byID[candidate.NodeID] = candidate
+	}
+	positions := map[string]int{}
+	result := append([]contextprepare.Candidate(nil), ranked...)
+	for index, candidate := range result {
+		positions[candidate.NodeID] = index
+	}
+	anchors := append([]contextprepare.Candidate(nil), ranked...)
+	for _, anchor := range anchors {
+		for _, edge := range edges {
+			neighbor := ""
+			if edge.SourceID == anchor.NodeID {
+				neighbor = edge.TargetID
+			} else if edge.TargetID == anchor.NodeID {
+				neighbor = edge.SourceID
+			}
+			candidate, found := byID[neighbor]
+			if !found {
+				continue
+			}
+			score := anchor.Score - 1
+			if candidate.Kind == string(memory.Decision) {
+				score = anchor.Score + 1
+			}
+			signal := "linked:" + edge.Relation
+			if index, found := positions[candidate.NodeID]; found {
+				if result[index].Score < score {
+					result[index].Score = score
+				}
+				result[index].Signals = append(result[index].Signals, signal)
+				continue
+			}
+			candidate.Score = score
+			candidate.Signals = append(candidate.Signals, signal)
+			positions[candidate.NodeID] = len(result)
+			result = append(result, candidate)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Score != result[j].Score {
+			return result[i].Score > result[j].Score
+		}
+		return result[i].Key < result[j].Key
+	})
 	return result
 }
 
@@ -404,7 +472,7 @@ func renderCandidate(candidate contextprepare.Candidate) string {
 	return b.String()
 }
 
-func prepareAwareness(ranked, selected, all []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, associations []string, prior map[string]string, exposed map[string]bool) []contextprepare.Awareness {
+func prepareAwareness(ranked, selected, all []contextprepare.Candidate, edges []graph.Edge, associations []string, prior map[string]string, exposed map[string]bool) []contextprepare.Awareness {
 	seen := map[string]bool{}
 	for _, candidate := range selected {
 		seen[candidate.NodeID] = true
@@ -433,15 +501,8 @@ func prepareAwareness(ranked, selected, all []contextprepare.Candidate, nodes []
 		add(candidate, reason, nil)
 	}
 	byID := map[string]contextprepare.Candidate{}
-	for _, node := range nodes {
-		if node.Kind == "material" && node.Content == "" {
-			continue
-		}
-		source := node.MaterialURI
-		if node.Locator != "" {
-			source += "#" + node.Locator
-		}
-		byID[node.ID] = contextprepare.Candidate{NodeID: node.ID, Key: "material." + node.ID[:min(20, len(node.ID))], Namespace: "material", Label: node.Label, Kind: node.Kind, Origin: "structural", Source: source}
+	for _, candidate := range all {
+		byID[candidate.NodeID] = candidate
 	}
 	selectedIDs := map[string]bool{}
 	for _, candidate := range selected {
@@ -455,6 +516,9 @@ func prepareAwareness(ranked, selected, all []contextprepare.Candidate, nodes []
 			neighbor = edge.SourceID
 		}
 		if candidate, found := byID[neighbor]; found {
+			if candidate.Kind == "material" && candidate.Content == "" && !graph.IsIntentMaterialRelation(edge.Relation) {
+				continue
+			}
 			relation := edge.Relation
 			add(candidate, "graph-bridge", &relation)
 		}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sehwan505/purpory/internal/graph"
@@ -229,7 +230,7 @@ func TestUpdateSnapshotPreservesIntentLinks(t *testing.T) {
 	if err := database.SaveProject(ctx, current); err != nil {
 		t.Fatal(err)
 	}
-	link := graph.Link{SourceKind: "intent", SourceRef: "purpose.accessibility", Relation: "evidenced_by", TargetKind: "material", TargetRef: "file:README.md"}
+	link := graph.Link{SourceKind: "intent", SourceRef: "purpose.accessibility", Relation: graph.RelationAppliesTo, TargetKind: "material", TargetRef: "file:README.md"}
 	if err := database.SaveLink(ctx, current.ID, link); err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +322,8 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	results, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{{Memory: want}})
+	link := graph.Link{SourceKind: "intent", SourceRef: want.Key, Relation: graph.RelationRealizedBy, TargetKind: "material", TargetRef: "file:frontend.tsx"}
+	results, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{{Memory: want, EvidenceIDs: []string{"U000001"}, Links: []graph.Link{link}}})
 	if err != nil || len(results) != 1 || results[0].Action != "created" {
 		t.Fatalf("unexpected reconciliation: %#v %v", results, err)
 	}
@@ -335,9 +337,13 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 	if err != nil || got.Hash != want.Hash {
 		t.Fatalf("conflict changed memory: %#v %v", got, err)
 	}
-	var events int
-	if err := database.db.QueryRowContext(ctx, "SELECT count(*) FROM reconciliation_events WHERE project_id = ? AND session_id = ?", current.ID, "codex:one").Scan(&events); err != nil || events != 1 {
-		t.Fatalf("reconciliation audit missing: %d %v", events, err)
+	links, err := database.Links(ctx, current.ID)
+	if err != nil || len(links) != 1 || links[0] != link {
+		t.Fatalf("reconciliation link missing: %#v %v", links, err)
+	}
+	var audit string
+	if err := database.db.QueryRowContext(ctx, "SELECT changes_json FROM reconciliation_events WHERE project_id = ? AND session_id = ?", current.ID, "codex:one").Scan(&audit); err != nil || !strings.Contains(audit, `"relation":"realized_by"`) || !strings.Contains(audit, `"evidenceIds":["U000001"]`) {
+		t.Fatalf("reconciliation provenance missing: %q %v", audit, err)
 	}
 }
 

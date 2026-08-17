@@ -2,17 +2,18 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import {
   ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, DeleteMemory,
   EmbeddingStatus, Explain, Graph, InstallModel, Memories, ModelState, NeedsReviews,
-  Path, Prepare, Query, Remember, ResolveContextRequest, ResolveNeedsReview,
-  SelectModel, StartModels, Status, SyncEmbeddings, Update, Workspace,
+  Path, Prepare, Projects, Query, Reconciliations, Remember, ResolveContextRequest,
+  ResolveNeedsReview, SelectModel, SelectProject, StartModels, Status, SyncEmbeddings,
+  Update, Workspace,
 } from "../wailsjs/go/main/App";
-import type { app, graph, memory, prepare, project } from "../wailsjs/go/models";
-import { GraphView, NavIcon, NodeDetails, WorkspaceTopology, relativeTime, type Page } from "./ProjectViews";
+import type { app, graph, memory, prepare, project, reconcile } from "../wailsjs/go/models";
+import { GraphView, NavIcon, NodeDetails, ProjectPicker, WorkspaceTopology, reconciliationLabel, relativeTime, type Page } from "./ProjectViews";
 
 const pages: { id: Page; label: string; description: string }[] = [
   { id: "overview", label: "Overview", description: "프로젝트의 현재 상태를 한눈에 봅니다." },
   { id: "workspace", label: "Workspace", description: "Resource, View, Session의 연결을 살펴봅니다." },
   { id: "search", label: "Search", description: "프로젝트 안의 지식과 맥락을 찾습니다." },
-  { id: "graph", label: "Graph", description: "Material과 지식 사이의 관계를 탐색합니다." },
+  { id: "graph", label: "Graph", description: "Intent와 실제 Material·Knowledge의 연결을 탐색합니다." },
   { id: "inbox", label: "Inbox", description: "확인이 필요한 요청과 판단을 처리합니다." },
   { id: "memory", label: "Memory", description: "오래 유지할 프로젝트 맥락을 관리합니다." },
   { id: "settings", label: "Settings", description: "로컬 모델과 Embedding을 설정합니다." },
@@ -22,6 +23,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("overview");
   const [selectedViewID, setSelectedViewID] = useState("");
   const [status, setStatus] = useState<app.Status>();
+  const [projects, setProjects] = useState<project.Project[]>([]);
   const [modelState, setModelState] = useState<app.ModelState>();
   const [embeddingStatus, setEmbeddingStatus] = useState<app.EmbeddingStatus>();
   const [memories, setMemories] = useState<memory.Memory[]>([]);
@@ -29,6 +31,7 @@ export default function App() {
   const [reviews, setReviews] = useState<memory.Review[]>([]);
   const [decisions, setDecisions] = useState<prepare.Decision[]>([]);
   const [workspace, setWorkspace] = useState<project.Workspace>();
+  const [reconciliations, setReconciliations] = useState<reconcile.Run[]>([]);
   const [results, setResults] = useState<app.QueryResult>();
   const [materialGraph, setMaterialGraph] = useState<app.GraphResult>();
   const [selectedNode, setSelectedNode] = useState<graph.Node>();
@@ -47,15 +50,17 @@ export default function App() {
   const [kind, setKind] = useState("note");
 
   const refresh = useCallback(async () => {
-    const [nextStatus, nextMemories, nextModel, nextEmbedding, nextWorkspace, nextGraph, nextRequests, nextReviews, nextDecisions] = await Promise.all([
-      Status(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Graph("", 80),
+    const [nextStatus, nextProjects, nextMemories, nextModel, nextEmbedding, nextWorkspace, nextReconciliations, nextGraph, nextRequests, nextReviews, nextDecisions] = await Promise.all([
+      Status(), Projects(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Reconciliations(), Graph("", 80),
       ContextRequests("open"), NeedsReviews("open"), ContextDecisions(30),
     ]);
     setStatus(nextStatus);
+    setProjects(nextProjects ?? []);
     setMemories(nextMemories ?? []);
     setModelState(nextModel);
     setEmbeddingStatus(nextEmbedding);
     setWorkspace(nextWorkspace);
+    setReconciliations(nextReconciliations ?? []);
     setMaterialGraph(nextGraph);
     setRequests(nextRequests ?? []);
     setReviews(nextReviews ?? []);
@@ -69,11 +74,33 @@ export default function App() {
     return () => window.removeEventListener("focus", refreshView);
   }, [refresh]);
 
+  const reconciliationActive = reconciliations.some(run => run.phase !== "completed" && run.phase !== "failed");
+  useEffect(() => {
+    if (!reconciliationActive) return;
+    const timer = window.setInterval(() => void refresh().catch(error => setMessage(errorMessage(error))), 1500);
+    return () => window.clearInterval(timer);
+  }, [reconciliationActive, refresh]);
+
   async function updateProject() {
     await perform(async () => {
       const result = await Update();
       setMessage(`${result.materialCount}개 Material · ${result.extracted}개 추출 · ${result.entityCount}개 지식 · ${result.relationCount}개 관계`);
       await refresh();
+    });
+  }
+
+  async function switchProject(projectID: string) {
+    if (!projectID || projectID === status?.project.id) return;
+    await perform(async () => {
+      await SelectProject(projectID);
+      setSelectedViewID("");
+      setSelectedNode(undefined);
+      setResults(undefined);
+      setExplanation(undefined);
+      setPathResult(undefined);
+      setPrepared(undefined);
+      await refresh();
+      setMessage(`${projects.find(item => item.id === projectID)?.name ?? projectID} 프로젝트로 전환했습니다.`);
     });
   }
 
@@ -267,6 +294,10 @@ export default function App() {
   const model = modelState?.ollama;
   const currentPage = pages.find(item => item.id === page)!;
   const recentSessions = [...allSessions].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)).slice(0, 5);
+  const activeReconciliations = reconciliations.filter(run => run.phase !== "completed" && run.phase !== "failed");
+  const latestReconciliation = reconciliations[0];
+  const reconciliationBySession = new Map<string, reconcile.Run>();
+  for (const run of reconciliations) if (!reconciliationBySession.has(run.sessionId)) reconciliationBySession.set(run.sessionId, run);
 
   return (
     <div className="shell">
@@ -286,7 +317,7 @@ export default function App() {
       <main className="appMain">
         <header className="topbar">
           <div><p className="eyebrow">{currentPage.label}</p><h1>{currentPage.label}</h1><p>{currentPage.description}</p></div>
-          <div className="projectControl"><div><strong>{status?.project.name ?? "프로젝트 확인 중"}</strong><span>{status?.project.root}</span></div><button className="secondary" disabled={busy} onClick={() => void updateProject()}>{busy ? "처리 중…" : "↻ 업데이트"}</button></div>
+          <div className="projectControl"><ProjectPicker current={status?.project} projects={projects} busy={busy} onSelect={projectID => void switchProject(projectID)} /><button className="secondary" disabled={busy} onClick={() => void updateProject()}>{busy ? "처리 중…" : "↻ 업데이트"}</button></div>
         </header>
 
         <div className="pageBody">
@@ -298,18 +329,18 @@ export default function App() {
           <article><span>VIEWS</span><strong>{views.length}</strong><p>발견된 worktree와 작업 폴더</p></article>
           <article><span>SESSIONS</span><strong>{allSessions.filter(session => session.status === "active").length}</strong><p>{allSessions.length}개 기록 · 현재 맥락을 사용하는 에이전트</p></article>
           <article><span>ATTENTION</span><strong>{requests.length + reviews.length}</strong><p>{requests.length}개 요청 · {reviews.length}개 메모리 리뷰</p></article>
-          <article><span>ENGINE</span><strong>{model?.available ? "ON" : "LOCAL"}</strong><p>구조 분석은 모델 없이 동작</p></article>
+          <article><span>RECONCILE</span><strong>{activeReconciliations.length || "—"}</strong><p>{activeReconciliations[0] ? reconciliationLabel(activeReconciliations[0].phase) : latestReconciliation ? `최근 ${reconciliationLabel(latestReconciliation.phase)}` : "실행 기록 없음"}</p></article>
         </section>
         <section className="overviewGrid">
           <article className="panel attentionCard"><div className="sectionTitle"><div><p className="eyebrow">ATTENTION</p><h2>확인이 필요한 항목</h2></div><button className="textButton" onClick={() => setPage("inbox")}>Inbox 열기 →</button></div>
             <div className="attentionRows"><button onClick={() => setPage("inbox")}><span>Context 요청</span><strong>{requests.length}</strong><small>답을 기다리는 요청</small></button><button onClick={() => setPage("inbox")}><span>메모리 리뷰</span><strong>{reviews.length}</strong><small>유효성 확인 필요</small></button></div>
           </article>
           <article className="panel recentCard"><div className="sectionTitle"><div><p className="eyebrow">RECENT SESSIONS</p><h2>최근 작업</h2></div><button className="textButton" onClick={() => setPage("workspace")}>Workspace 열기 →</button></div>
-            {recentSessions.length === 0 ? <p className="empty">아직 기록된 Session이 없습니다.</p> : <div className="recentList">{recentSessions.map(session => <button key={session.id} onClick={() => setPage("workspace")}><span className={`sessionStatus ${session.status}`} /><div><strong>{session.agent}</strong><small>{session.id}</small></div><time>{relativeTime(session.updatedAt)}</time></button>)}</div>}
+            {recentSessions.length === 0 ? <p className="empty">아직 기록된 Session이 없습니다.</p> : <div className="recentList">{recentSessions.map(session => { const run = reconciliationBySession.get(session.id); return <button key={session.id} onClick={() => setPage("workspace")}><span className={`sessionStatus ${session.status}`} /><div><strong>{session.agent}</strong><small>{session.id}{run ? ` · ${reconciliationLabel(run.phase)}` : ""}</small></div><time>{relativeTime(session.updatedAt)}</time></button>; })}</div>}
           </article>
         </section></>}
 
-        {page === "workspace" && workspace && <WorkspaceTopology workspace={workspace} selectedViewID={selectedViewID} onSelectView={setSelectedViewID} />}
+        {page === "workspace" && workspace && <WorkspaceTopology workspace={workspace} reconciliations={reconciliations} selectedViewID={selectedViewID} onSelectView={setSelectedViewID} />}
 
         {page === "search" && <section className="panel">
           <div className="sectionTitle"><div><p className="eyebrow">RETRIEVE</p><h2>필요한 맥락 찾기</h2></div><span>프로젝트 범위</span></div>

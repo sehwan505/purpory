@@ -40,10 +40,44 @@ func TestQueueSnapshotsAndCompletesIdempotently(t *testing.T) {
 	if _, err := os.Stat(first); err != nil {
 		t.Fatalf("failed job was not retained: %v", err)
 	}
-	if err := Process(first, func(Job) error { calls++; return nil }); err != nil {
+	runs, err := Runs("demo", 20)
+	if err != nil || len(runs) != 1 || runs[0].Phase != PhaseFailed || runs[0].Detail != "model unavailable" {
+		t.Fatalf("failed run was not visible: %#v %v", runs, err)
+	}
+	if err := Process(first, func(Job) error { calls++; return SetPhase(first, PhaseApplying, "후보 1개 저장") }); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
 		t.Fatalf("job ran %d times", calls)
+	}
+	runs, err = Runs("demo", 20)
+	if err != nil || len(runs) != 1 || runs[0].Phase != PhaseCompleted || runs[0].Detail != "후보 1개 저장" {
+		t.Fatalf("completed run was not visible: %#v %v", runs, err)
+	}
+	if other, err := Runs("other", 20); err != nil || len(other) != 0 {
+		t.Fatalf("run escaped its project: %#v %v", other, err)
+	}
+}
+
+func TestRejectQuarantinesUnreadableJob(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "queue")
+	t.Setenv("PURPORY_RECONCILE_DIR", root)
+	pending, err := queueDirectory("pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(pending, "broken.json")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reject(path, errors.New("invalid job")); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := Pending()
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("rejected job remained pending: %#v %v", jobs, err)
+	}
+	if _, err := os.Stat(filepath.Join(pending, "broken.invalid.json")); err != nil {
+		t.Fatalf("rejected job was not preserved: %v", err)
 	}
 }

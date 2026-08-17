@@ -10,8 +10,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+)
+
+const (
+	PhaseQueued    = "queued"
+	PhaseRunning   = "running"
+	PhaseReading   = "reading"
+	PhaseUpdating  = "updating"
+	PhaseProposing = "proposing"
+	PhaseApplying  = "applying"
+	PhaseCompleted = "completed"
+	PhaseFailed    = "failed"
 )
 
 type Job struct {
@@ -25,6 +37,25 @@ type Job struct {
 	TranscriptPath string `json:"transcript"`
 	Reason         string `json:"reason,omitempty"`
 	QueuedAt       int64  `json:"queuedAt"`
+	Phase          string `json:"phase,omitempty"`
+	Detail         string `json:"detail,omitempty"`
+	UpdatedAt      int64  `json:"updatedAt,omitempty"`
+}
+
+type Run struct {
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+	Agent     string `json:"agent"`
+	ProjectID string `json:"projectId"`
+	Phase     string `json:"phase"`
+	Detail    string `json:"detail,omitempty"`
+	QueuedAt  string `json:"queuedAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+type completedJob struct {
+	Job         Job   `json:"job"`
+	CompletedAt int64 `json:"completedAt"`
 }
 
 var ErrJobLocked = errors.New("process reconciliation: job is already running")
@@ -69,7 +100,8 @@ func Enqueue(agent, sessionID, projectID, cwd, dbPath, transcriptPath, reason st
 		return "", fmt.Errorf("queue reconciliation: inspect snapshot: %w", err)
 	}
 	if _, err := os.Stat(jobPath); errors.Is(err, os.ErrNotExist) {
-		job := Job{SchemaVersion: 1, ID: id, Agent: agent, SessionID: sessionID, ProjectID: projectID, CWD: root, DBPath: dbPath, TranscriptPath: snapshot, Reason: reason, QueuedAt: time.Now().Unix()}
+		now := time.Now().Unix()
+		job := Job{SchemaVersion: 1, ID: id, Agent: agent, SessionID: sessionID, ProjectID: projectID, CWD: root, DBPath: dbPath, TranscriptPath: snapshot, Reason: reason, QueuedAt: now, Phase: PhaseQueued, UpdatedAt: now}
 		if err := atomicJSON(jobPath, job); err != nil {
 			return "", err
 		}
@@ -127,6 +159,9 @@ func Process(jobPath string, reconcile func(Job) error) error {
 	if err != nil {
 		return err
 	}
+	if err := SetPhase(jobPath, PhaseRunning, ""); err != nil {
+		return err
+	}
 	completed, err := queueDirectory("completed")
 	if err != nil {
 		return err
@@ -138,15 +173,108 @@ func Process(jobPath string, reconcile func(Job) error) error {
 		return fmt.Errorf("process reconciliation: inspect marker: %w", err)
 	}
 	if err := reconcile(job); err != nil {
+		_ = SetPhase(jobPath, PhaseFailed, err.Error())
 		failure := strings.TrimSuffix(jobPath, ".json") + ".error.json"
 		_ = atomicJSON(failure, map[string]any{"error": err.Error(), "failedAt": time.Now().Unix()})
 		return err
 	}
-	if err := atomicJSON(marker, map[string]any{"job": job, "completedAt": time.Now().Unix()}); err != nil {
+	if err := SetPhase(jobPath, PhaseCompleted, ""); err != nil {
+		return err
+	}
+	job, err = LoadJob(jobPath)
+	if err != nil {
+		return err
+	}
+	if err := atomicJSON(marker, completedJob{Job: job, CompletedAt: time.Now().Unix()}); err != nil {
 		return err
 	}
 	failure := strings.TrimSuffix(jobPath, ".json") + ".error.json"
 	return cleanup(jobPath, job.TranscriptPath, failure)
+}
+
+func SetPhase(jobPath, phase, detail string) error {
+	if !validPhase(phase) {
+		return errors.New("update reconciliation phase: invalid phase")
+	}
+	job, err := LoadJob(jobPath)
+	if err != nil {
+		return err
+	}
+	job.Phase = phase
+	if detail != "" {
+		job.Detail = detail
+	}
+	job.UpdatedAt = time.Now().Unix()
+	return atomicJSON(jobPath, job)
+}
+
+func Runs(projectID string, limit int) ([]Run, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, errors.New("list reconciliations: project is required")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	pending, err := Pending()
+	if err != nil {
+		return nil, err
+	}
+	var runs []Run
+	for _, path := range pending {
+		job, err := LoadJob(path)
+		if err != nil || job.ProjectID != projectID {
+			continue
+		}
+		phase := job.Phase
+		if phase == "" {
+			phase = PhaseQueued
+		}
+		runs = append(runs, run(job, phase, job.UpdatedAt))
+	}
+	completed, err := queueDirectory("completed")
+	if err != nil {
+		return nil, err
+	}
+	markers, err := filepath.Glob(filepath.Join(completed, "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("list completed reconciliations: %w", err)
+	}
+	// ponytail: completed markers are scanned directly; index them only if real histories make this slow.
+	for _, path := range markers {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var completed completedJob
+		if json.Unmarshal(content, &completed) != nil || completed.Job.ProjectID != projectID {
+			continue
+		}
+		runs = append(runs, run(completed.Job, PhaseCompleted, completed.CompletedAt))
+	}
+	sort.Slice(runs, func(i, j int) bool { return runs[i].UpdatedAt > runs[j].UpdatedAt })
+	if len(runs) > limit {
+		runs = runs[:limit]
+	}
+	return runs, nil
+}
+
+func run(job Job, phase string, updatedAt int64) Run {
+	if updatedAt == 0 {
+		updatedAt = job.QueuedAt
+	}
+	return Run{
+		ID: job.ID, SessionID: job.SessionID, Agent: job.Agent, ProjectID: job.ProjectID,
+		Phase: phase, Detail: job.Detail,
+		QueuedAt:  time.Unix(job.QueuedAt, 0).UTC().Format(time.RFC3339),
+		UpdatedAt: time.Unix(updatedAt, 0).UTC().Format(time.RFC3339),
+	}
+}
+
+func validPhase(phase string) bool {
+	return phase == PhaseQueued || phase == PhaseRunning || phase == PhaseReading ||
+		phase == PhaseUpdating || phase == PhaseProposing || phase == PhaseApplying ||
+		phase == PhaseCompleted || phase == PhaseFailed
 }
 
 func Pending() ([]string, error) {
@@ -160,11 +288,26 @@ func Pending() ([]string, error) {
 	}
 	result := paths[:0]
 	for _, path := range paths {
-		if !strings.HasSuffix(path, ".error.json") {
+		if !strings.HasSuffix(path, ".error.json") && !strings.HasSuffix(path, ".invalid.json") {
 			result = append(result, path)
 		}
 	}
 	return result, nil
+}
+
+// Reject preserves an unreadable job while keeping it out of the retry queue.
+func Reject(jobPath string, cause error) error {
+	if cause == nil || !strings.HasSuffix(jobPath, ".json") {
+		return errors.New("reject reconciliation job: path and cause are required")
+	}
+	failure := strings.TrimSuffix(jobPath, ".json") + ".error.json"
+	if err := atomicJSON(failure, map[string]any{"error": cause.Error(), "failedAt": time.Now().Unix()}); err != nil {
+		return err
+	}
+	if err := os.Rename(jobPath, strings.TrimSuffix(jobPath, ".json")+".invalid.json"); err != nil {
+		return fmt.Errorf("reject reconciliation job: %w", err)
+	}
+	return nil
 }
 
 func queueDirectory(name string) (string, error) {

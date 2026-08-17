@@ -154,6 +154,27 @@ func (s *Service) Status() Status {
 	return Status{Version: "0.1.0", Project: s.project}
 }
 
+func (s *Service) Projects(ctx context.Context) ([]project.Project, error) {
+	return s.store.Projects(ctx)
+}
+
+func (s *Service) SelectProject(ctx context.Context, projectID string) (Status, error) {
+	selected, err := s.store.Project(ctx, strings.TrimSpace(projectID))
+	if err != nil {
+		return Status{}, err
+	}
+	workspace, err := s.workspace.Observe(ctx, selected.Root)
+	if err != nil {
+		return Status{}, err
+	}
+	selected.Root = workspace.Project.Root
+	if err := s.store.SaveWorkspace(ctx, selected.ID, workspace.Resources); err != nil {
+		return Status{}, err
+	}
+	s.project = selected
+	return s.Status(), nil
+}
+
 func (s *Service) Remember(ctx context.Context, key string, kind memory.Kind, value, source *string) (store.SaveResult, error) {
 	entry, err := memory.New(s.project.ID, key, kind, value, source)
 	if err != nil {
@@ -222,14 +243,18 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 	if err != nil {
 		return QueryResult{}, err
 	}
-	ids := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		ids = append(ids, node.ID)
-	}
-	nodes, edges, err := s.store.Neighborhood(ctx, s.project.ID, ids, 2, limit*4)
+	contextGraph, err := s.contextGraph(ctx)
 	if err != nil {
 		return QueryResult{}, err
 	}
+	ids := make([]string, 0, len(memories)+len(nodes))
+	for _, entry := range memories {
+		ids = append(ids, memoryNodeID(entry))
+	}
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	nodes, edges := contextGraph.neighborhood(ids, 2, limit*4)
 	return QueryResult{Memories: memories, Nodes: nodes, Edges: edges}, nil
 }
 
@@ -237,39 +262,16 @@ func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResu
 	if limit <= 0 || limit > 200 {
 		limit = 80
 	}
-	scope = strings.TrimSpace(scope)
-	if scope != "" {
-		seeds, err := s.store.SearchNodes(ctx, s.project.ID, scope, limit)
-		if err != nil || len(seeds) == 0 {
-			return GraphResult{}, err
-		}
-		ids := make([]string, len(seeds))
-		for index, node := range seeds {
-			ids[index] = node.ID
-		}
-		nodes, edges, err := s.store.Neighborhood(ctx, s.project.ID, ids, 2, limit)
-		return GraphResult{Nodes: nodes, Edges: edges, TotalNodes: len(nodes), TotalEdges: len(edges)}, err
-	}
-	nodes, claims, err := s.store.Knowledge(ctx, s.project.ID)
+	contextGraph, err := s.contextGraph(ctx)
 	if err != nil {
 		return GraphResult{}, err
 	}
-	edges := resolve.Claims(nodes, claims)
-	result := GraphResult{TotalNodes: len(nodes), TotalEdges: len(edges), Truncated: len(nodes) > limit}
-	if len(nodes) > limit {
-		nodes = nodes[:limit]
+	seeds := contextGraph.seeds(scope)
+	if strings.TrimSpace(scope) != "" && len(seeds) == 0 {
+		return GraphResult{}, nil
 	}
-	selected := make(map[string]bool, len(nodes))
-	for _, node := range nodes {
-		selected[node.ID] = true
-	}
-	result.Nodes = nodes
-	for _, edge := range edges {
-		if selected[edge.SourceID] && selected[edge.TargetID] {
-			result.Edges = append(result.Edges, edge)
-		}
-	}
-	return result, nil
+	nodes, edges := contextGraph.neighborhood(seeds, 2, limit)
+	return GraphResult{Nodes: nodes, Edges: edges, TotalNodes: len(contextGraph.nodes), TotalEdges: len(contextGraph.edges), Truncated: len(contextGraph.nodes) > len(nodes)}, nil
 }
 
 func (s *Service) search(ctx context.Context, query string, limit int) ([]memory.Memory, []graph.Node, error) {
@@ -322,23 +324,31 @@ func searchTerms(query string) []string {
 }
 
 func (s *Service) Explain(ctx context.Context, query string) (ExplainResult, error) {
-	if entry, err := s.store.Memory(ctx, s.project.ID, strings.TrimSpace(query)); err == nil {
+	contextGraph, err := s.contextGraph(ctx)
+	if err != nil {
+		return ExplainResult{}, err
+	}
+	node, found := contextGraph.find(query)
+	if !found {
+		return ExplainResult{}, fmt.Errorf("explain context: %w", sql.ErrNoRows)
+	}
+	explanation := contextGraph.explanation(node)
+	result := ExplainResult{Graph: &explanation}
+	if entry, found := contextGraph.memoryByNode[node.ID]; found {
 		if err := s.store.RecordMemoryUsage(ctx, s.project.ID, entry.Key, "expanded"); err != nil {
 			return ExplainResult{}, err
 		}
-		return ExplainResult{Memory: &entry}, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return ExplainResult{}, err
+		result.Memory = &entry
 	}
-	explanation, err := s.store.ExplainNode(ctx, s.project.ID, query)
-	if err != nil {
-		return ExplainResult{}, fmt.Errorf("explain context: %w", err)
-	}
-	return ExplainResult{Graph: &explanation}, nil
+	return result, nil
 }
 
 func (s *Service) Path(ctx context.Context, source, target string) (graph.Path, error) {
-	return s.store.Path(ctx, s.project.ID, source, target)
+	contextGraph, err := s.contextGraph(ctx)
+	if err != nil {
+		return graph.Path{}, err
+	}
+	return contextGraph.path(source, target)
 }
 
 func (s *Service) Update(ctx context.Context) (UpdateResult, error) {

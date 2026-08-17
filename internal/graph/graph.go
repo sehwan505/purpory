@@ -1,6 +1,18 @@
 // Package graph defines the structural graph shared by indexing and retrieval.
 package graph
 
+const (
+	RelationAppliesTo      = "applies_to"
+	RelationRealizedBy     = "realized_by"
+	RelationVerifiedBy     = "verified_by"
+	RelationContradictedBy = "contradicted_by"
+)
+
+func IsIntentMaterialRelation(value string) bool {
+	return value == RelationAppliesTo || value == RelationRealizedBy ||
+		value == RelationVerifiedBy || value == RelationContradictedBy
+}
+
 type Node struct {
 	ID          string `json:"id"`
 	Label       string `json:"label"`

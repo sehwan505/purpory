@@ -18,7 +18,9 @@ func drainReconciliations(ctx context.Context) error {
 	for _, path := range paths {
 		job, err := reconcile.LoadJob(path)
 		if err != nil {
-			failures = append(failures, err)
+			if rejectErr := reconcile.Reject(path, err); rejectErr != nil {
+				failures = append(failures, errors.Join(err, rejectErr))
+			}
 			continue
 		}
 		service, err := product.Open(ctx, job.CWD, job.DBPath, job.ProjectID)

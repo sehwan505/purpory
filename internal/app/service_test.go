@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/project"
@@ -77,6 +79,48 @@ func TestOpenResolvesRegisteredProjectFromChildDirectory(t *testing.T) {
 	}
 	if status := service.Status(); status.Project.ID != "demo" || status.Project.Root != resolvedChild {
 		t.Fatalf("unexpected active project: %#v", status.Project)
+	}
+}
+
+func TestSelectProjectSwitchesWorkspaceWithoutMixingProjectData(t *testing.T) {
+	ctx := context.Background()
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	if _, err := RegisterProject(ctx, firstRoot, database, "first", "First"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RegisterProject(ctx, secondRoot, database, "second", "Second"); err != nil {
+		t.Fatal(err)
+	}
+	service, err := Open(ctx, firstRoot, database, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	value := "first project only"
+	if _, err := service.Remember(ctx, "intent.first", memory.Decision, &value, nil); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := service.Projects(ctx)
+	if err != nil || len(projects) != 2 {
+		t.Fatalf("registered projects missing: %#v %v", projects, err)
+	}
+	resolvedSecond, err := filepath.EvalSymlinks(secondRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.SelectProject(ctx, "second")
+	if err != nil || status.Project.ID != "second" || status.Project.Root != resolvedSecond {
+		t.Fatalf("project did not switch: %#v %v", status, err)
+	}
+	workspace, err := service.Workspace(ctx)
+	if err != nil || workspace.Project.ID != "second" {
+		t.Fatalf("workspace did not follow selection: %#v %v", workspace, err)
+	}
+	memories, err := service.Memories(ctx, "")
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("project memory leaked across selection: %#v %v", memories, err)
 	}
 }
 
@@ -271,6 +315,45 @@ func TestPrepareUsesSourceLinkedActivePathAsAwareness(t *testing.T) {
 	}
 	if result.Action != "retrieve" || len(result.Deliveries) != 0 || len(result.Awareness) != 1 || result.Awareness[0].Key != "intent.auth-review" || result.Awareness[0].Reason != "active-path-context" {
 		t.Fatalf("active-path awareness missing: %#v", result)
+	}
+}
+
+func TestIntentGraphDeliversLinkedMaterialEvidence(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "release.md"), []byte("# Release\nShip from tagged builds.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
+	if _, err := service.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	value := "Release artifacts must come from tagged builds."
+	if _, err := service.Remember(context.Background(), "intent.release", memory.Decision, &value, nil); err != nil {
+		t.Fatal(err)
+	}
+	link := graph.Link{SourceKind: "intent", SourceRef: "intent.release", Relation: graph.RelationRealizedBy, TargetKind: "material", TargetRef: "file:release.md"}
+	if err := service.store.SaveLink(context.Background(), "demo", link); err != nil {
+		t.Fatal(err)
+	}
+
+	contextGraph, err := service.Graph(context.Background(), "intent.release", 20)
+	if err != nil || len(contextGraph.Nodes) < 2 || len(contextGraph.Edges) == 0 || contextGraph.Nodes[0].Kind != "intent" {
+		t.Fatalf("intent graph missing: %#v %v", contextGraph, err)
+	}
+	explanation, err := service.Explain(context.Background(), "intent.release")
+	if err != nil || explanation.Memory == nil || explanation.Graph == nil || len(explanation.Graph.Connections) != 1 {
+		t.Fatalf("intent explanation missing evidence: %#v %v", explanation, err)
+	}
+	path, err := service.Path(context.Background(), "intent.release", "file:release.md")
+	if err != nil || len(path.Nodes) != 2 || len(path.Edges) != 1 {
+		t.Fatalf("intent path missing: %#v %v", path, err)
+	}
+
+	query := "tagged builds release"
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
+	prepared, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: query, SessionID: "agent", WorkingDirectory: root, TokenBudget: 512})
+	if err != nil || len(prepared.Deliveries) != 2 || prepared.Deliveries[0].Key != "intent.release" || !strings.Contains(prepared.Deliveries[1].Rendered, "file:release.md") || !slices.Contains(prepared.Deliveries[1].Signals, "linked:"+graph.RelationRealizedBy) {
+		t.Fatalf("linked material was not delivered with intent: %#v %v", prepared, err)
 	}
 }
 
