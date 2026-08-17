@@ -12,7 +12,7 @@ const pages: { id: Page; label: string; description: string }[] = [
   { id: "overview", label: "Overview", description: "프로젝트의 현재 상태를 한눈에 봅니다." },
   { id: "workspace", label: "Workspace", description: "Resource, View, Session의 연결을 살펴봅니다." },
   { id: "search", label: "Search", description: "프로젝트 안의 지식과 맥락을 찾습니다." },
-  { id: "graph", label: "Graph", description: "Material과 지식 사이의 관계를 탐색합니다." },
+  { id: "graph", label: "Graph", description: "Intent와 실제 Material·Knowledge의 연결을 탐색합니다." },
   { id: "inbox", label: "Inbox", description: "확인이 필요한 요청과 판단을 처리합니다." },
   { id: "memory", label: "Memory", description: "오래 유지할 프로젝트 맥락을 관리합니다." },
   { id: "settings", label: "Settings", description: "로컬 모델과 Embedding을 설정합니다." },

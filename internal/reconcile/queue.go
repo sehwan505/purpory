@@ -160,11 +160,26 @@ func Pending() ([]string, error) {
 	}
 	result := paths[:0]
 	for _, path := range paths {
-		if !strings.HasSuffix(path, ".error.json") {
+		if !strings.HasSuffix(path, ".error.json") && !strings.HasSuffix(path, ".invalid.json") {
 			result = append(result, path)
 		}
 	}
 	return result, nil
+}
+
+// Reject preserves an unreadable job while keeping it out of the retry queue.
+func Reject(jobPath string, cause error) error {
+	if cause == nil || !strings.HasSuffix(jobPath, ".json") {
+		return errors.New("reject reconciliation job: path and cause are required")
+	}
+	failure := strings.TrimSuffix(jobPath, ".json") + ".error.json"
+	if err := atomicJSON(failure, map[string]any{"error": cause.Error(), "failedAt": time.Now().Unix()}); err != nil {
+		return err
+	}
+	if err := os.Rename(jobPath, strings.TrimSuffix(jobPath, ".json")+".invalid.json"); err != nil {
+		return fmt.Errorf("reject reconciliation job: %w", err)
+	}
+	return nil
 }
 
 func queueDirectory(name string) (string, error) {

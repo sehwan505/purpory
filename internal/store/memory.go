@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 )
 
@@ -85,6 +86,14 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		if proposal.Memory.ProjectID != projectID || seen[proposal.Memory.Key] {
 			return nil, errors.New("reconcile memory: proposals must have one project and unique keys")
 		}
+		if len(proposal.Links) > 0 && len(proposal.EvidenceIDs) == 0 {
+			return nil, errors.New("reconcile memory: linked proposals require user evidence")
+		}
+		for _, link := range proposal.Links {
+			if link.SourceKind != "intent" || link.SourceRef != proposal.Memory.Key || link.TargetKind != "material" || strings.TrimSpace(link.TargetRef) == "" || !graph.IsIntentMaterialRelation(link.Relation) {
+				return nil, errors.New("reconcile memory: links must connect their intent to material with a supported semantic relation")
+			}
+		}
 		seen[proposal.Memory.Key] = true
 	}
 	connection, err := s.db.Conn(ctx)
@@ -114,14 +123,20 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		}
 	}
 	type auditChange struct {
-		Key       string         `json:"key"`
-		Action    string         `json:"action"`
-		Before    *memory.Memory `json:"before,omitempty"`
-		After     memory.Memory  `json:"after"`
-		VersionID int64          `json:"versionId,omitempty"`
+		Key         string         `json:"key"`
+		Action      string         `json:"action"`
+		Before      *memory.Memory `json:"before,omitempty"`
+		After       memory.Memory  `json:"after"`
+		VersionID   int64          `json:"versionId,omitempty"`
+		EvidenceIDs []string       `json:"evidenceIds"`
+	}
+	type auditLink struct {
+		graph.Link
+		EvidenceIDs []string `json:"evidenceIds"`
 	}
 	results := make([]SaveResult, 0, len(proposals))
 	var changes []auditChange
+	var links []auditLink
 	for _, proposal := range proposals {
 		var before memory.Memory
 		var value, source sql.NullString
@@ -146,11 +161,25 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		}
 		results = append(results, result)
 		if result.Action != "unchanged" {
-			changes = append(changes, auditChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID})
+			changes = append(changes, auditChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs})
+		}
+		for _, link := range proposal.Links {
+			result, err := connection.ExecContext(ctx, `
+				INSERT INTO links(project_id, source_kind, source_ref, relation, target_kind, target_ref)
+				VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+			`, projectID, link.SourceKind, link.SourceRef, link.Relation, link.TargetKind, link.TargetRef)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile memory: save link: %w", err)
+			}
+			if count, err := result.RowsAffected(); err != nil {
+				return nil, fmt.Errorf("reconcile memory: link result: %w", err)
+			} else if count > 0 {
+				links = append(links, auditLink{Link: link, EvidenceIDs: proposal.EvidenceIDs})
+			}
 		}
 	}
-	if len(changes) > 0 {
-		encoded, err := json.Marshal(map[string]any{"changes": changes})
+	if len(changes) > 0 || len(links) > 0 {
+		encoded, err := json.Marshal(map[string]any{"changes": changes, "links": links})
 		if err != nil {
 			return nil, fmt.Errorf("reconcile memory: encode audit: %w", err)
 		}

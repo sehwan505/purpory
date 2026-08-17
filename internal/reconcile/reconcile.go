@@ -11,10 +11,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 )
 
 const maximumMessageBytes = 16 << 20
+
+var errInvalidCandidate = errors.New("invalid reconciliation candidate")
 
 type Message struct {
 	ID   string `json:"id"`
@@ -23,12 +26,18 @@ type Message struct {
 }
 
 type Candidate struct {
-	ID          string      `json:"id,omitempty"`
-	Key         string      `json:"key"`
-	Kind        memory.Kind `json:"kind"`
-	Value       string      `json:"value"`
-	EvidenceIDs []string    `json:"evidenceIds"`
-	SourceIDs   []string    `json:"sourceIds,omitempty"`
+	ID            string         `json:"id,omitempty"`
+	Key           string         `json:"key"`
+	Kind          memory.Kind    `json:"kind"`
+	Value         string         `json:"value"`
+	EvidenceIDs   []string       `json:"evidenceIds"`
+	MaterialLinks []MaterialLink `json:"materialLinks,omitempty"`
+	SourceIDs     []string       `json:"sourceIds,omitempty"`
+}
+
+type MaterialLink struct {
+	Relation    string `json:"relation"`
+	MaterialRef string `json:"materialRef"`
 }
 
 type Model interface {
@@ -70,7 +79,7 @@ func ReadTranscript(path string) ([]Message, error) {
 	return messages, nil
 }
 
-func Propose(ctx context.Context, messages []Message, model Model) ([]Candidate, error) {
+func Propose(ctx context.Context, messages []Message, model Model, materialRefs []string) ([]Candidate, error) {
 	if model == nil || model.ContextTokens() < 1024 {
 		return nil, errors.New("reconcile transcript: valid model is required")
 	}
@@ -80,6 +89,7 @@ func Propose(ctx context.Context, messages []Message, model Model) ([]Candidate,
 	}
 	var candidates []Candidate
 	sequence := 0
+	allowedMaterials := set(materialRefs)
 	for _, chunk := range chunks(messages, budget) {
 		extracted, err := model.Extract(ctx, chunk.text)
 		if err != nil {
@@ -87,7 +97,11 @@ func Propose(ctx context.Context, messages []Message, model Model) ([]Candidate,
 		}
 		for _, candidate := range extracted {
 			candidate.EvidenceIDs = unique(candidate.EvidenceIDs)
-			if err := validate(candidate, chunk.userIDs); err != nil {
+			candidate.MaterialLinks = uniqueLinks(candidate.MaterialLinks)
+			if err := validate(candidate, chunk.userIDs, allowedMaterials); err != nil {
+				if errors.Is(err, errInvalidCandidate) {
+					continue
+				}
 				return nil, err
 			}
 			sequence++
@@ -107,6 +121,9 @@ func Propose(ctx context.Context, messages []Message, model Model) ([]Candidate,
 	for _, key := range keys {
 		candidate, err := reduce(ctx, model, grouped[key])
 		if err != nil {
+			if errors.Is(err, errInvalidCandidate) {
+				continue
+			}
 			return nil, err
 		}
 		candidate.ID = ""
@@ -192,18 +209,28 @@ func reduce(ctx context.Context, model Model, candidates []Candidate) (Candidate
 			}
 			allowedEvidence := map[string]bool{}
 			allowedSources := map[string]bool{}
+			allowedLinks := map[MaterialLink]bool{}
 			for _, item := range pair {
 				allowedSources[item.ID] = true
 				for _, evidence := range item.EvidenceIDs {
 					allowedEvidence[evidence] = true
 				}
+				for _, link := range item.MaterialLinks {
+					allowedLinks[link] = true
+				}
 			}
 			candidate.EvidenceIDs = unique(candidate.EvidenceIDs)
-			if err := validate(candidate, allowedEvidence); err != nil {
+			candidate.MaterialLinks = uniqueLinks(candidate.MaterialLinks)
+			if err := validate(candidate, allowedEvidence, nil); err != nil {
 				return Candidate{}, err
 			}
+			for _, link := range candidate.MaterialLinks {
+				if !allowedLinks[link] {
+					return Candidate{}, invalidCandidate("consolidation invented material link", nil)
+				}
+			}
 			if !sameSet(candidate.SourceIDs, allowedSources) {
-				return Candidate{}, errors.New("reconcile transcript: consolidation omitted candidates")
+				return Candidate{}, invalidCandidate("consolidation omitted candidates", nil)
 			}
 			candidate.ID = fmt.Sprintf("R%s", pair[1].ID)
 			next = append(next, candidate)
@@ -213,23 +240,49 @@ func reduce(ctx context.Context, model Model, candidates []Candidate) (Candidate
 	return candidates[0], nil
 }
 
-func validate(candidate Candidate, allowedEvidence map[string]bool) error {
+func validate(candidate Candidate, allowedEvidence, allowedMaterials map[string]bool) error {
 	value := candidate.Value
 	if len([]rune(value)) > 4096 {
-		return errors.New("reconcile transcript: candidate value exceeds 4096 characters")
+		return invalidCandidate("candidate value exceeds 4096 characters", nil)
 	}
 	if _, err := memory.New("validation", candidate.Key, candidate.Kind, &value, nil); err != nil {
-		return fmt.Errorf("reconcile transcript: candidate: %w", err)
+		return invalidCandidate("candidate", err)
 	}
 	if len(candidate.EvidenceIDs) == 0 {
-		return errors.New("reconcile transcript: candidate has no user evidence")
+		return invalidCandidate("candidate has no user evidence", nil)
 	}
 	for _, evidence := range candidate.EvidenceIDs {
 		if !allowedEvidence[evidence] {
-			return errors.New("reconcile transcript: candidate cites non-user evidence")
+			return invalidCandidate("candidate cites non-user evidence", nil)
+		}
+	}
+	if candidate.Kind != memory.Decision && len(candidate.MaterialLinks) > 0 {
+		return invalidCandidate("only intent candidates can link materials", nil)
+	}
+	for _, link := range candidate.MaterialLinks {
+		if !graph.IsIntentMaterialRelation(link.Relation) {
+			return invalidCandidate("candidate uses unsupported material relation", nil)
+		}
+		if allowedMaterials != nil && !allowedMaterials[link.MaterialRef] {
+			return invalidCandidate("candidate cites unavailable material", nil)
 		}
 	}
 	return nil
+}
+
+func invalidCandidate(message string, cause error) error {
+	if cause != nil {
+		return fmt.Errorf("%w: %s: %v", errInvalidCandidate, message, cause)
+	}
+	return fmt.Errorf("%w: %s", errInvalidCandidate, message)
+}
+
+func set(values []string) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		result[value] = true
+	}
+	return result
 }
 
 func sameSet(values []string, allowed map[string]bool) bool {
@@ -249,6 +302,18 @@ func sameSet(values []string, allowed map[string]bool) bool {
 func unique(values []string) []string {
 	seen := map[string]bool{}
 	result := values[:0]
+	for _, value := range values {
+		if !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func uniqueLinks(values []MaterialLink) []MaterialLink {
+	seen := map[MaterialLink]bool{}
+	result := make([]MaterialLink, 0, len(values))
 	for _, value := range values {
 		if !seen[value] {
 			seen[value] = true

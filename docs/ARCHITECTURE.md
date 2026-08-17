@@ -100,6 +100,9 @@ Purpory retrieves Intent first and uses linked Materials or Knowledge as concret
 evidence that the intent exists in the project. Finding related source code is
 one possible evidence lookup, not the primary product objective. `update` keeps
 the evidence current without taking ownership of intent or its durable links.
+Workspace, View, and Session remain operational topology. Reconciliation may use
+them as input and audit provenance, but never projects them as canonical graph
+nodes or edges.
 
 ## Extension examples
 

@@ -47,3 +47,26 @@ func TestQueueSnapshotsAndCompletesIdempotently(t *testing.T) {
 		t.Fatalf("job ran %d times", calls)
 	}
 }
+
+func TestRejectQuarantinesUnreadableJob(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "queue")
+	t.Setenv("PURPORY_RECONCILE_DIR", root)
+	pending, err := queueDirectory("pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(pending, "broken.json")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reject(path, errors.New("invalid job")); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := Pending()
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("rejected job remained pending: %#v %v", jobs, err)
+	}
+	if _, err := os.Stat(filepath.Join(pending, "broken.invalid.json")); err != nil {
+		t.Fatalf("rejected job was not preserved: %v", err)
+	}
+}

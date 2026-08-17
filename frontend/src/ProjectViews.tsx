@@ -31,7 +31,7 @@ export function GraphView({ nodes, edges, selectedID, onSelect }: {
 
   return <div className="graphCanvas">
     <div className="graphStats">{visibleNodes.length}/{nodes.length} nodes · {visibleEdges.length}/{edges.length} edges</div>
-    <svg viewBox="0 0 480 350" role="img" aria-label="Material 관계 그래프">
+    <svg viewBox="0 0 480 350" role="img" aria-label="Intent, Material, Knowledge 관계 그래프">
       <defs><pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M 20 0 L 0 0 0 20" fill="none" stroke="#dfe3da" strokeWidth=".5" /></pattern></defs>
       <rect width="480" height="350" fill="url(#grid)" />
       {visibleEdges.map((edge, index) => {
@@ -72,7 +72,11 @@ export function NodeDetails({ node, explanation, onSelect }: {
 }
 
 function nodeColor(kind: string) {
+  if (kind === "intent") return "#b12a63";
   if (kind === "material") return "#3973a5";
+  if (kind === "knowledge") return "#5f7358";
+  if (kind === "reference") return "#786247";
+  if (kind === "missing") return "#a33b32";
   if (kind === "section") return "#97651b";
   if (kind === "type") return "#7559a2";
   if (kind === "function") return "#287b72";
