@@ -28,6 +28,10 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 		fmt.Fprintln(output, usage)
 		return 0
 	}
+	if len(config.Args) == 1 && config.Args[0] == "version" {
+		fmt.Fprintln(output, product.Version)
+		return 0
+	}
 	if len(config.Args) > 0 && config.Args[0] == "project" {
 		if err := runProjectCommand(context.Background(), config, config.Args[1:], output); err != nil {
 			fmt.Fprintf(errorOutput, "purpory: %v\n", err)
