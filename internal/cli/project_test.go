@@ -7,8 +7,17 @@ import (
 	"strings"
 	"testing"
 
+	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/project"
 )
+
+func TestVersionDoesNotRequireRegisteredProject(t *testing.T) {
+	var output, errorOutput bytes.Buffer
+	code := Run([]string{"--root", t.TempDir(), "--db", filepath.Join(t.TempDir(), "purpory.db"), "version"}, strings.NewReader(""), &output, &errorOutput)
+	if code != 0 || strings.TrimSpace(output.String()) != product.Version {
+		t.Fatalf("version failed: stdout=%q stderr=%q", output.String(), errorOutput.String())
+	}
+}
 
 func TestProjectMustBeRegisteredBeforeNormalCommands(t *testing.T) {
 	root := t.TempDir()

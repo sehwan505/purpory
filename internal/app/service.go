@@ -24,6 +24,8 @@ import (
 	"github.com/sehwan505/purpory/internal/store"
 )
 
+const Version = "0.1.0"
+
 type Service struct {
 	project      project.Project
 	store        *store.Store
@@ -151,7 +153,7 @@ func (s *Service) Close() error {
 }
 
 func (s *Service) Status() Status {
-	return Status{Version: "0.1.0", Project: s.project}
+	return Status{Version: Version, Project: s.project}
 }
 
 func (s *Service) Projects(ctx context.Context) ([]project.Project, error) {
