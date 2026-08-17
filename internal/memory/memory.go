@@ -18,6 +18,19 @@ const (
 	Reference Kind = "reference"
 )
 
+func (k Kind) NodeKind() string {
+	switch k {
+	case Decision:
+		return "intent"
+	case Reference:
+		return "reference"
+	case Note:
+		return "knowledge"
+	default:
+		return ""
+	}
+}
+
 var keyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9][A-Za-z0-9_-]*)*$`)
 
 type Memory struct {

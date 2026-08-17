@@ -40,7 +40,7 @@ func TestMigrationAddsAwarenessFollowUpColumn(t *testing.T) {
 			PRIMARY KEY (project_id, session_id, node_id)
 		) STRICT;
 		INSERT INTO schema_migrations(version)
-		VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12);
+		VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (14);
 	`); err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -191,17 +191,23 @@ func TestKnowledgeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
+	var legacyTables int
+	if err := database.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'links'`).Scan(&legacyTables); err != nil || legacyTables != 0 {
+		t.Fatalf("legacy links table remains: %d, %v", legacyTables, err)
+	}
 	current := project.Project{ID: "demo", Name: "Demo", Root: "/demo"}
 	if err := database.SaveProject(ctx, current); err != nil {
 		t.Fatal(err)
 	}
 	materials := []material.Material{{ID: "readme", URI: "file:README.md", MediaType: "text/markdown", Hash: "abc", Size: 10}}
+	materialNodeID := graph.ReferenceID(graph.KindMaterial, materials[0].URI)
+	sectionNodeID := graph.ReferenceID(graph.KindKnowledge, "section")
 	nodes := []graph.Node{
-		{ID: "readme", Label: "README.md", Kind: "material", MaterialID: "readme", MaterialURI: "file:README.md"},
-		{ID: "section", Label: "Purpose", Kind: "section", MaterialID: "readme", MaterialURI: "file:README.md", Locator: "line:3", Content: "Project context"},
+		{ID: materialNodeID, Label: "README.md", Kind: graph.KindMaterial, Ref: materials[0].URI, MaterialID: "readme", MaterialURI: materials[0].URI},
+		{ID: sectionNodeID, Label: "Purpose", Kind: graph.KindKnowledge, Subkind: "section", Ref: "section", MaterialID: "readme", MaterialURI: materials[0].URI, Locator: "line:3", Content: "Project context"},
 	}
-	claims := []graph.Claim{{MaterialID: "readme", SourceID: "readme", TargetID: "section", Relation: "contains"}}
-	edges := []graph.Edge{{SourceID: "readme", TargetID: "section", Relation: "contains"}}
+	claims := []graph.Claim{{MaterialID: "readme", SourceID: materialNodeID, TargetID: sectionNodeID, Relation: "contains"}}
+	edges := []graph.Edge{{SourceID: materialNodeID, TargetID: sectionNodeID, Relation: "contains"}}
 	if err := database.ReplaceKnowledge(ctx, current.ID, materials, nodes, claims, edges); err != nil {
 		t.Fatal(err)
 	}
@@ -230,28 +236,40 @@ func TestUpdateSnapshotPreservesIntentLinks(t *testing.T) {
 	if err := database.SaveProject(ctx, current); err != nil {
 		t.Fatal(err)
 	}
+	intentValue := "Accessibility is required."
+	intent, err := memory.New(current.ID, "purpose.accessibility", memory.Decision, &intentValue, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SaveMemory(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
 	link := graph.Link{SourceKind: "intent", SourceRef: "purpose.accessibility", Relation: graph.RelationAppliesTo, TargetKind: "material", TargetRef: "file:README.md"}
 	if err := database.SaveLink(ctx, current.ID, link); err != nil {
 		t.Fatal(err)
 	}
 	value := material.Material{ID: "readme", URI: "file:README.md", MediaType: "text/markdown", Processor: "markdown/v1", Hash: "abc", Size: 10}
-	node := graph.Node{ID: "readme", Label: "README.md", Kind: "material", MaterialID: "readme", MaterialURI: value.URI}
+	targetID := graph.ReferenceID(graph.KindMaterial, value.URI)
+	node := graph.Node{ID: targetID, Label: "README.md", Kind: graph.KindMaterial, Ref: value.URI, MaterialID: "readme", MaterialURI: value.URI}
 	if err := database.ReplaceKnowledge(ctx, current.ID, []material.Material{value}, []graph.Node{node}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.ReplaceKnowledge(ctx, current.ID, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	links, err := database.Links(ctx, current.ID)
-	if err != nil || len(links) != 1 || links[0] != link {
-		t.Fatalf("intent link was lost after update: %#v, %v", links, err)
+	graphNodes, graphEdges, err := database.Graph(ctx, current.ID)
+	if err != nil || len(graphEdges) != 1 || graphEdges[0].Owner != graph.OwnerDurable {
+		t.Fatalf("intent edge was lost after update: %#v, %v", graphEdges, err)
+	}
+	if len(graphNodes) != 2 || graphNodes[1].ID != targetID || graphNodes[1].State != graph.StateMissing {
+		t.Fatalf("missing target was not retained: %#v", graphNodes)
 	}
 	if err := database.ReplaceKnowledge(ctx, current.ID, []material.Material{value}, []graph.Node{node}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	links, err = database.Links(ctx, current.ID)
-	if err != nil || len(links) != 1 || links[0] != link {
-		t.Fatalf("intent link was not retained after target returned: %#v, %v", links, err)
+	graphNodes, graphEdges, err = database.Graph(ctx, current.ID)
+	if err != nil || len(graphEdges) != 1 || graphEdges[0].TargetID != targetID || graphNodes[1].State != graph.StateActive {
+		t.Fatalf("intent edge did not reconnect: %#v %#v, %v", graphNodes, graphEdges, err)
 	}
 }
 
@@ -262,6 +280,9 @@ func TestMemoryRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SaveProject(ctx, project.Project{ID: "demo", Name: "Demo", Root: "/demo"}); err != nil {
+		t.Fatal(err)
+	}
 
 	content := "Use SQLite"
 	want, err := memory.New("demo", "decision.database", memory.Decision, &content, nil)
@@ -289,6 +310,10 @@ func TestMemoryRoundTrip(t *testing.T) {
 	if got.Hash != want.Hash || got.Value == nil || *got.Value != content {
 		t.Fatalf("memory mismatch: %#v", got)
 	}
+	graphNodes, _, err := store.Graph(ctx, want.ProjectID)
+	if err != nil || len(graphNodes) != 1 || graphNodes[0].ID != graph.ReferenceID(graph.KindIntent, want.Key) || graphNodes[0].Owner != graph.OwnerDurable {
+		t.Fatalf("memory graph node mismatch: %#v, %v", graphNodes, err)
+	}
 	versions, err := store.MemoryVersions(ctx, want.ProjectID, want.Key)
 	if err != nil || len(versions) != 1 || versions[0].ID != created.VersionID {
 		t.Fatalf("versions mismatch: %#v, %v", versions, err)
@@ -296,6 +321,13 @@ func TestMemoryRoundTrip(t *testing.T) {
 	found, err := store.SearchMemories(ctx, want.ProjectID, "SQLite", 10)
 	if err != nil || len(found) != 1 || found[0].Key != want.Key {
 		t.Fatalf("search mismatch: %#v, %v", found, err)
+	}
+	if deleted, err := store.DeleteMemory(ctx, want.ProjectID, want.Key); err != nil || !deleted {
+		t.Fatalf("delete memory = %v, %v", deleted, err)
+	}
+	graphNodes, _, err = store.Graph(ctx, want.ProjectID)
+	if err != nil || len(graphNodes) != 0 {
+		t.Fatalf("deleted memory remained in graph: %#v, %v", graphNodes, err)
 	}
 }
 
@@ -337,9 +369,9 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 	if err != nil || got.Hash != want.Hash {
 		t.Fatalf("conflict changed memory: %#v %v", got, err)
 	}
-	links, err := database.Links(ctx, current.ID)
-	if err != nil || len(links) != 1 || links[0] != link {
-		t.Fatalf("reconciliation link missing: %#v %v", links, err)
+	graphNodes, graphEdges, err := database.Graph(ctx, current.ID)
+	if err != nil || len(graphNodes) != 2 || len(graphEdges) != 1 || graphEdges[0].Owner != graph.OwnerDurable || graphEdges[0].Provenance != "reconcile:codex:one" {
+		t.Fatalf("reconciliation graph link missing: %#v %#v %v", graphNodes, graphEdges, err)
 	}
 	var audit string
 	if err := database.db.QueryRowContext(ctx, "SELECT changes_json FROM reconciliation_events WHERE project_id = ? AND session_id = ?", current.ID, "codex:one").Scan(&audit); err != nil || !strings.Contains(audit, `"relation":"realized_by"`) || !strings.Contains(audit, `"evidenceIds":["U000001"]`) {

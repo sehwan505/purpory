@@ -78,10 +78,13 @@ Directories are added only when their first behavior is implemented.
 - `update` stores content hashes and processor versions, reuses facts from
   unchanged Materials, resolves relationships across the combined snapshot, and
   commits Materials, facts, claims, and relations in one SQLite transaction.
-- `update` owns observed facts and their derived relations only. Durable links
-  between Intent and Material/Knowledge live outside that replacement boundary.
-  They use stable references rather than foreign keys to transient extracted
-  rows, so a missing or renamed target does not erase the user's connection.
+- `nodes` and `edges` are the one physical project graph. `kind` identifies
+  Intent, Material, Knowledge, and Reference; `subkind` carries adapter details.
+  `owner` separates durable and observed lifecycles, while `state` keeps missing
+  durable targets visible and reconnectable.
+- `update` replaces only observed nodes and edges. Durable semantic edges remain
+  in the same graph; an absent endpoint becomes `missing` instead of being
+  deleted, then returns to `active` when observation finds the same stable ref.
 - Markdown and readable text contribute searchable content with Material URI and
   locators. Binary Materials are cataloged without persisting their contents.
 - The desktop is viewer-first: it reads committed state when opened or focused
@@ -103,10 +106,10 @@ Directories are added only when their first behavior is implemented.
 
 ## Product direction
 
-Purpory retrieves Intent first and uses linked Materials or Knowledge as concrete
+Purpory retrieves Intent first and uses connected Materials or Knowledge as concrete
 evidence that the intent exists in the project. Finding related source code is
 one possible evidence lookup, not the primary product objective. `update` keeps
-the evidence current without taking ownership of intent or its durable links.
+the evidence current without taking ownership of intent or its durable edges.
 Workspace, View, and Session remain operational topology. Reconciliation may use
 them as input and audit provenance, but never projects them as canonical graph
 nodes or edges.

@@ -17,14 +17,21 @@ func TestContextGraphKeepsAndReconnectsMissingEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	link := graph.Link{SourceKind: "intent", SourceRef: entry.Key, Relation: graph.RelationRealizedBy, TargetKind: "material", TargetRef: "file:outcome.md"}
-	missing := newContextGraph([]memory.Memory{entry}, nil, nil, []graph.Link{link})
-	if len(missing.nodes) != 2 || missing.nodes[1].Kind != "missing" || len(missing.edges) != 1 {
+	intentID := graph.ReferenceID(graph.KindIntent, entry.Key)
+	materialID := graph.ReferenceID(graph.KindMaterial, "file:outcome.md")
+	nodes := []graph.Node{
+		{ID: intentID, Label: entry.Key, Kind: graph.KindIntent, Ref: entry.Key, Owner: graph.OwnerDurable, State: graph.StateActive},
+		{ID: materialID, Label: "file:outcome.md", Kind: graph.KindMaterial, Ref: "file:outcome.md", Owner: graph.OwnerDurable, State: graph.StateMissing},
+	}
+	edges := []graph.Edge{{SourceID: intentID, TargetID: materialID, Relation: graph.RelationRealizedBy, Owner: graph.OwnerDurable}}
+	missing := newContextGraph([]memory.Memory{entry}, nodes, edges)
+	if len(missing.nodes) != 2 || missing.nodes[1].State != graph.StateMissing || len(missing.edges) != 1 {
 		t.Fatalf("missing evidence was hidden: %#v", missing)
 	}
-	material := graph.Node{ID: "material", Label: "outcome.md", Kind: "material", MaterialURI: "file:outcome.md"}
-	resolved := newContextGraph([]memory.Memory{entry}, []graph.Node{material}, nil, []graph.Link{link})
-	if len(resolved.nodes) != 2 || resolved.nodes[1].Kind != "material" || resolved.edges[0].TargetID != material.ID {
+	nodes[1].State = graph.StateActive
+	nodes[1].Owner = graph.OwnerObserved
+	resolved := newContextGraph([]memory.Memory{entry}, nodes, edges)
+	if len(resolved.nodes) != 2 || resolved.nodes[1].State != graph.StateActive || resolved.edges[0].TargetID != materialID {
 		t.Fatalf("returned evidence did not reconnect: %#v", resolved)
 	}
 }
@@ -43,6 +50,13 @@ func TestContextGraphDoesNotProjectWorkspaceSessions(t *testing.T) {
 		if node.ID == "codex:workspace-only" || node.Kind == "session" {
 			t.Fatalf("workspace session leaked into canonical graph: %#v", node)
 		}
+	}
+}
+
+func TestPrepareNodeCandidateUsesKnowledgeSubkind(t *testing.T) {
+	candidate := prepareNodeCandidate(graph.Node{ID: "knowledge:item", Kind: graph.KindKnowledge, Subkind: "function"})
+	if candidate.Kind != "function" {
+		t.Fatalf("candidate kind = %q", candidate.Kind)
 	}
 }
 

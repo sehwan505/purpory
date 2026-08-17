@@ -74,12 +74,12 @@ export function GraphView({ nodes, edges, selectedID, onSelect }: {
       {visibleNodes.map(node => {
         const position = positions.get(node.id)!;
         const selected = node.id === selectedID;
-        const color = nodeColor(node.kind);
+        const color = nodeColor(node.kind, node.state);
         return <g className="graphNode" key={node.id} role="button" tabIndex={0} aria-label={`${node.kind} ${node.label}`} onClick={() => onSelect(node)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") onSelect(node); }}>
           <circle cx={position.x} cy={position.y} r={selected ? 7 : 5} fill={color} stroke={selected ? "#1a2019" : color} strokeWidth={selected ? 2 : 1} />
           <circle cx={position.x} cy={position.y} r="10" fill="none" stroke={color} strokeOpacity=".2" />
           <text x={position.x + 10} y={position.y + 3} fill="#4e584b" fontSize="7">{node.label.slice(0, 26)}</text>
-          <title>{node.label} · {node.kind}</title>
+          <title>{node.label} · {node.kind}{node.subkind ? `/${node.subkind}` : ""}{node.state === "missing" ? " · missing" : ""}</title>
         </g>;
       })}
     </svg>
@@ -94,7 +94,7 @@ export function NodeDetails({ node, explanation, onSelect }: {
   if (!node) return <div className="nodeDetails empty">그래프에서 노드를 선택하면 근거와 관계를 볼 수 있습니다.</div>;
   const connections = explanation?.graph?.connections ?? [];
   return <div className="nodeDetails">
-    <span>{node.kind}</span>
+    <span>{node.kind}{node.subkind ? `/${node.subkind}` : ""}{node.state === "missing" ? " · missing" : ""}</span>
     <h3>{node.label}</h3>
     <p className="nodeLocation">{node.materialUri}{node.locator ? `#${node.locator}` : ""}</p>
     {node.content && <p>{node.content}</p>}
@@ -103,12 +103,12 @@ export function NodeDetails({ node, explanation, onSelect }: {
   </div>;
 }
 
-function nodeColor(kind: string) {
+function nodeColor(kind: string, state = "active") {
+  if (state === "missing") return "#a33b32";
   if (kind === "intent") return "#b12a63";
   if (kind === "material") return "#3973a5";
   if (kind === "knowledge") return "#5f7358";
   if (kind === "reference") return "#786247";
-  if (kind === "missing") return "#a33b32";
   if (kind === "section") return "#97651b";
   if (kind === "type") return "#7559a2";
   if (kind === "function") return "#287b72";

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,8 +33,8 @@ func (s *Store) Materials(ctx context.Context, projectID string) ([]material.Mat
 
 func (s *Store) Knowledge(ctx context.Context, projectID string) ([]graph.Node, []graph.Claim, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, label, kind, material_id, material_uri, locator, content
-		FROM nodes WHERE project_id = ? ORDER BY id
+		SELECT id, label, kind, subkind, ref, owner, state, provenance, material_id, material_uri, locator, content
+		FROM nodes WHERE project_id = ? AND owner = 'observed' AND state = 'active' ORDER BY id
 	`, projectID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load knowledge: nodes: %w", err)
@@ -41,7 +42,7 @@ func (s *Store) Knowledge(ctx context.Context, projectID string) ([]graph.Node, 
 	var nodes []graph.Node
 	for rows.Next() {
 		var node graph.Node
-		if err := rows.Scan(&node.ID, &node.Label, &node.Kind, &node.MaterialID, &node.MaterialURI, &node.Locator, &node.Content); err != nil {
+		if err := rows.Scan(&node.ID, &node.Label, &node.Kind, &node.Subkind, &node.Ref, &node.Owner, &node.State, &node.Provenance, &node.MaterialID, &node.MaterialURI, &node.Locator, &node.Content); err != nil {
 			rows.Close()
 			return nil, nil, fmt.Errorf("load knowledge: scan node: %w", err)
 		}
@@ -70,46 +71,133 @@ func (s *Store) Knowledge(ctx context.Context, projectID string) ([]graph.Node, 
 }
 
 func (s *Store) SaveLink(ctx context.Context, projectID string, link graph.Link) error {
-	if !linkKind(link.SourceKind) || !linkKind(link.TargetKind) || strings.TrimSpace(link.SourceRef) == "" ||
-		strings.TrimSpace(link.TargetRef) == "" || strings.TrimSpace(link.Relation) == "" {
-		return errors.New("save link: valid kinds, references, and relation are required")
+	if err := validateLink(link); err != nil {
+		return err
 	}
-	if link.SourceKind == "intent" && link.TargetKind == "material" && !graph.IsIntentMaterialRelation(link.Relation) {
-		return errors.New("save link: unsupported intent to material relation")
-	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO links(project_id, source_kind, source_ref, relation, target_kind, target_ref)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT DO NOTHING
-	`, projectID, link.SourceKind, link.SourceRef, link.Relation, link.TargetKind, link.TargetRef)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("save link: %w", err)
+		return fmt.Errorf("save link: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := saveGraphLink(ctx, tx, projectID, link, "explicit"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save link: commit: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) Links(ctx context.Context, projectID string) ([]graph.Link, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_kind, source_ref, relation, target_kind, target_ref
-		FROM links WHERE project_id = ? ORDER BY source_kind, source_ref, relation, target_kind, target_ref
-	`, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("load links: %w", err)
-	}
-	defer rows.Close()
-	var links []graph.Link
-	for rows.Next() {
-		var link graph.Link
-		if err := rows.Scan(&link.SourceKind, &link.SourceRef, &link.Relation, &link.TargetKind, &link.TargetRef); err != nil {
-			return nil, fmt.Errorf("load links: scan: %w", err)
-		}
-		links = append(links, link)
-	}
-	return links, rows.Err()
+func linkKind(value string) bool {
+	return value == graph.KindIntent || value == graph.KindMaterial || value == graph.KindKnowledge || value == graph.KindReference
 }
 
-func linkKind(value string) bool {
-	return value == "intent" || value == "material" || value == "knowledge"
+func validateLink(link graph.Link) error {
+	if !linkKind(link.SourceKind) || !linkKind(link.TargetKind) || strings.TrimSpace(link.SourceRef) == "" ||
+		strings.TrimSpace(link.TargetRef) == "" || strings.TrimSpace(link.Relation) == "" {
+		return errors.New("save link: valid kinds, references, and relation are required")
+	}
+	if link.SourceKind == graph.KindIntent && link.TargetKind == graph.KindMaterial && !graph.IsIntentMaterialRelation(link.Relation) {
+		return errors.New("save link: unsupported intent to material relation")
+	}
+	return nil
+}
+
+func saveGraphLink(ctx context.Context, database databaseRunner, projectID string, link graph.Link, provenance string) (bool, error) {
+	sourceID, err := ensureGraphNode(ctx, database, projectID, link.SourceKind, link.SourceRef, provenance)
+	if err != nil {
+		return false, err
+	}
+	targetID, err := ensureGraphNode(ctx, database, projectID, link.TargetKind, link.TargetRef, provenance)
+	if err != nil {
+		return false, err
+	}
+	var owner string
+	err = database.QueryRowContext(ctx, `
+		SELECT owner FROM edges WHERE project_id = ? AND source_id = ? AND target_id = ? AND relation = ?
+	`, projectID, sourceID, targetID, link.Relation).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if _, err := database.ExecContext(ctx, `
+			INSERT INTO edges(project_id, source_id, target_id, relation, owner, provenance)
+			VALUES (?, ?, ?, ?, 'durable', ?)
+		`, projectID, sourceID, targetID, link.Relation, provenance); err != nil {
+			return false, fmt.Errorf("save link: insert edge: %w", err)
+		}
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("save link: load edge: %w", err)
+	case owner != graph.OwnerDurable:
+		if _, err := database.ExecContext(ctx, `
+			UPDATE edges SET owner = 'durable', provenance = ?
+			WHERE project_id = ? AND source_id = ? AND target_id = ? AND relation = ?
+		`, provenance, projectID, sourceID, targetID, link.Relation); err != nil {
+			return false, fmt.Errorf("save link: promote edge: %w", err)
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func ensureGraphNode(ctx context.Context, database databaseRunner, projectID, kind, ref, provenance string) (string, error) {
+	var id string
+	err := database.QueryRowContext(ctx, `
+		SELECT id FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?
+	`, projectID, kind, ref).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("save link: resolve node: %w", err)
+	}
+	id = graph.ReferenceID(kind, ref)
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO nodes(project_id, id, label, kind, ref, owner, state, provenance)
+		VALUES (?, ?, ?, ?, ?, 'durable', 'missing', ?)
+	`, projectID, id, ref, kind, ref, provenance); err != nil {
+		return "", fmt.Errorf("save link: create missing node: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) Graph(ctx context.Context, projectID string) ([]graph.Node, []graph.Edge, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, label, kind, subkind, ref, owner, state, provenance, material_id, material_uri, locator, content
+		FROM nodes WHERE project_id = ? ORDER BY CASE kind WHEN 'intent' THEN 0 ELSE 1 END, label, id
+	`, projectID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load graph: nodes: %w", err)
+	}
+	var nodes []graph.Node
+	for rows.Next() {
+		var node graph.Node
+		if err := rows.Scan(&node.ID, &node.Label, &node.Kind, &node.Subkind, &node.Ref, &node.Owner, &node.State, &node.Provenance, &node.MaterialID, &node.MaterialURI, &node.Locator, &node.Content); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("load graph: scan node: %w", err)
+		}
+		nodes = append(nodes, node)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("load graph: close nodes: %w", err)
+	}
+	edgeRows, err := s.db.QueryContext(ctx, `
+		SELECT source_id, target_id, relation, owner, provenance
+		FROM edges WHERE project_id = ? ORDER BY source_id, target_id, relation
+	`, projectID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load graph: edges: %w", err)
+	}
+	defer edgeRows.Close()
+	var edges []graph.Edge
+	for edgeRows.Next() {
+		var edge graph.Edge
+		if err := edgeRows.Scan(&edge.SourceID, &edge.TargetID, &edge.Relation, &edge.Owner, &edge.Provenance); err != nil {
+			return nil, nil, fmt.Errorf("load graph: scan edge: %w", err)
+		}
+		edges = append(edges, edge)
+	}
+	return nodes, edges, edgeRows.Err()
 }
 
 // ReplaceKnowledge atomically publishes one complete project snapshot.
@@ -120,10 +208,28 @@ func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, material
 		return fmt.Errorf("replace knowledge: begin: %w", err)
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"edges", "claims", "nodes", "materials"} {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE project_id = ?", projectID); err != nil {
-			return fmt.Errorf("replace knowledge: clear %s: %w", table, err)
-		}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE project_id = ? AND owner = 'observed'`, projectID); err != nil {
+		return fmt.Errorf("replace knowledge: clear observed edges: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM claims WHERE project_id = ?`, projectID); err != nil {
+		return fmt.Errorf("replace knowledge: clear claims: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE nodes SET owner = 'durable', state = 'missing', provenance = 'durable-link',
+			material_id = '', locator = '', content = ''
+		WHERE project_id = ? AND owner = 'observed' AND EXISTS (
+			SELECT 1 FROM edges
+			WHERE edges.project_id = nodes.project_id AND edges.owner = 'durable'
+			  AND (edges.source_id = nodes.id OR edges.target_id = nodes.id)
+		)
+	`, projectID); err != nil {
+		return fmt.Errorf("replace knowledge: retain linked nodes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND owner = 'observed'`, projectID); err != nil {
+		return fmt.Errorf("replace knowledge: clear observed nodes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM materials WHERE project_id = ?`, projectID); err != nil {
+		return fmt.Errorf("replace knowledge: clear materials: %w", err)
 	}
 	for _, value := range materials {
 		if _, err := tx.ExecContext(ctx, `
@@ -134,10 +240,19 @@ func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, material
 		}
 	}
 	for _, node := range nodes {
+		ref := node.Ref
+		if ref == "" {
+			ref = node.ID
+		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO nodes(project_id, id, label, kind, material_id, material_uri, locator, content)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		`, projectID, node.ID, node.Label, node.Kind, node.MaterialID, node.MaterialURI, node.Locator, node.Content); err != nil {
+			INSERT INTO nodes(project_id, id, label, kind, subkind, ref, owner, state, provenance, material_id, material_uri, locator, content)
+			VALUES (?, ?, ?, ?, ?, ?, 'observed', 'active', ?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, id) DO UPDATE SET
+				label=excluded.label, kind=excluded.kind, subkind=excluded.subkind, ref=excluded.ref,
+				owner='observed', state='active', provenance=excluded.provenance,
+				material_id=excluded.material_id, material_uri=excluded.material_uri,
+				locator=excluded.locator, content=excluded.content
+		`, projectID, node.ID, node.Label, node.Kind, node.Subkind, ref, node.MaterialURI, node.MaterialID, node.MaterialURI, node.Locator, node.Content); err != nil {
 			return fmt.Errorf("replace knowledge: insert node: %w", err)
 		}
 	}
@@ -151,7 +266,8 @@ func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, material
 	}
 	for _, edge := range edges {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO edges(project_id, source_id, target_id, relation) VALUES (?, ?, ?, ?)
+			INSERT INTO edges(project_id, source_id, target_id, relation, owner, provenance)
+			VALUES (?, ?, ?, ?, 'observed', 'update') ON CONFLICT DO NOTHING
 		`, projectID, edge.SourceID, edge.TargetID, edge.Relation); err != nil {
 			return fmt.Errorf("replace knowledge: insert edge: %w", err)
 		}
@@ -168,11 +284,12 @@ func (s *Store) SearchNodes(ctx context.Context, projectID, query string, limit 
 	}
 	pattern := "%" + escapeLike(strings.TrimSpace(query)) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, label, kind, material_id, material_uri, locator, content FROM nodes
-		WHERE project_id = ? AND (id = ? OR label LIKE ? ESCAPE '\' OR material_uri LIKE ? ESCAPE '\' OR content LIKE ? ESCAPE '\')
+		SELECT id, label, kind, subkind, ref, owner, state, provenance, material_id, material_uri, locator, content FROM nodes
+		WHERE project_id = ? AND owner = 'observed' AND state = 'active'
+		  AND (id = ? OR ref = ? OR label LIKE ? ESCAPE '\' OR material_uri LIKE ? ESCAPE '\' OR content LIKE ? ESCAPE '\')
 		ORDER BY CASE WHEN id = ? THEN 0 WHEN label = ? THEN 1 WHEN material_uri = ? AND kind = 'material' THEN 2 ELSE 3 END,
 		         label, material_uri, locator LIMIT ?
-	`, projectID, query, pattern, pattern, pattern, query, query, query, limit)
+	`, projectID, query, query, pattern, pattern, pattern, query, query, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search nodes: %w", err)
 	}
@@ -180,7 +297,7 @@ func (s *Store) SearchNodes(ctx context.Context, projectID, query string, limit 
 	var nodes []graph.Node
 	for rows.Next() {
 		var node graph.Node
-		if err := rows.Scan(&node.ID, &node.Label, &node.Kind, &node.MaterialID, &node.MaterialURI, &node.Locator, &node.Content); err != nil {
+		if err := rows.Scan(&node.ID, &node.Label, &node.Kind, &node.Subkind, &node.Ref, &node.Owner, &node.State, &node.Provenance, &node.MaterialID, &node.MaterialURI, &node.Locator, &node.Content); err != nil {
 			return nil, fmt.Errorf("search nodes: scan: %w", err)
 		}
 		nodes = append(nodes, node)

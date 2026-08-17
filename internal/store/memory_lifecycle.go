@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 )
 
@@ -16,12 +17,29 @@ func (s *Store) DeleteMemory(ctx context.Context, projectID, key string) (bool, 
 	if err != nil {
 		return false, err
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND key = ?`, projectID, key)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("delete memory: %w", err)
+		return false, fmt.Errorf("delete memory: begin: %w", err)
 	}
-	changed, err := result.RowsAffected()
-	return changed > 0, err
+	defer tx.Rollback()
+	var kind memory.Kind
+	err = tx.QueryRowContext(ctx, `SELECT kind FROM memories WHERE project_id = ? AND key = ?`, projectID, key).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("delete memory: load: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND id = ?`, projectID, graph.ReferenceID(kind.NodeKind(), key)); err != nil {
+		return false, fmt.Errorf("delete memory: graph node: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND key = ?`, projectID, key); err != nil {
+		return false, fmt.Errorf("delete memory: record: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("delete memory: commit: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) ConfirmMemory(ctx context.Context, projectID, key string) (bool, error) {

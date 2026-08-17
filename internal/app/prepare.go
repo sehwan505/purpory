@@ -16,7 +16,6 @@ import (
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/project"
-	"github.com/sehwan505/purpory/internal/resolve"
 )
 
 func (s *Service) Prepare(ctx context.Context, message string, tokenBudget int) (PrepareResult, error) {
@@ -55,14 +54,17 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	nodes, claims, err := s.store.Knowledge(ctx, s.project.ID)
+	graphNodes, graphEdges, err := s.store.Graph(ctx, s.project.ID)
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	links, err := s.store.Links(ctx, s.project.ID)
-	if err != nil {
-		return PrepareResult{}, err
+	var nodes []graph.Node
+	for _, node := range graphNodes {
+		if node.Owner == graph.OwnerObserved && node.State == graph.StateActive {
+			nodes = append(nodes, node)
+		}
 	}
+	physicalGraph := newContextGraph(memories, graphNodes, graphEdges)
 	workspace, err := s.store.Workspace(ctx, s.project)
 	if err != nil {
 		return PrepareResult{}, err
@@ -113,7 +115,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		result.Action = "ask"
 		result.Clarification = proposal.Clarification
 	default:
-		if err := s.searchAndDeliver(ctx, request, nodes, claims, links, memories, workspace, prior, &result); err != nil {
+		if err := s.searchAndDeliver(ctx, request, nodes, physicalGraph, memories, workspace, prior, &result); err != nil {
 			return PrepareResult{}, err
 		}
 	}
@@ -160,8 +162,7 @@ func (s *Service) searchAndDeliver(
 	ctx context.Context,
 	request contextprepare.Request,
 	nodes []graph.Node,
-	claims []graph.Claim,
-	links []graph.Link,
+	physicalGraph contextGraph,
 	memories []memory.Memory,
 	workspace project.Workspace,
 	prior map[string]string,
@@ -182,9 +183,13 @@ func (s *Service) searchAndDeliver(
 		return err
 	}
 	ranked, terms := contextprepare.Rank(candidates, query, result.Proposal.Keywords, request.ActivePaths, mapKeys(prior))
-	projected := newContextGraph(memories, nodes, resolve.Claims(nodes, claims), links)
-	linked := newContextGraph(memories, nodes, nil, links)
-	ranked = expandLinkedCandidates(ranked, allCandidates, linked.edges)
+	var durableEdges []graph.Edge
+	for _, edge := range physicalGraph.edges {
+		if edge.Owner == graph.OwnerDurable {
+			durableEdges = append(durableEdges, edge)
+		}
+	}
+	ranked = expandLinkedCandidates(ranked, allCandidates, durableEdges)
 	search := &contextprepare.Search{Query: query, Scopes: normalizedScopes(result.Proposal.Scopes), Terms: terms, Candidates: ranked}
 	result.Context.Search = search
 
@@ -212,7 +217,7 @@ func (s *Service) searchAndDeliver(
 	if err != nil {
 		return err
 	}
-	result.Awareness = prepareAwareness(awarenessCandidates, selected, allCandidates, projected.edges, associations, prior, exposed)
+	result.Awareness = prepareAwareness(awarenessCandidates, selected, allCandidates, physicalGraph.edges, associations, prior, exposed)
 
 	if len(sessionDeliveries) > 0 {
 		agent := sessionAgent(request.SessionID)
@@ -364,9 +369,13 @@ func prepareNodeCandidate(node graph.Node) contextprepare.Candidate {
 	if node.Locator != "" {
 		source += "#" + node.Locator
 	}
+	kind := node.Kind
+	if node.Subkind != "" {
+		kind = node.Subkind
+	}
 	return contextprepare.Candidate{
 		NodeID: node.ID, Key: "material." + node.ID[:min(20, len(node.ID))], Namespace: "material",
-		Label: node.Label, Kind: node.Kind, Origin: "structural", Source: source, Content: node.Content, Mode: "context-graph",
+		Label: node.Label, Kind: kind, Origin: "structural", Source: source, Content: node.Content, Mode: "context-graph",
 	}
 }
 

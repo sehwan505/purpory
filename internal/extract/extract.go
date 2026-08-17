@@ -74,8 +74,8 @@ func Processor(value material.Material) string {
 func Material(ctx context.Context, root string, value material.Material) (Facts, error) {
 	relative := strings.TrimPrefix(value.URI, "file:")
 	rootNode := graph.Node{
-		ID: value.ID, Label: filepath.Base(relative), Kind: "material", MaterialID: value.ID,
-		MaterialURI: value.URI,
+		ID: graph.ReferenceID(graph.KindMaterial, value.URI), Label: filepath.Base(relative), Kind: graph.KindMaterial,
+		Ref: value.URI, MaterialID: value.ID, MaterialURI: value.URI,
 	}
 	result := Facts{Nodes: []graph.Node{rootNode}}
 	path, err := material.Path(root, value)
@@ -142,10 +142,11 @@ func extractMarkdown(ctx context.Context, path, relative, materialID string, res
 		}
 		key := fmt.Sprintf("%d\x00%s", level, label)
 		occurrences[key]++
-		id := entityID(materialID, "section", label, occurrences[key])
-		result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: label, Kind: "section", MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", line)})
+		ref := entityID(materialID, "section", label, occurrences[key])
+		id := graph.ReferenceID(graph.KindKnowledge, ref)
+		result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: label, Kind: graph.KindKnowledge, Subkind: "section", Ref: ref, MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", line)})
 		active = len(result.Nodes) - 1
-		parent := materialID
+		parent := result.Nodes[0].ID
 		for candidate := level - 1; candidate > 0; candidate-- {
 			if parents[candidate] != "" {
 				parent = parents[candidate]
@@ -229,9 +230,10 @@ func extractText(ctx context.Context, path, relative, materialID string, result 
 			label := match[1] + candidate.suffix
 			key := candidate.kind + "\x00" + label
 			occurrences[key]++
-			id := entityID(materialID, candidate.kind, label, occurrences[key])
-			result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: label, Kind: candidate.kind, MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", line)})
-			result.Claims = append(result.Claims, graph.Claim{MaterialID: materialID, SourceID: materialID, TargetID: id, Relation: "contains"})
+			ref := entityID(materialID, candidate.kind, label, occurrences[key])
+			id := graph.ReferenceID(graph.KindKnowledge, ref)
+			result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: label, Kind: graph.KindKnowledge, Subkind: candidate.kind, Ref: ref, MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", line)})
+			result.Claims = append(result.Claims, graph.Claim{MaterialID: materialID, SourceID: result.Nodes[0].ID, TargetID: id, Relation: "contains"})
 			break
 		}
 	}
@@ -257,9 +259,10 @@ func extractGo(ctx context.Context, path, relative, materialID string, result Fa
 			if value.Recv != nil && len(value.Recv.List) > 0 {
 				label = receiverName(value.Recv.List[0].Type) + "." + label
 			}
-			id := entityID(materialID, "function", label, 1)
-			result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: label, Kind: "function", MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", set.Position(value.Pos()).Line)})
-			result.Claims = append(result.Claims, graph.Claim{MaterialID: materialID, SourceID: materialID, TargetID: id, Relation: "contains"})
+			ref := entityID(materialID, "function", label, 1)
+			id := graph.ReferenceID(graph.KindKnowledge, ref)
+			result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: label, Kind: graph.KindKnowledge, Subkind: "function", Ref: ref, MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", set.Position(value.Pos()).Line)})
+			result.Claims = append(result.Claims, graph.Claim{MaterialID: materialID, SourceID: result.Nodes[0].ID, TargetID: id, Relation: "contains"})
 			seenCalls := map[string]bool{}
 			ast.Inspect(value.Body, func(node ast.Node) bool {
 				invocation, ok := node.(*ast.CallExpr)
@@ -280,9 +283,10 @@ func extractGo(ctx context.Context, path, relative, materialID string, result Fa
 				if !ok {
 					continue
 				}
-				id := entityID(materialID, "type", typeSpec.Name.Name, 1)
-				result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: typeSpec.Name.Name, Kind: "type", MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", set.Position(typeSpec.Pos()).Line)})
-				result.Claims = append(result.Claims, graph.Claim{MaterialID: materialID, SourceID: materialID, TargetID: id, Relation: "contains"})
+				ref := entityID(materialID, "type", typeSpec.Name.Name, 1)
+				id := graph.ReferenceID(graph.KindKnowledge, ref)
+				result.Nodes = append(result.Nodes, graph.Node{ID: id, Label: typeSpec.Name.Name, Kind: graph.KindKnowledge, Subkind: "type", Ref: ref, MaterialID: materialID, MaterialURI: "file:" + relative, Locator: fmt.Sprintf("line:%d", set.Position(typeSpec.Pos()).Line)})
+				result.Claims = append(result.Claims, graph.Claim{MaterialID: materialID, SourceID: result.Nodes[0].ID, TargetID: id, Relation: "contains"})
 			}
 		}
 	}

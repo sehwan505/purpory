@@ -386,7 +386,7 @@ func TestUpdateDiscoversMaterialsIncrementally(t *testing.T) {
 	query, err := service.Query(context.Background(), "Project context for everyone", 10)
 	foundSection := false
 	for _, node := range query.Nodes {
-		foundSection = foundSection || node.Kind == "section" && node.Label == "Purpose" && strings.Contains(node.Content, "Project context for everyone")
+		foundSection = foundSection || node.Kind == graph.KindKnowledge && node.Subkind == "section" && node.Label == "Purpose" && strings.Contains(node.Content, "Project context for everyone")
 	}
 	if err != nil || !foundSection {
 		t.Fatalf("document context missing: %#v, %v", query, err)

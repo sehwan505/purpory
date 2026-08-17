@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
@@ -160,7 +161,7 @@ func (s *Service) enrichMemoryRanking(ctx context.Context, query string, candida
 }
 
 func memoryNodeID(entry memory.Memory) string {
-	return contextprepare.Hash("memory\x00" + entry.ProjectID + "\x00" + entry.Key)
+	return graph.ReferenceID(entry.Kind.NodeKind(), entry.Key)
 }
 
 func embeddingText(entry memory.Memory) string {
