@@ -71,8 +71,8 @@ func TestFallbackAndAwareness(t *testing.T) {
 		t.Fatalf("greeting was not skipped: %#v", proposal)
 	}
 	relation := "calls"
-	rendered := RenderAwareness([]Awareness{{Key: "material.token", Label: "TokenRepository", Source: "src/token.go", Relation: &relation}})
-	if !strings.Contains(rendered, "NOT LOADED") || !strings.Contains(rendered, "via calls") {
+	rendered := RenderAwareness([]Awareness{{NodeID: "knowledge:token", Key: "material.token", Label: "TokenRepository", Kind: "function", Source: "src/token.go", Reason: "graph-path", Relation: &relation}})
+	if !strings.Contains(rendered, "CONTENT NOT LOADED") || !strings.Contains(rendered, "via calls") || !strings.Contains(rendered, `purpory explain "knowledge:token"`) {
 		t.Fatalf("awareness was not rendered: %q", rendered)
 	}
 }

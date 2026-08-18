@@ -36,7 +36,7 @@ func TestAgentHooksTrackSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace, err := service.Workspace(context.Background())
-	if err != nil || len(workspace.Resources[0].Views[0].Sessions) != 1 || workspace.Resources[0].Views[0].Sessions[0].Status != "active" || len(workspace.Resources[0].Views[0].Sessions[0].Deliveries) == 0 || output.Len() == 0 {
+	if err != nil || len(workspace.Resources[0].Views[0].Sessions) != 1 || workspace.Resources[0].Views[0].Sessions[0].Status != "active" || len(workspace.Resources[0].Views[0].Sessions[0].Deliveries) != 0 || output.Len() == 0 || !strings.Contains(output.String(), `purpory explain`) || strings.Contains(output.String(), intent) {
 		t.Fatalf("session not started: %#v %q %v", workspace, output.String(), err)
 	}
 	payload["hook_event_name"] = "SessionEnd"
@@ -69,8 +69,20 @@ func TestHookContextPreservesAskAndSeparatesAwareness(t *testing.T) {
 	}
 	relation := "calls"
 	awareness := hookContext(product.PrepareResult{Action: "retrieve", Awareness: []contextprepare.Awareness{{NodeID: "token", Key: "material.token", Label: "TokenRepository", Relation: &relation}}})
-	if !strings.Contains(awareness, "RELATED CONTEXT AVAILABLE — NOT LOADED") || strings.Contains(awareness, "USE FOR THIS TURN") {
+	if !strings.Contains(awareness, "PROJECT MAP — CONTENT NOT LOADED") || !strings.Contains(awareness, `purpory explain "token"`) || strings.Contains(awareness, "USE FOR THIS TURN") {
 		t.Fatalf("awareness response was promoted to evidence: %q", awareness)
+	}
+}
+
+func TestHookContextNeverIncludesPreparedContent(t *testing.T) {
+	result := product.PrepareResult{
+		Action:    "retrieve",
+		Context:   contextprepare.Context{Rendered: "secret source body"},
+		Awareness: []contextprepare.Awareness{{NodeID: "knowledge:hint", Label: "Hint", Kind: "section", Reason: "semantic"}},
+	}
+	context := hookContext(result)
+	if strings.Contains(context, "secret source body") || !strings.Contains(context, `purpory explain "knowledge:hint"`) {
+		t.Fatalf("hook leaked prepared content: %q", context)
 	}
 }
 

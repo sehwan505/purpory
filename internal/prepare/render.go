@@ -37,11 +37,17 @@ func RenderAwareness(items []Awareness) string {
 		return ""
 	}
 	lines := []string{
-		"[PURPORY RELATED CONTEXT AVAILABLE — NOT LOADED]",
-		"These are discovery hints, not evidence. Do not assume they are relevant. Run `purpory prepare \"<specific need>\"` only if the task reveals a matching gap.",
+		"[PURPORY PROJECT MAP — CONTENT NOT LOADED]",
+		"These are discovery hints, not evidence. Inspect only the nodes needed for the task.",
 	}
 	for _, item := range items[:min(len(items), MaxAwarenessHints)] {
 		var details []string
+		if item.Kind != "" {
+			details = append(details, item.Kind)
+		}
+		if item.Reason != "" {
+			details = append(details, item.Reason)
+		}
 		if item.Relation != nil && strings.TrimSpace(*item.Relation) != "" {
 			details = append(details, "via "+strings.TrimSpace(*item.Relation))
 		}
@@ -52,7 +58,12 @@ func RenderAwareness(items []Awareness) string {
 		if len(details) > 0 {
 			suffix = " (" + strings.Join(details, "; ") + ")"
 		}
-		lines = append(lines, "- "+item.Key+": "+item.Label+suffix)
+		lines = append(lines, "- `"+item.NodeID+"`: "+item.Label+suffix)
+		lines = append(lines, "  Inspect: `purpory explain \""+item.NodeID+"\"`")
 	}
+	lines = append(lines,
+		"Search for another need: `purpory query \"<specific question>\"`",
+		"Connect two nodes: `purpory path \"<node A>\" \"<node B>\"`",
+	)
 	return strings.Join(lines, "\n")
 }

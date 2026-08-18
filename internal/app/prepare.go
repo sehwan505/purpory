@@ -195,6 +195,21 @@ func (s *Service) searchAndDeliver(
 	ranked := uniqueCandidates(semanticSeeds, bm25, semanticLane, bm25Lane)
 	search := &contextprepare.Search{Query: query, Scopes: normalizedScopes(result.Proposal.Scopes), Terms: terms, Candidates: ranked}
 	result.Context.Search = search
+	if request.HintsOnly {
+		result.Awareness = prepareHints(ranked)
+		if len(result.Awareness) > 0 {
+			agent := sessionAgent(request.SessionID)
+			if err := s.SaveSessionAt(ctx, request.WorkingDirectory, request.SessionID, agent, "active"); err != nil {
+				return err
+			}
+			result.Action = "retrieve"
+		} else if result.Proposal.ReasonCode == "GATE_UNAVAILABLE" {
+			result.Action = "skip"
+		} else {
+			result.Action = "ask"
+		}
+		return nil
+	}
 
 	deliveries, omitted, sessionDeliveries := deliverCandidates(ranked, prior, request.TokenBudget)
 	result.Deliveries, result.Omitted = deliveries, omitted
@@ -439,6 +454,30 @@ func uniqueCandidates(lanes ...[]contextprepare.Candidate) []contextprepare.Cand
 			seen[candidate.NodeID] = true
 			result = append(result, candidate)
 		}
+	}
+	return result
+}
+
+func prepareHints(candidates []contextprepare.Candidate) []contextprepare.Awareness {
+	result := make([]contextprepare.Awareness, 0, min(len(candidates), contextprepare.MaxAwarenessHints))
+	for _, candidate := range candidates[:min(len(candidates), contextprepare.MaxAwarenessHints)] {
+		reason := "bm25"
+		var relation *string
+		for _, signal := range candidate.Signals {
+			switch {
+			case strings.HasPrefix(signal, "semantic:"):
+				reason = "semantic"
+			case strings.HasPrefix(signal, "path:"):
+				reason = "graph-path"
+				value := strings.TrimPrefix(signal, "path:")
+				relation = &value
+			}
+		}
+		result = append(result, contextprepare.Awareness{
+			NodeID: candidate.NodeID, Key: candidate.Key, Namespace: candidate.Namespace,
+			Label: candidate.Label, Kind: candidate.Kind, Source: candidate.Source,
+			Reason: reason, Relation: relation,
+		})
 	}
 	return result
 }

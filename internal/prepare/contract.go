@@ -26,6 +26,7 @@ type Request struct {
 	ActivePaths      []string      `json:"activePaths"`
 	TokenBudget      int           `json:"tokenBudget"`
 	RetainInput      bool          `json:"retainInput"`
+	HintsOnly        bool          `json:"hintsOnly"`
 	PriorKeys        []string      `json:"previousDeliveries"`
 	Catalog          Catalog       `json:"contextCatalog"`
 	Orientation      []Orientation `json:"orientation"`
