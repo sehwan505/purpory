@@ -40,7 +40,7 @@ func TestMigrationAddsAwarenessFollowUpColumn(t *testing.T) {
 			PRIMARY KEY (project_id, session_id, node_id)
 		) STRICT;
 		INSERT INTO schema_migrations(version)
-		VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (14);
+		VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (14), (15);
 	`); err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -102,6 +102,35 @@ func TestProjectRoundTrip(t *testing.T) {
 	}
 	if _, err := store.Project(ctx, want.ID); err != nil {
 		t.Fatalf("project was not re-registered: %v", err)
+	}
+}
+
+func TestProjectEmbeddingModelIsImmutable(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, value := range []project.Project{{ID: "one", Name: "One", Root: "/one"}, {ID: "two", Name: "Two", Root: "/two"}} {
+		if err := database.SaveProject(ctx, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.SetProjectEmbeddingModel(ctx, "one", "embed-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetProjectEmbeddingModel(ctx, "one", "embed-a"); err != nil {
+		t.Fatalf("same model should remain valid: %v", err)
+	}
+	if err := database.SetProjectEmbeddingModel(ctx, "one", "embed-b"); err == nil {
+		t.Fatal("project embedding model was changed")
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE projects SET embedding_model = 'embed-b' WHERE id = 'one'`); err == nil {
+		t.Fatal("database trigger allowed the project embedding model to change")
+	}
+	if err := database.SetProjectEmbeddingModel(ctx, "two", "embed-b"); err != nil {
+		t.Fatalf("another project could not select its own model: %v", err)
 	}
 }
 

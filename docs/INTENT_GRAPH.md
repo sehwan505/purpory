@@ -66,17 +66,20 @@ reconciliation audit as provenance rather than becoming graph nodes.
 
 ## Retrieval
 
-Retrieval first performs existing lexical and optional semantic ranking. A
-matched Intent is ranked above ordinary memory. The retriever then expands one
-durable-link hop and delivers the Intent together with its concrete evidence;
-additional structural neighbors remain compact awareness hints. Reverse lookup
-also works: matching a Material pulls its governing Intent ahead of the
-artifact. Exact per-session delivery suppression and token budgeting still
-apply.
+Retrieval keeps semantic and lexical evidence in separate lanes. Every embedding
+match above the similarity cutoff is delivered first. If those matches do not
+fill the token budget, BM25 supplies content-bearing lexical matches. The
+retriever then traverses two physical-graph hops from both anchor sets while
+budget remains, across durable and observed edges alike. This supports reverse
+lookup and Intent-to-evidence paths without requiring the calling agent to issue
+follow-up path requests.
 
-One-hop expansion is intentional for the current graph size. Personalized
-PageRank or another spreading-activation strategy becomes justified only when a
-multi-hop evaluation shows that bounded traversal loses relevant evidence.
+There is no forced minimum result count: no valid match means no direct
+evidence. Empty graph nodes may bridge a path but are not delivered, and
+workspace Resources are never treated as evidence. Exact per-session delivery
+suppression and token budgeting still apply. Personalized PageRank becomes
+justified only when a multi-hop evaluation shows that this bounded traversal
+loses relevant evidence.
 
 ## Research basis
 
@@ -107,7 +110,8 @@ The engine must keep these checks runnable without a model or network:
 4. `update` preserves durable edges while targets disappear and reconnects them when
    targets return;
 5. Graph, Explain, and Path traverse Intent and observed evidence together;
-6. prepare delivers a relevant Intent before and alongside linked Material;
+6. prepare orders valid semantic evidence before BM25 fallback and traversed
+   graph evidence within the token budget;
 7. an unresolved durable target is visible rather than silently discarded;
 8. Workspace Sessions never project into the canonical graph.
 

@@ -207,7 +207,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			result, err := service.EmbeddingStatus(ctx)
 			return writeJSON(output, result, err)
 		}
-		limit := 100
+		limit := 0
 		if len(arguments) == 2 {
 			parsed, err := strconv.Atoi(arguments[1])
 			if err != nil || parsed <= 0 {

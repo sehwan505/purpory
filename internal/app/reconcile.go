@@ -202,7 +202,10 @@ func (s *Service) applyCandidates(ctx context.Context, sessionID string, candida
 		return nil
 	}
 	if _, err := s.store.ReconcileMemories(ctx, sessionID, proposals); !errors.Is(err, store.ErrMemoryConflict) {
-		return err
+		if err != nil {
+			return err
+		}
+		return s.syncProposalEmbeddings(ctx, proposals)
 	}
 	proposals, err = s.memoryProposals(ctx, candidates)
 	if err != nil {
@@ -211,7 +214,15 @@ func (s *Service) applyCandidates(ctx context.Context, sessionID string, candida
 	if _, err := s.store.ReconcileMemories(ctx, sessionID, proposals); err != nil {
 		return fmt.Errorf("apply reconciliation after conflict: %w", err)
 	}
-	return nil
+	return s.syncProposalEmbeddings(ctx, proposals)
+}
+
+func (s *Service) syncProposalEmbeddings(ctx context.Context, proposals []store.MemoryProposal) error {
+	nodeIDs := make([]string, 0, len(proposals))
+	for _, proposal := range proposals {
+		nodeIDs = append(nodeIDs, memoryNodeID(proposal.Memory))
+	}
+	return s.syncNodeEmbeddings(ctx, nodeIDs)
 }
 
 func (s *Service) memoryProposals(ctx context.Context, candidates []reconcile.Candidate) ([]store.MemoryProposal, error) {

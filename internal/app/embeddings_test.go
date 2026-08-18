@@ -5,14 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
+	"github.com/sehwan505/purpory/internal/reconcile"
 )
 
-func TestEmbeddingAndUsageRanking(t *testing.T) {
+func useEmbeddingServer(t *testing.T) {
+	t.Helper()
 	vector := make([]float64, embeddingDimensions)
 	vector[0] = 1
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -20,28 +25,71 @@ func TestEmbeddingAndUsageRanking(t *testing.T) {
 			http.NotFound(response, request)
 			return
 		}
-		_ = json.NewEncoder(response).Encode(map[string]any{"embeddings": [][]float64{vector}})
+		var body struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(response, err.Error(), http.StatusBadRequest)
+			return
+		}
+		vectors := make([][]float64, len(body.Input))
+		for index := range vectors {
+			vectors[index] = vector
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"embeddings": vectors})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
+}
 
+func useSelectiveEmbeddingServer(t *testing.T) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(response, err.Error(), http.StatusBadRequest)
+			return
+		}
+		vectors := make([][]float64, len(body.Input))
+		for index, input := range body.Input {
+			vectors[index] = make([]float64, embeddingDimensions)
+			if strings.Contains(input, "Instruct:") || strings.Contains(input, "Dense-only") {
+				vectors[index][0] = 1
+			} else {
+				vectors[index][1] = 1
+			}
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"embeddings": vectors})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
+}
+
+func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
+	useEmbeddingServer(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
-	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
-		t.Fatal(err)
-	}
 	value := "Signed cookies hold authenticated browser sessions."
 	if _, err := service.Remember(ctx, "decision.auth", memory.Decision, &value, nil); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := service.SyncEmbeddings(ctx, 10); err != nil || result.Embedded != 1 {
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := service.SyncEmbeddings(ctx, 0); err != nil || result.Embedded != 1 {
 		t.Fatalf("embedding sync failed: %#v %v", result, err)
 	}
 	if status, err := service.EmbeddingStatus(ctx); err != nil || status.Current != 1 || status.Pending != 0 {
 		t.Fatalf("embedding status failed: %#v %v", status, err)
 	}
 	query := "completely unrelated lexical text"
+	found, err := service.Query(ctx, query, 10)
+	if err != nil || len(found.Seeds) != 1 || found.Seeds[0].ID != "intent:decision.auth" {
+		t.Fatalf("semantic graph seed missing: %#v %v", found, err)
+	}
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
 	prepared, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "semantic", WorkingDirectory: root, TokenBudget: 512})
 	if err != nil || len(prepared.Deliveries) != 1 || prepared.Deliveries[0].Key != "decision.auth" {
@@ -53,5 +101,129 @@ func TestEmbeddingAndUsageRanking(t *testing.T) {
 	usage, err := service.store.MemoryUsage(ctx, "demo")
 	if err != nil || usage["decision.auth"].SelectedCount != 1 || usage["decision.auth"].ExpandedCount != 1 {
 		t.Fatalf("usage was not recorded: %#v %v", usage, err)
+	}
+}
+
+func TestPrepareFillsRemainingEmbeddingBudgetWithBM25(t *testing.T) {
+	useSelectiveEmbeddingServer(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	for key, value := range map[string]string{
+		"knowledge.dense":   "Dense-only project context.",
+		"knowledge.lexical": "fallback-marker is the exact operational keyword.",
+	} {
+		value := value
+		if _, err := service.Remember(ctx, key, memory.Note, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "qwen3-embedding:test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SyncEmbeddings(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	query := "fallback-marker"
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	result, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "hybrid", WorkingDirectory: root, TokenBudget: 512})
+	if err != nil || len(result.Deliveries) != 2 || result.Deliveries[0].Key != "knowledge.dense" || result.Deliveries[1].Key != "knowledge.lexical" || !strings.HasPrefix(result.Deliveries[0].Signals[0], "semantic:") || !strings.HasPrefix(result.Deliveries[1].Signals[0], "bm25:") {
+		t.Fatalf("embedding-first BM25 fill failed: %#v %v", result, err)
+	}
+}
+
+func TestReconcileEmbedsIntentAndKnowledgeWithLockedProjectModel(t *testing.T) {
+	useEmbeddingServer(t)
+	ctx := context.Background()
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	selected, err := service.SelectModel(ctx, "embedding", "tiny-embed")
+	if err != nil || selected.Source != "project" {
+		t.Fatalf("project model was not selected: %#v %v", selected, err)
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
+		t.Fatalf("selecting the locked model should be idempotent: %v", err)
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "other-embed"); err == nil || !strings.Contains(err.Error(), "locked") {
+		t.Fatalf("embedding model changed after project lock: %v", err)
+	}
+
+	candidates := []reconcile.Candidate{
+		{Key: "intent.database", Kind: memory.Decision, Value: "Use SQLite.", EvidenceIDs: []string{"U000001"}},
+		{Key: "knowledge.index", Kind: memory.Note, Value: "The index is rebuilt incrementally.", EvidenceIDs: []string{"U000002"}},
+	}
+	if err := service.applyCandidates(ctx, "reconcile:test", candidates); err != nil {
+		t.Fatalf("reconciliation failed: %v", err)
+	}
+	embeddings, err := service.store.Embeddings(ctx, "demo", "tiny-embed")
+	if err != nil || len(embeddings) != 2 {
+		t.Fatalf("reconciled embeddings missing: %#v %v", embeddings, err)
+	}
+	ids := map[string]bool{}
+	for _, item := range embeddings {
+		ids[item.NodeID] = true
+	}
+	if !ids["intent:intent.database"] || !ids["knowledge:knowledge.index"] {
+		t.Fatalf("intent and knowledge were not both embedded: %#v", ids)
+	}
+}
+
+func TestSemanticMapProgressesAcrossSessionCalls(t *testing.T) {
+	useEmbeddingServer(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "guide.md"), []byte("# Deployment\nShip signed artifacts from tags.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	if _, err := service.Update(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 10; index++ {
+		value := "Semantic project fact"
+		key := "knowledge.topic-" + string(rune('a'+index))
+		if _, err := service.Remember(ctx, key, memory.Note, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := service.EmbeddingStatus(ctx)
+	if err != nil || before.Pending < 11 {
+		t.Fatalf("graph embedding candidates missing: %#v %v", before, err)
+	}
+	synced, err := service.SyncEmbeddings(ctx, 0)
+	if err != nil || synced.Embedded != before.Pending {
+		t.Fatalf("full graph backfill failed: %#v %v", synced, err)
+	}
+
+	query := "lexically unrelated request"
+	found, err := service.Query(ctx, query, 100)
+	observedSeed := false
+	for _, seed := range found.Seeds {
+		observedSeed = observedSeed || seed.Kind == graph.KindKnowledge && seed.Owner == graph.OwnerObserved
+	}
+	if err != nil || !observedSeed {
+		t.Fatalf("observed knowledge was not a semantic map seed: %#v %v", found.Seeds, err)
+	}
+
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	request := contextprepare.Request{Message: query, SessionID: "codex:map", WorkingDirectory: root, TokenBudget: 512}
+	first, err := service.PrepareContext(ctx, request)
+	if err != nil || len(first.Deliveries) <= 2 || first.Context.EstimatedTokens > request.TokenBudget {
+		t.Fatalf("first semantic map failed: %#v %v", first, err)
+	}
+	second, err := service.PrepareContext(ctx, request)
+	if err != nil {
+		t.Fatalf("second semantic map failed: %#v %v", second, err)
+	}
+	firstIDs := map[string]bool{}
+	for _, delivery := range first.Deliveries {
+		firstIDs[delivery.NodeID] = true
+	}
+	for _, delivery := range second.Deliveries {
+		if firstIDs[delivery.NodeID] {
+			t.Fatalf("session map did not progress: first=%#v second=%#v", first.Deliveries, second.Deliveries)
+		}
 	}
 }

@@ -15,7 +15,6 @@ const (
 	MaxTokenBudget    = 32_768
 	MaxMessageChars   = 1_048_576
 	MaxQueryChars     = 4_096
-	MaxDirectEvidence = 2
 	MaxAwarenessHints = 6
 )
 

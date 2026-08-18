@@ -172,6 +172,82 @@ func Rank(candidates []Candidate, query string, keywords, activePaths, priorKeys
 	return result, terms
 }
 
+// BM25 ranks content-bearing graph candidates without changing semantic scores.
+func BM25(candidates []Candidate, query string, keywords []string) ([]Candidate, []string) {
+	terms := uniqueSorted(lexicalTokens(append([]string{query}, keywords...)...))
+	if len(candidates) == 0 || len(terms) == 0 {
+		return nil, terms
+	}
+	documents := make([][]string, len(candidates))
+	documentFrequency := map[string]int{}
+	totalLength := 0
+	for index, candidate := range candidates {
+		documents[index] = lexicalTokens(candidate.Key, candidate.Label, candidate.Kind, candidate.Source, candidate.Content)
+		totalLength += len(documents[index])
+		seen := map[string]bool{}
+		for _, token := range documents[index] {
+			if !seen[token] {
+				documentFrequency[token]++
+				seen[token] = true
+			}
+		}
+	}
+	averageLength := float64(totalLength) / float64(len(documents))
+	if averageLength == 0 {
+		return nil, terms
+	}
+	result := make([]Candidate, 0, len(candidates))
+	for index, candidate := range candidates {
+		frequency := map[string]int{}
+		for _, token := range documents[index] {
+			frequency[token]++
+		}
+		var score float64
+		for _, term := range terms {
+			tf := float64(frequency[term])
+			if tf == 0 {
+				continue
+			}
+			df := float64(documentFrequency[term])
+			idf := math.Log(1 + (float64(len(documents))-df+0.5)/(df+0.5))
+			score += idf * (tf * 2.2) / (tf + 1.2*(0.25+0.75*float64(len(documents[index]))/averageLength))
+		}
+		if score == 0 {
+			continue
+		}
+		candidate.Score = math.Round(score*1_000_000) / 1_000_000
+		candidate.Signals = []string{fmt.Sprintf("bm25:%.3f", candidate.Score)}
+		result = append(result, candidate)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Score != result[j].Score {
+			return result[i].Score > result[j].Score
+		}
+		return result[i].Key < result[j].Key
+	})
+	return result, terms
+}
+
+func lexicalTokens(values ...string) []string {
+	var result []string
+	for _, value := range values {
+		for _, raw := range tokenPattern.FindAllString(value, -1) {
+			token := strings.ToLower(raw)
+			if len([]rune(token)) < 2 || stopWords[token] {
+				continue
+			}
+			result = append(result, token)
+			for _, suffix := range koreanSuffixes {
+				if strings.HasSuffix(token, suffix) && len([]rune(token)) > len([]rune(suffix))+1 {
+					result = append(result, strings.TrimSuffix(token, suffix))
+					break
+				}
+			}
+		}
+	}
+	return result
+}
+
 func hasSignalPrefix(signals []string, prefix string) bool {
 	for _, signal := range signals {
 		if strings.HasPrefix(signal, prefix) {

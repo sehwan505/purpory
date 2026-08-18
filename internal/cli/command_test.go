@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,6 +60,47 @@ func TestUpdateJSON(t *testing.T) {
 	found, err := service.Query(context.Background(), "project for everyone", 10)
 	if err != nil || len(found.Nodes) != 1 || found.Nodes[0].Content != "A project for everyone." {
 		t.Fatalf("updated content missing: %#v, %v", found, err)
+	}
+}
+
+func TestEmbedCLIBackfillsAllMissingNodes(t *testing.T) {
+	vector := make([]float64, 512)
+	vector[0] = 1
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(response, err.Error(), http.StatusBadRequest)
+			return
+		}
+		vectors := make([][]float64, len(body.Input))
+		for index := range vectors {
+			vectors[index] = vector
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"embeddings": vectors})
+	}))
+	defer server.Close()
+	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
+
+	ctx := context.Background()
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	for key, kind := range map[string]memory.Kind{"intent.one": memory.Decision, "knowledge.two": memory.Note} {
+		value := "project context"
+		if _, err := service.Remember(ctx, key, kind, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runCLI(ctx, service, []string{"embed"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var result product.EmbeddingSyncResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.Embedded != 2 {
+		t.Fatalf("embed CLI did not backfill all nodes: %#v %v", result, err)
 	}
 }
 

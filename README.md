@@ -96,7 +96,8 @@ purpory model status
 purpory model start
 purpory model install qwen3-embedding:0.6b embedding
 purpory model select gate qwen3:4b
-purpory embed
+purpory embed                              # fill every missing intent/knowledge embedding
+purpory embed 100                          # optionally bound one backfill run
 purpory integration codex install
 purpory integration claude install
 ```
@@ -129,7 +130,10 @@ database and `PURPORY_OLLAMA_URL` to use a non-default Ollama endpoint.
 remote gate endpoints additionally require `PURPORY_ALLOW_REMOTE_GATE=true`.
 Reconciliation uses `qwen3.5:9b` by default; override it with
 `model select reconcile`, `PURPORY_RECONCILE_MODEL`, or its context with
-`PURPORY_RECONCILE_CONTEXT_TOKENS`. `purpory embed` materializes current memory
-vectors with the selected embedding model. Prepare then combines semantic,
-lexical, active-path, freshness, and proven-usage signals; usage alone never
-makes an unrelated memory relevant.
+`PURPORY_RECONCILE_CONTEXT_TOKENS`. The first embedding model selected or used
+is fixed for that Project. `purpory embed` backfills every missing or stale
+intent/knowledge node; later memory and reconciliation writes refresh their
+vectors immediately. Prepare first delivers content whose embedding clears the
+similarity cutoff, fills any remaining token budget with BM25 matches, then
+uses their physical-graph paths if budget remains. It does not force a minimum
+result count, and contentless Resources are never direct evidence.

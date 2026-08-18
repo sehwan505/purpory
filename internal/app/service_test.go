@@ -203,36 +203,23 @@ func TestPrepareRecordsExactDeliveryAndSuppressesDuplicates(t *testing.T) {
 	}
 }
 
-func TestPrepareReturnsGraphAwarenessAndDeduplicatedAsk(t *testing.T) {
+func TestPrepareTraversesGraphPathsAndDeduplicatesAsk(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "auth.go"), []byte("package demo\nfunc Auth() { Token() }\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "token.go"), []byte("package demo\nfunc Token() {}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "auth.md"), []byte("# Auth\nSigned browser sessions authenticate requests.\n\n## Token\nTokens expire after one hour.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
 	if _, err := service.Update(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	auth := "Auth()"
+	auth := "signed browser sessions"
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &auth, Scopes: []string{"material"}, ReasonCode: "CODE_CONTEXT_REQUIRED"}}
 	result, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: "Where is Auth?", SessionID: "agent", WorkingDirectory: root, TokenBudget: 512})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "retrieve" || len(result.Deliveries) != 1 || result.Deliveries[0].Mode != "context-graph" || len(result.Awareness) == 0 || result.Awareness[0].Label != "Token()" || result.Awareness[0].Reason != "graph-bridge" {
-		t.Fatalf("graph context was not separated from awareness: %#v", result)
-	}
-	token := "Token()"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &token, Scopes: []string{"material"}, ReasonCode: "CODE_CONTEXT_REQUIRED"}}
-	followUp, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: "Show Token", SessionID: "agent", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil {
-		t.Fatal(err)
-	}
-	exposures, followUps, err := service.store.AwarenessMetrics(context.Background(), "demo")
-	if err != nil || len(followUp.Deliveries) == 0 || followUp.Deliveries[0].Key != result.Awareness[0].Key || exposures < len(result.Awareness) || followUps != 1 {
-		t.Fatalf("awareness follow-up was not measured: %#v exposures=%d followUps=%d err=%v", followUp, exposures, followUps, err)
+	if result.Action != "retrieve" || len(result.Deliveries) != 2 || result.Deliveries[0].Mode != "context-graph" || !strings.Contains(result.Deliveries[1].Rendered, "Tokens expire") || !slices.Contains(result.Deliveries[1].Signals, "path:contains") || len(result.Awareness) != 0 {
+		t.Fatalf("graph paths were not delivered as content: %#v", result)
 	}
 
 	missing := "missing deployment policy"
@@ -274,8 +261,8 @@ func TestPrepareSurfacesPriorSessionAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Deliveries) != 1 || result.Deliveries[0].Key != "decision.auth" || len(result.Awareness) != 1 || result.Awareness[0].Key != "knowledge.audit-constraint" || result.Awareness[0].Reason != "session-association" {
-		t.Fatalf("prior session association missing: %#v", result)
+	if len(result.Deliveries) != 1 || result.Deliveries[0].Key != "decision.auth" || len(result.Awareness) != 0 {
+		t.Fatalf("valid lexical evidence was not isolated: %#v", result)
 	}
 }
 
@@ -313,8 +300,8 @@ func TestPrepareUsesSourceLinkedActivePathAsAwareness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "retrieve" || len(result.Deliveries) != 0 || len(result.Awareness) != 1 || result.Awareness[0].Key != "intent.auth-review" || result.Awareness[0].Reason != "active-path-context" {
-		t.Fatalf("active-path awareness missing: %#v", result)
+	if result.Action != "ask" || len(result.Deliveries) != 0 || len(result.Awareness) != 0 {
+		t.Fatalf("active path forced invalid evidence: %#v", result)
 	}
 }
 
@@ -349,10 +336,10 @@ func TestIntentGraphDeliversLinkedMaterialEvidence(t *testing.T) {
 		t.Fatalf("intent path missing: %#v %v", path, err)
 	}
 
-	query := "tagged builds release"
+	query := "artifacts provenance"
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
 	prepared, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: query, SessionID: "agent", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil || len(prepared.Deliveries) != 2 || prepared.Deliveries[0].Key != "intent.release" || !strings.Contains(prepared.Deliveries[1].Rendered, "file:release.md") || !slices.Contains(prepared.Deliveries[1].Signals, "linked:"+graph.RelationRealizedBy) {
+	if err != nil || len(prepared.Deliveries) != 2 || prepared.Deliveries[0].Key != "intent.release" || !strings.Contains(prepared.Deliveries[1].Rendered, "file:release.md") || !slices.Contains(prepared.Deliveries[1].Signals, "path:"+graph.RelationRealizedBy) {
 		t.Fatalf("linked material was not delivered with intent: %#v %v", prepared, err)
 	}
 }

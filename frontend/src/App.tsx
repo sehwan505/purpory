@@ -271,7 +271,7 @@ export default function App() {
 
   async function syncEmbeddings() {
     await perform(async () => {
-      const result = await SyncEmbeddings(100);
+      const result = await SyncEmbeddings(0);
       setMessage(`${result.embedded}개 embedding 생성 · ${result.current}개 최신`);
       await refresh();
     });
@@ -458,7 +458,7 @@ export default function App() {
             <p className="settingsIntro">로컬 모델은 선택 사항입니다. 구조 분석과 기본 검색은 모델 없이도 동작합니다.</p>
             <div className="modelSummary"><p><strong>{model?.version || "Ollama 미연결"}</strong><span>Embedding {embeddingStatus?.current ?? 0}개 최신 · {embeddingStatus?.pending ?? 0}개 대기</span></p><button className="secondary" disabled={busy} onClick={() => void startModels()}>Ollama 시작</button><button disabled={busy || !model?.available || (embeddingStatus?.pending ?? 0) === 0} onClick={() => void syncEmbeddings()}>Embedding 동기화</button></div>
             <div className="modelRoles">{(modelState?.selected ?? []).map(selected => <form key={`${selected.role}-${selected.model}`} onSubmit={event => void selectModel(event)}>
-              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>{selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" /><button className="secondary" disabled={busy}>선택</button></div>
+              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>{selected.source === "project" ? "project · fixed" : selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" disabled={selected.role === "embedding" && selected.source === "project"} /><button className="secondary" disabled={busy || (selected.role === "embedding" && selected.source === "project")}>선택</button></div>
             </form>)}</div>
             <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><select name="installRole" aria-label="설치 후 사용할 역할"><option value="">설치만</option><option value="gate">gate</option><option value="reconcile">reconcile</option><option value="embedding">embedding</option></select><button disabled={busy}>설치</button></div></form>
           </section>

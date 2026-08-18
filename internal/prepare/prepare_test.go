@@ -38,6 +38,20 @@ func TestRankAppliesSemanticUsageAndFreshnessAfterRelevance(t *testing.T) {
 	}
 }
 
+func TestBM25RanksLexicalEvidenceWithoutForcingAMatch(t *testing.T) {
+	candidates := []Candidate{
+		{NodeID: "auth", Key: "knowledge.auth", Label: "Authentication", Content: "Signed browser sessions and cookies."},
+		{NodeID: "git", Key: "resource.git", Label: ".git", Content: ".git"},
+	}
+	found, terms := BM25(candidates, "signed sessions", nil)
+	if len(found) != 1 || found[0].NodeID != "auth" || !strings.HasPrefix(found[0].Signals[0], "bm25:") || !contains(terms, "signed") {
+		t.Fatalf("unexpected BM25 ranking: %#v %#v", found, terms)
+	}
+	if found, _ := BM25(candidates, "deployment", nil); len(found) != 0 {
+		t.Fatalf("BM25 forced an invalid result: %#v", found)
+	}
+}
+
 func TestContractAndBudget(t *testing.T) {
 	request, err := ValidateRequest(Request{Message: "database", SessionID: "agent", ProjectID: "demo", WorkingDirectory: "/demo", TokenBudget: 128})
 	if err != nil || request.Message != "database" {

@@ -99,10 +99,19 @@ Directories are added only when their first behavior is implemented.
   changes and the canonical graph remains free of Workspace topology.
 - Model assistance is optional. Structural indexing and stored-memory queries
   continue to work when Ollama is absent.
+- The embedding model is fixed when first selected or used for a Project. A
+  backfill covers active Intent and Knowledge nodes; later durable writes and
+  reconciliation refresh those vectors immediately.
 - `prepare` owns the complete context gateway: bounded input validation,
-  optional gate classification, deterministic scoped retrieval, active-path and
-  graph awareness, exact per-session delivery suppression, token budgeting, and
+  optional gate classification, embedding-first retrieval, BM25 fallback,
+  graph traversal, exact per-session delivery suppression, token budgeting, and
   decision audit. CLI, Wails, and agent hooks call this same path.
+- Prepare accepts every embedding match above the similarity cutoff, then uses
+  BM25 anchors to fill the remaining token budget before traversing two levels
+  of the physical graph from both anchor sets. It delivers only
+  content-bearing nodes; workspace Resources and empty graph nodes are traversal
+  structure, not direct evidence. Repeated calls skip exact content already
+  delivered to that Session without mutating the canonical graph.
 
 ## Product direction
 

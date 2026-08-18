@@ -172,52 +172,32 @@ func (s *Service) searchAndDeliver(
 	if result.Proposal.Query != nil {
 		query = *result.Proposal.Query
 	}
-	candidates := prepareCandidates(s.project.Root, result.Proposal.Scopes, memories, nodes, workspace)
 	allCandidates := prepareCandidates(s.project.Root, nil, memories, nodes, workspace)
 	for _, node := range nodes {
 		if node.Kind == "material" && node.Content == "" {
 			allCandidates = append(allCandidates, prepareNodeCandidate(node))
 		}
 	}
-	if err := s.enrichMemoryRanking(ctx, query, candidates, memories); err != nil {
+	semantic, err := s.semanticMatches(ctx, query, physicalGraph.nodes, 0)
+	if err != nil {
 		return err
 	}
-	ranked, terms := contextprepare.Rank(candidates, query, result.Proposal.Keywords, request.ActivePaths, mapKeys(prior))
-	var durableEdges []graph.Edge
-	for _, edge := range physicalGraph.edges {
-		if edge.Owner == graph.OwnerDurable {
-			durableEdges = append(durableEdges, edge)
+	searchable := make([]contextprepare.Candidate, 0, len(allCandidates))
+	for _, candidate := range allCandidates {
+		if deliverableCandidate(candidate) {
+			searchable = append(searchable, candidate)
 		}
 	}
-	ranked = expandLinkedCandidates(ranked, allCandidates, durableEdges)
+	semanticSeeds := semanticCandidates(allCandidates, semantic)
+	bm25, terms := contextprepare.BM25(searchable, query, result.Proposal.Keywords)
+	semanticLane := expandGraphCandidates(semanticSeeds, allCandidates, physicalGraph.edges, 2)
+	bm25Lane := expandGraphCandidates(bm25, allCandidates, physicalGraph.edges, 2)
+	ranked := uniqueCandidates(semanticSeeds, bm25, semanticLane, bm25Lane)
 	search := &contextprepare.Search{Query: query, Scopes: normalizedScopes(result.Proposal.Scopes), Terms: terms, Candidates: ranked}
 	result.Context.Search = search
 
-	exposed, err := s.store.SessionAwarenessNodeIDs(ctx, s.project.ID, request.SessionID)
-	if err != nil {
-		return err
-	}
-	selected := make([]contextprepare.Candidate, 0, contextprepare.MaxDirectEvidence)
-	var awarenessCandidates []contextprepare.Candidate
-	for _, candidate := range ranked {
-		activeOnly := candidate.Namespace == "memory" && onlyContextSignals(candidate.Signals)
-		if activeOnly || len(selected) >= contextprepare.MaxDirectEvidence {
-			awarenessCandidates = append(awarenessCandidates, candidate)
-			continue
-		}
-		selected = append(selected, candidate)
-	}
-	deliveries, omitted, sessionDeliveries := deliverCandidates(selected, prior, request.TokenBudget)
+	deliveries, omitted, sessionDeliveries := deliverCandidates(ranked, prior, request.TokenBudget)
 	result.Deliveries, result.Omitted = deliveries, omitted
-	anchorKeys := make([]string, len(selected))
-	for index, candidate := range selected {
-		anchorKeys[index] = candidate.Key
-	}
-	associations, err := s.store.AssociatedDeliveryKeys(ctx, s.project.ID, request.SessionID, anchorKeys, contextprepare.MaxAwarenessHints)
-	if err != nil {
-		return err
-	}
-	result.Awareness = prepareAwareness(awarenessCandidates, selected, allCandidates, physicalGraph.edges, associations, prior, exposed)
 
 	if len(sessionDeliveries) > 0 {
 		agent := sessionAgent(request.SessionID)
@@ -379,53 +359,87 @@ func prepareNodeCandidate(node graph.Node) contextprepare.Candidate {
 	}
 }
 
-func expandLinkedCandidates(ranked, all []contextprepare.Candidate, edges []graph.Edge) []contextprepare.Candidate {
+func deliverableCandidate(candidate contextprepare.Candidate) bool {
+	return candidate.Namespace != "resource" && strings.TrimSpace(candidate.Content) != ""
+}
+
+func expandGraphCandidates(seeds, all []contextprepare.Candidate, edges []graph.Edge, depth int) []contextprepare.Candidate {
 	byID := map[string]contextprepare.Candidate{}
 	for _, candidate := range all {
 		byID[candidate.NodeID] = candidate
 	}
-	positions := map[string]int{}
-	result := append([]contextprepare.Candidate(nil), ranked...)
-	for index, candidate := range result {
-		positions[candidate.NodeID] = index
+	type link struct{ id, relation string }
+	adjacent := map[string][]link{}
+	for _, edge := range edges {
+		adjacent[edge.SourceID] = append(adjacent[edge.SourceID], link{edge.TargetID, edge.Relation})
+		adjacent[edge.TargetID] = append(adjacent[edge.TargetID], link{edge.SourceID, edge.Relation})
 	}
-	anchors := append([]contextprepare.Candidate(nil), ranked...)
-	for _, anchor := range anchors {
-		for _, edge := range edges {
-			neighbor := ""
-			if edge.SourceID == anchor.NodeID {
-				neighbor = edge.TargetID
-			} else if edge.TargetID == anchor.NodeID {
-				neighbor = edge.SourceID
-			}
-			candidate, found := byID[neighbor]
-			if !found {
-				continue
-			}
-			score := anchor.Score - 1
-			if candidate.Kind == string(memory.Decision) {
-				score = anchor.Score + 1
-			}
-			signal := "linked:" + edge.Relation
-			if index, found := positions[candidate.NodeID]; found {
-				if result[index].Score < score {
-					result[index].Score = score
+	for id := range adjacent {
+		sort.Slice(adjacent[id], func(i, j int) bool {
+			return adjacent[id][i].relation+adjacent[id][i].id < adjacent[id][j].relation+adjacent[id][j].id
+		})
+	}
+	type step struct {
+		id      string
+		score   float64
+		signals []string
+	}
+	seen := map[string]bool{}
+	frontier := make([]step, 0, len(seeds))
+	result := make([]contextprepare.Candidate, 0, len(seeds))
+	for _, seed := range seeds {
+		if seen[seed.NodeID] {
+			continue
+		}
+		seen[seed.NodeID] = true
+		frontier = append(frontier, step{seed.NodeID, seed.Score, seed.Signals})
+		result = append(result, seed)
+	}
+	for level := 0; level < depth && len(frontier) > 0; level++ {
+		var next []step
+		for position := 0; ; position++ {
+			added := false
+			for _, current := range frontier {
+				if position >= len(adjacent[current.id]) {
+					continue
 				}
-				result[index].Signals = append(result[index].Signals, signal)
+				added = true
+				neighbor := adjacent[current.id][position]
+				if seen[neighbor.id] {
+					continue
+				}
+				seen[neighbor.id] = true
+				signals := append(append([]string(nil), current.signals...), "path:"+neighbor.relation)
+				next = append(next, step{neighbor.id, current.score / 2, signals})
+				candidate, found := byID[neighbor.id]
+				if !found || !deliverableCandidate(candidate) {
+					continue
+				}
+				candidate.Score = current.score / 2
+				candidate.Signals = signals
+				result = append(result, candidate)
+			}
+			if !added {
+				break
+			}
+		}
+		frontier = next
+	}
+	return result
+}
+
+func uniqueCandidates(lanes ...[]contextprepare.Candidate) []contextprepare.Candidate {
+	seen := map[string]bool{}
+	var result []contextprepare.Candidate
+	for _, lane := range lanes {
+		for _, candidate := range lane {
+			if seen[candidate.NodeID] {
 				continue
 			}
-			candidate.Score = score
-			candidate.Signals = append(candidate.Signals, signal)
-			positions[candidate.NodeID] = len(result)
+			seen[candidate.NodeID] = true
 			result = append(result, candidate)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Score != result[j].Score {
-			return result[i].Score > result[j].Score
-		}
-		return result[i].Key < result[j].Key
-	})
 	return result
 }
 
@@ -479,69 +493,6 @@ func renderCandidate(candidate contextprepare.Candidate) string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-func prepareAwareness(ranked, selected, all []contextprepare.Candidate, edges []graph.Edge, associations []string, prior map[string]string, exposed map[string]bool) []contextprepare.Awareness {
-	seen := map[string]bool{}
-	for _, candidate := range selected {
-		seen[candidate.NodeID] = true
-	}
-	for _, candidate := range ranked {
-		if len(prior[candidate.Key]) > 0 {
-			seen[candidate.NodeID] = true
-		}
-	}
-	for id := range exposed {
-		seen[id] = true
-	}
-	result := []contextprepare.Awareness{}
-	add := func(candidate contextprepare.Candidate, reason string, relation *string) {
-		if seen[candidate.NodeID] || len(result) >= contextprepare.MaxAwarenessHints {
-			return
-		}
-		seen[candidate.NodeID] = true
-		result = append(result, contextprepare.Awareness{NodeID: candidate.NodeID, Key: candidate.Key, Namespace: candidate.Namespace, Label: candidate.Label, Kind: candidate.Kind, Source: candidate.Source, Reason: reason, Relation: relation})
-	}
-	for _, candidate := range ranked {
-		reason := "additional-anchor"
-		if candidate.Namespace == "memory" && onlyContextSignals(candidate.Signals) {
-			reason = "active-path-context"
-		}
-		add(candidate, reason, nil)
-	}
-	byID := map[string]contextprepare.Candidate{}
-	for _, candidate := range all {
-		byID[candidate.NodeID] = candidate
-	}
-	selectedIDs := map[string]bool{}
-	for _, candidate := range selected {
-		selectedIDs[candidate.NodeID] = true
-	}
-	for _, edge := range edges {
-		var neighbor string
-		if selectedIDs[edge.SourceID] {
-			neighbor = edge.TargetID
-		} else if selectedIDs[edge.TargetID] {
-			neighbor = edge.SourceID
-		}
-		if candidate, found := byID[neighbor]; found {
-			if candidate.Kind == "material" && candidate.Content == "" && !graph.IsIntentMaterialRelation(edge.Relation) {
-				continue
-			}
-			relation := edge.Relation
-			add(candidate, "graph-bridge", &relation)
-		}
-	}
-	byKey := map[string]contextprepare.Candidate{}
-	for _, candidate := range all {
-		byKey[candidate.Key] = candidate
-	}
-	for _, key := range associations {
-		if candidate, found := byKey[key]; found {
-			add(candidate, "session-association", nil)
-		}
-	}
-	return result
 }
 
 func resolveMemory(root string, entry memory.Memory) (string, string) {
@@ -667,15 +618,6 @@ func scopeSet(scopes []string) map[string]bool {
 		result[scope] = true
 	}
 	return result
-}
-
-func onlyContextSignals(signals []string) bool {
-	for _, signal := range signals {
-		if signal != "active-path" && signal != "human" && signal != "decision" && signal != "previously-delivered" {
-			return false
-		}
-	}
-	return len(signals) > 0
 }
 
 func hasOmission(items []contextprepare.Omitted, reason string) bool {

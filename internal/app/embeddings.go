@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
+	"github.com/sehwan505/purpory/internal/store"
 )
 
 const embeddingDimensions = 512
@@ -25,26 +27,35 @@ type EmbeddingStatus struct {
 	Pending int    `json:"pending"`
 }
 
+type embeddingCandidate struct {
+	node graph.Node
+	text string
+	hash string
+}
+
+type semanticMatch struct {
+	node  graph.Node
+	score float64
+}
+
 func (s *Service) EmbeddingStatus(ctx context.Context) (EmbeddingStatus, error) {
 	selected, err := s.modelName(ctx, "embedding")
 	if err != nil {
 		return EmbeddingStatus{}, err
 	}
-	memories, err := s.store.Memories(ctx, s.project.ID, "")
+	nodes, _, err := s.store.Graph(ctx, s.project.ID)
 	if err != nil {
 		return EmbeddingStatus{}, err
 	}
+	candidates := embeddingCandidates(nodes)
 	existing, err := s.store.Embeddings(ctx, s.project.ID, selected.Model)
 	if err != nil {
 		return EmbeddingStatus{}, err
 	}
-	hashes := map[string]string{}
-	for _, item := range existing {
-		hashes[item.NodeID] = item.ContentHash
-	}
+	hashes := embeddingHashes(existing)
 	result := EmbeddingStatus{Model: selected.Model}
-	for _, entry := range memories {
-		if hashes[memoryNodeID(entry)] == entry.Hash {
+	for _, candidate := range candidates {
+		if hashes[candidate.node.ID] == candidate.hash {
 			result.Current++
 		} else {
 			result.Pending++
@@ -53,125 +64,190 @@ func (s *Service) EmbeddingStatus(ctx context.Context) (EmbeddingStatus, error) 
 	return result, nil
 }
 
+// SyncEmbeddings fills every missing or stale intent/knowledge embedding.
+// A positive limit bounds one invocation; zero processes the whole project.
 func (s *Service) SyncEmbeddings(ctx context.Context, limit int) (EmbeddingSyncResult, error) {
-	selected, err := s.modelName(ctx, "embedding")
+	selected, err := s.lockEmbeddingModel(ctx)
 	if err != nil {
 		return EmbeddingSyncResult{}, err
 	}
-	if selected.Model == "" {
-		return EmbeddingSyncResult{}, fmt.Errorf("sync embeddings: no embedding model selected")
-	}
-	memories, err := s.store.Memories(ctx, s.project.ID, "")
+	nodes, _, err := s.store.Graph(ctx, s.project.ID)
 	if err != nil {
 		return EmbeddingSyncResult{}, err
 	}
-	existing, err := s.store.Embeddings(ctx, s.project.ID, selected.Model)
-	if err != nil {
-		return EmbeddingSyncResult{}, err
-	}
-	hashes := map[string]string{}
-	for _, item := range existing {
-		hashes[item.NodeID] = item.ContentHash
-	}
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-	result := EmbeddingSyncResult{Model: selected.Model}
-	for start := 0; start < len(memories) && result.Embedded < limit; {
-		batch := memories[start:min(start+32, len(memories))]
-		start += len(batch)
-		var pending []memory.Memory
-		var texts []string
-		for _, entry := range batch {
-			nodeID := memoryNodeID(entry)
-			if hashes[nodeID] == entry.Hash {
-				result.Current++
-				continue
-			}
-			if result.Embedded+len(pending) >= limit {
-				break
-			}
-			pending = append(pending, entry)
-			texts = append(texts, embeddingText(entry))
-		}
-		if len(pending) == 0 {
-			continue
-		}
-		vectors, err := s.ollama.Embed(ctx, selected.Model, texts, embeddingDimensions)
-		if err != nil {
-			return EmbeddingSyncResult{}, err
-		}
-		for index, entry := range pending {
-			if err := s.store.SaveEmbedding(ctx, s.project.ID, memoryNodeID(entry), entry.Hash, selected.Model, vectors[index]); err != nil {
-				return EmbeddingSyncResult{}, err
-			}
-			result.Embedded++
-		}
-	}
-	return result, nil
+	embedded, current, err := s.syncEmbeddingCandidates(ctx, selected.Model, embeddingCandidates(nodes), limit)
+	return EmbeddingSyncResult{Model: selected.Model, Embedded: embedded, Current: current}, err
 }
 
-func (s *Service) enrichMemoryRanking(ctx context.Context, query string, candidates []contextprepare.Candidate, memories []memory.Memory) error {
-	usage, err := s.store.MemoryUsage(ctx, s.project.ID)
+func (s *Service) lockEmbeddingModel(ctx context.Context) (ModelSelection, error) {
+	selected, err := s.modelName(ctx, "embedding")
+	if err != nil {
+		return ModelSelection{}, err
+	}
+	if selected.Model == "" {
+		return ModelSelection{}, fmt.Errorf("sync embeddings: no embedding model selected")
+	}
+	if selected.Source != "project" {
+		if err := s.store.SetProjectEmbeddingModel(ctx, s.project.ID, selected.Model); err != nil {
+			return ModelSelection{}, err
+		}
+		selected.Source = "project"
+	}
+	return selected, nil
+}
+
+func (s *Service) syncNodeEmbeddings(ctx context.Context, nodeIDs []string) error {
+	model, configured, err := s.store.ProjectEmbeddingModel(ctx, s.project.ID)
+	if err != nil || !configured || len(nodeIDs) == 0 {
+		return err
+	}
+	wanted := map[string]bool{}
+	for _, id := range nodeIDs {
+		wanted[id] = true
+	}
+	nodes, _, err := s.store.Graph(ctx, s.project.ID)
 	if err != nil {
 		return err
 	}
-	hashes := map[string]string{}
-	for _, entry := range memories {
-		hashes[memoryNodeID(entry)] = entry.Hash
+	var candidates []embeddingCandidate
+	for _, candidate := range embeddingCandidates(nodes) {
+		if wanted[candidate.node.ID] {
+			candidates = append(candidates, candidate)
+		}
 	}
-	for index := range candidates {
-		item := usage[candidates[index].Key]
-		candidates[index].SelectedCount = item.SelectedCount
-		candidates[index].ExpandedCount = item.ExpandedCount
+	_, _, err = s.syncEmbeddingCandidates(ctx, model, candidates, 0)
+	return err
+}
+
+func (s *Service) syncEmbeddingCandidates(ctx context.Context, model string, candidates []embeddingCandidate, limit int) (int, int, error) {
+	existing, err := s.store.Embeddings(ctx, s.project.ID, model)
+	if err != nil {
+		return 0, 0, err
 	}
-	selected, err := s.modelName(ctx, "embedding")
-	if err != nil || selected.Model == "" {
-		return err
+	hashes := embeddingHashes(existing)
+	current := 0
+	pending := make([]embeddingCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if hashes[candidate.node.ID] == candidate.hash {
+			current++
+		} else {
+			pending = append(pending, candidate)
+		}
 	}
-	embeddings, err := s.store.Embeddings(ctx, s.project.ID, selected.Model)
-	if err != nil || len(embeddings) == 0 {
-		return err
+	if limit > 0 && len(pending) > limit {
+		pending = pending[:limit]
+	}
+	embedded := 0
+	for start := 0; start < len(pending); start += 32 {
+		batch := pending[start:min(start+32, len(pending))]
+		texts := make([]string, len(batch))
+		for index, candidate := range batch {
+			texts[index] = candidate.text
+		}
+		vectors, err := s.ollama.Embed(ctx, model, texts, embeddingDimensions)
+		if err != nil {
+			return embedded, current, err
+		}
+		for index, candidate := range batch {
+			if err := s.store.SaveEmbedding(ctx, s.project.ID, candidate.node.ID, candidate.hash, model, vectors[index]); err != nil {
+				return embedded, current, err
+			}
+			embedded++
+		}
+	}
+	return embedded, current, nil
+}
+
+func (s *Service) semanticMatches(ctx context.Context, query string, nodes []graph.Node, limit int) ([]semanticMatch, error) {
+	model, configured, err := s.store.ProjectEmbeddingModel(ctx, s.project.ID)
+	if err != nil || !configured {
+		return nil, err
+	}
+	candidates := embeddingCandidates(nodes)
+	existing, err := s.store.Embeddings(ctx, s.project.ID, model)
+	if err != nil {
+		return nil, err
+	}
+	byID := map[string]embeddingCandidate{}
+	for _, candidate := range candidates {
+		byID[candidate.node.ID] = candidate
 	}
 	valid := map[string][]float64{}
-	for _, item := range embeddings {
-		if hashes[item.NodeID] == item.ContentHash {
+	for _, item := range existing {
+		if candidate, found := byID[item.NodeID]; found && candidate.hash == item.ContentHash {
 			valid[item.NodeID] = item.Vector
 		}
 	}
 	if len(valid) == 0 {
-		return nil
+		return nil, nil
 	}
 	queryText := query
-	if strings.HasPrefix(selected.Model, "qwen3-embedding") {
-		queryText = "Instruct: Retrieve relevant project memory\nQuery: " + query
+	if strings.HasPrefix(model, "qwen3-embedding") {
+		queryText = "Instruct: Retrieve relevant project context\nQuery: " + query
 	}
-	vectors, err := s.ollama.Embed(ctx, selected.Model, []string{queryText}, embeddingDimensions)
+	vectors, err := s.ollama.Embed(ctx, model, []string{queryText}, embeddingDimensions)
 	if err != nil {
-		return nil // ponytail: dense retrieval is optional; deterministic ranking remains available.
+		return nil, nil // ponytail: dense retrieval is optional; lexical and graph retrieval remain available.
 	}
-	for index := range candidates {
-		similarity := cosine(vectors[0], valid[candidates[index].NodeID])
+	var result []semanticMatch
+	for id, vector := range valid {
+		similarity := cosine(vectors[0], vector)
 		if similarity >= 0.6 {
-			candidates[index].Score += similarity * 50
-			candidates[index].Signals = append(candidates[index].Signals, fmt.Sprintf("semantic:%.3f", similarity))
+			result = append(result, semanticMatch{node: byID[id].node, score: similarity})
 		}
 	}
-	return nil
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].score != result[j].score {
+			return result[i].score > result[j].score
+		}
+		return result[i].node.ID < result[j].node.ID
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func semanticCandidates(all []contextprepare.Candidate, matches []semanticMatch) []contextprepare.Candidate {
+	byID := map[string]contextprepare.Candidate{}
+	for _, candidate := range all {
+		byID[candidate.NodeID] = candidate
+	}
+	result := make([]contextprepare.Candidate, 0, len(matches))
+	for _, match := range matches {
+		candidate, available := byID[match.node.ID]
+		if !available || !deliverableCandidate(candidate) {
+			continue
+		}
+		candidate.Score = math.Round(match.score*1_000_000) / 1_000_000
+		candidate.Signals = []string{fmt.Sprintf("semantic:%.3f", match.score)}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func embeddingCandidates(nodes []graph.Node) []embeddingCandidate {
+	result := make([]embeddingCandidate, 0, len(nodes))
+	for _, node := range nodes {
+		if node.State != graph.StateActive || (node.Kind != graph.KindIntent && node.Kind != graph.KindKnowledge) {
+			continue
+		}
+		text := strings.Join([]string{node.Label, node.Kind, node.Subkind, node.MaterialURI, node.Locator, node.Content}, "\n")
+		result = append(result, embeddingCandidate{node: node, text: text, hash: contextprepare.Hash(text)})
+	}
+	return result
+}
+
+func embeddingHashes(items []store.Embedding) map[string]string {
+	result := make(map[string]string, len(items))
+	for _, item := range items {
+		result[item.NodeID] = item.ContentHash
+	}
+	return result
 }
 
 func memoryNodeID(entry memory.Memory) string {
 	return graph.ReferenceID(entry.Kind.NodeKind(), entry.Key)
-}
-
-func embeddingText(entry memory.Memory) string {
-	content := ""
-	if entry.Value != nil {
-		content = *entry.Value
-	} else if entry.Source != nil {
-		content = *entry.Source
-	}
-	return strings.Join([]string{entry.Key, string(entry.Kind), content}, "\n")
 }
 
 func cosine(left, right []float64) float64 {
