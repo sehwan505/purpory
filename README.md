@@ -138,6 +138,8 @@ similarity cutoff, fills any remaining token budget with BM25 matches, then
 uses their physical-graph paths if budget remains. It does not force a minimum
 result count, and contentless Resources are never direct evidence.
 Agent preflight does not inject that content. It returns a compact project map
-with stable node IDs and exact `purpory explain`, `query`, and `path` commands so
-the agent loads only what it needs. Explicit `purpory prepare` is still available
-when direct content delivery is requested.
+with semantic anchors first, BM25 fallback anchors next, and round-robin two-hop
+paths in the remaining hint budget. Stable node IDs appear once, typed edges use
+short aliases, and exact `purpory explain`, `query`, and `path` commands let the
+agent load only what it needs. Explicit `purpory prepare` remains available when
+direct content delivery is requested.

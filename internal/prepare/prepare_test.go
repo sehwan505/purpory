@@ -66,14 +66,23 @@ func TestContractAndBudget(t *testing.T) {
 	}
 }
 
-func TestFallbackAndAwareness(t *testing.T) {
+func TestFallback(t *testing.T) {
 	if proposal := Fallback("안녕하세요"); proposal.Action != "skip" || proposal.ReasonCode != "SELF_CONTAINED" {
 		t.Fatalf("greeting was not skipped: %#v", proposal)
 	}
-	relation := "calls"
-	rendered := RenderAwareness([]Awareness{{NodeID: "knowledge:token", Key: "material.token", Label: "TokenRepository", Kind: "function", Source: "src/token.go", Reason: "graph-path", Relation: &relation}})
-	if !strings.Contains(rendered, "CONTENT NOT LOADED") || !strings.Contains(rendered, "via calls") || !strings.Contains(rendered, `purpory explain "knowledge:token"`) {
-		t.Fatalf("awareness was not rendered: %q", rendered)
+}
+
+func TestRenderHintMapUsesAliasesAndNoContent(t *testing.T) {
+	hints := &HintMap{
+		Nodes: []HintNode{
+			{ID: "intent:auth", Label: "Authentication intent", Kind: "intent", Subkind: "decision", Match: "semantic"},
+			{ID: "material:file:auth.md", Label: "auth.md", Kind: "material", Match: "path", Source: "file:auth.md"},
+		},
+		Edges: []HintEdge{{SourceID: "intent:auth", TargetID: "material:file:auth.md", Relation: "realized_by"}},
+	}
+	rendered := RenderHintMap(hints)
+	if !strings.Contains(rendered, "N1 --realized_by--> N2") || !strings.Contains(rendered, "intent:auth") || !strings.Contains(rendered, `purpory explain`) || strings.Contains(rendered, "source body") {
+		t.Fatalf("hint map was not navigable: %q", rendered)
 	}
 }
 

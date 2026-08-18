@@ -106,9 +106,13 @@ Directories are added only when their first behavior is implemented.
   optional gate classification, embedding-first retrieval, BM25 fallback,
   graph traversal, exact per-session delivery suppression, token budgeting, and
   decision audit. CLI, Wails, and agent hooks call this same path.
-- Agent preflight uses the gateway's hint-only mode. It injects compact node IDs,
-  kinds, sources, and `query`/`explain`/`path` commands, never selected node
-  contents. Explicit `prepare` calls remain the content-delivery boundary.
+- Agent preflight uses the gateway's hint-only mode. It spends the first half of
+  its token budget on semantic anchors followed by BM25 fallback anchors, then
+  spends the remainder on round-robin two-hop paths from those anchors. The
+  resulting navigable subgraph contains stable node IDs, kinds, sources, typed
+  edges, and `query`/`explain`/`path` commands, never node contents. Explicit
+  `prepare` calls remain the content-delivery boundary. Each emitted HintMap is
+  stored with its prepare decision so the exact map shown to an agent is auditable.
 - Prepare accepts every embedding match above the similarity cutoff, then uses
   BM25 anchors to fill the remaining token budget before traversing two levels
   of the physical graph from both anchor sets. It delivers only

@@ -252,8 +252,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 		switch result.Action {
 		case "retrieve":
-			parts := []string{strings.TrimSpace(result.Context.Rendered), contextprepare.RenderAwareness(result.Awareness)}
-			_, err = fmt.Fprintln(output, strings.TrimSpace(strings.Join(parts, "\n\n")))
+			_, err = fmt.Fprintln(output, strings.TrimSpace(result.Context.Rendered))
 			return err
 		case "ask":
 			if result.Clarification != nil {

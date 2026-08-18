@@ -66,18 +66,23 @@ reconciliation audit as provenance rather than becoming graph nodes.
 
 ## Retrieval
 
-Retrieval keeps semantic and lexical evidence in separate lanes. Every embedding
-match above the similarity cutoff is delivered first. If those matches do not
-fill the token budget, BM25 supplies content-bearing lexical matches. The
-retriever then traverses two physical-graph hops from both anchor sets while
-budget remains, across durable and observed edges alike. This supports reverse
-lookup and Intent-to-evidence paths without requiring the calling agent to issue
-follow-up path requests.
+Retrieval keeps semantic and lexical anchors in separate lanes. Every embedding
+match above the similarity cutoff is selected first. If those anchors do not
+fill the anchor budget, BM25 supplies lexical anchors. The retriever then
+traverses two physical-graph hops from both anchor sets, across durable and
+observed edges alike. This supports reverse lookup and Intent-to-evidence paths
+without requiring the calling agent to plan graph traversal from scratch.
 
-There is no forced minimum result count: no valid match means no direct
-evidence. Empty graph nodes may bridge a path but are not delivered, and
-workspace Resources are never treated as evidence. Exact per-session delivery
-suppression and token budgeting still apply. Personalized PageRank becomes
+Preflight renders the selected anchors and paths as a content-free navigable
+subgraph: full stable IDs appear once in the node table, while edges use compact
+aliases. The agent chooses which node to load with `explain`, finds another
+anchor with `query`, or connects two nodes with `path`. Explicit `prepare` calls
+use the same selection order but may deliver content directly.
+
+There is no forced minimum result count: no valid match means no hint. Empty
+graph nodes may appear as path bridges, while workspace Resources remain outside
+the physical knowledge graph. Exact per-session content suppression and token
+budgeting still apply. Personalized PageRank becomes
 justified only when a multi-hop evaluation shows that this bounded traversal
 loses relevant evidence.
 

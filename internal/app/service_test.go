@@ -218,7 +218,7 @@ func TestPrepareTraversesGraphPathsAndDeduplicatesAsk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "retrieve" || len(result.Deliveries) != 2 || result.Deliveries[0].Mode != "context-graph" || !strings.Contains(result.Deliveries[1].Rendered, "Tokens expire") || !slices.Contains(result.Deliveries[1].Signals, "path:contains") || len(result.Awareness) != 0 {
+	if result.Action != "retrieve" || len(result.Deliveries) != 2 || result.Deliveries[0].Mode != "context-graph" || !strings.Contains(result.Deliveries[1].Rendered, "Tokens expire") || !slices.Contains(result.Deliveries[1].Signals, "path:contains") {
 		t.Fatalf("graph paths were not delivered as content: %#v", result)
 	}
 
@@ -235,6 +235,23 @@ func TestPrepareTraversesGraphPathsAndDeduplicatesAsk(t *testing.T) {
 	}
 	if first.Action != "ask" || first.RequestID == nil || second.RequestID == nil || *first.RequestID != *second.RequestID || first.Clarification == nil {
 		t.Fatalf("missing context request was not deduplicated: %#v %#v", first, second)
+	}
+}
+
+func TestPrepareHintMapBudgetsSemanticBM25AndPaths(t *testing.T) {
+	nodes := []graph.Node{
+		{ID: "intent:semantic", Label: "Semantic", Kind: graph.KindIntent, Subkind: "decision", State: graph.StateActive},
+		{ID: "knowledge:lexical", Label: "Lexical", Kind: graph.KindKnowledge, Subkind: "section", State: graph.StateActive},
+		{ID: "material:file:guide.md", Label: "guide.md", Kind: graph.KindMaterial, State: graph.StateActive, MaterialURI: "file:guide.md"},
+	}
+	edges := []graph.Edge{{SourceID: "intent:semantic", TargetID: "material:file:guide.md", Relation: graph.RelationRealizedBy}}
+	hints := prepareHintMap(
+		[]contextprepare.Candidate{{NodeID: "intent:semantic"}},
+		[]contextprepare.Candidate{{NodeID: "knowledge:lexical"}},
+		nodes, edges, 512,
+	)
+	if hints == nil || len(hints.Nodes) != 3 || hints.Nodes[0].Match != "semantic" || hints.Nodes[1].Match != "bm25" || hints.Nodes[2].Match != "path" || len(hints.Edges) != 1 || contextprepare.EstimateTokens(contextprepare.RenderHintMap(hints)) > 512 {
+		t.Fatalf("unexpected hint map: %#v", hints)
 	}
 }
 
@@ -261,7 +278,7 @@ func TestPrepareSurfacesPriorSessionAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Deliveries) != 1 || result.Deliveries[0].Key != "decision.auth" || len(result.Awareness) != 0 {
+	if len(result.Deliveries) != 1 || result.Deliveries[0].Key != "decision.auth" {
 		t.Fatalf("valid lexical evidence was not isolated: %#v", result)
 	}
 }
@@ -284,7 +301,7 @@ func TestPrepareEnforcesTokenBudget(t *testing.T) {
 	}
 }
 
-func TestPrepareUsesSourceLinkedActivePathAsAwareness(t *testing.T) {
+func TestPrepareDoesNotForceActivePathEvidence(t *testing.T) {
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
 	source := "@repo/src/auth"
@@ -300,7 +317,7 @@ func TestPrepareUsesSourceLinkedActivePathAsAwareness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "ask" || len(result.Deliveries) != 0 || len(result.Awareness) != 0 {
+	if result.Action != "ask" || len(result.Deliveries) != 0 {
 		t.Fatalf("active path forced invalid evidence: %#v", result)
 	}
 }

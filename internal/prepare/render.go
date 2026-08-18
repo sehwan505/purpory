@@ -3,6 +3,7 @@ package prepare
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -32,36 +33,46 @@ func Hash(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func RenderAwareness(items []Awareness) string {
-	if len(items) == 0 {
+func RenderHintMap(hints *HintMap) string {
+	if hints == nil || len(hints.Nodes) == 0 {
 		return ""
 	}
+	aliases := make(map[string]string, len(hints.Nodes))
 	lines := []string{
-		"[PURPORY PROJECT MAP — CONTENT NOT LOADED]",
-		"These are discovery hints, not evidence. Inspect only the nodes needed for the task.",
+		"[PURPORY MEMORY MAP — CONTENT NOT LOADED]",
+		"This is a navigation map, not evidence. Load only the nodes needed for the task.",
+		"Nodes:",
 	}
-	for _, item := range items[:min(len(items), MaxAwarenessHints)] {
-		var details []string
-		if item.Kind != "" {
-			details = append(details, item.Kind)
+	for index, node := range hints.Nodes {
+		alias := "N" + strconv.Itoa(index+1)
+		aliases[node.ID] = alias
+		details := []string{node.Kind}
+		if node.Subkind != "" {
+			details[0] += "/" + node.Subkind
 		}
-		if item.Reason != "" {
-			details = append(details, item.Reason)
+		if node.Match != "" {
+			details = append(details, node.Match)
 		}
-		if item.Relation != nil && strings.TrimSpace(*item.Relation) != "" {
-			details = append(details, "via "+strings.TrimSpace(*item.Relation))
+		if node.State != "" && node.State != "active" {
+			details = append(details, node.State)
 		}
-		if item.Source != "" {
-			details = append(details, item.Source)
+		if node.Source != "" {
+			details = append(details, node.Source)
 		}
-		suffix := ""
-		if len(details) > 0 {
-			suffix = " (" + strings.Join(details, "; ") + ")"
+		lines = append(lines, "- "+alias+" `"+node.ID+"` ["+strings.Join(details, "; ")+"] "+node.Label)
+	}
+	if len(hints.Edges) > 0 {
+		lines = append(lines, "Paths:")
+		for _, edge := range hints.Edges {
+			left, leftFound := aliases[edge.SourceID]
+			right, rightFound := aliases[edge.TargetID]
+			if leftFound && rightFound {
+				lines = append(lines, "- "+left+" --"+edge.Relation+"--> "+right)
+			}
 		}
-		lines = append(lines, "- `"+item.NodeID+"`: "+item.Label+suffix)
-		lines = append(lines, "  Inspect: `purpory explain \""+item.NodeID+"\"`")
 	}
 	lines = append(lines,
+		"Inspect a node: `purpory explain \"<node ID>\"`",
 		"Search for another need: `purpory query \"<specific question>\"`",
 		"Connect two nodes: `purpory path \"<node A>\" \"<node B>\"`",
 	)

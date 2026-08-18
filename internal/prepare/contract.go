@@ -8,14 +8,13 @@ import (
 )
 
 const (
-	SchemaVersion     = 1
-	ContextVersion    = 2
-	PromptVersion     = "purpory-gate-v5"
-	MinTokenBudget    = 128
-	MaxTokenBudget    = 32_768
-	MaxMessageChars   = 1_048_576
-	MaxQueryChars     = 4_096
-	MaxAwarenessHints = 6
+	SchemaVersion   = 1
+	ContextVersion  = 2
+	PromptVersion   = "purpory-gate-v5"
+	MinTokenBudget  = 128
+	MaxTokenBudget  = 32_768
+	MaxMessageChars = 1_048_576
+	MaxQueryChars   = 4_096
 )
 
 type Request struct {
@@ -104,15 +103,26 @@ type Omitted struct {
 	EstimatedTokens int    `json:"estimatedTokens,omitempty"`
 }
 
-type Awareness struct {
-	NodeID    string  `json:"nodeId"`
-	Key       string  `json:"key"`
-	Namespace string  `json:"namespace"`
-	Label     string  `json:"label"`
-	Kind      string  `json:"kind"`
-	Source    string  `json:"source,omitempty"`
-	Reason    string  `json:"reason"`
-	Relation  *string `json:"relation"`
+type HintMap struct {
+	Nodes []HintNode `json:"nodes"`
+	Edges []HintEdge `json:"edges"`
+}
+
+type HintNode struct {
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	Kind       string `json:"kind"`
+	Subkind    string `json:"subkind,omitempty"`
+	State      string `json:"state,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Match      string `json:"match"`
+	Provenance string `json:"provenance,omitempty"`
+}
+
+type HintEdge struct {
+	SourceID string `json:"sourceId"`
+	TargetID string `json:"targetId"`
+	Relation string `json:"relation"`
 }
 
 type Counts struct {
@@ -152,18 +162,18 @@ type Context struct {
 }
 
 type Result struct {
-	SchemaVersion int         `json:"schemaVersion"`
-	DecisionID    int64       `json:"decisionId"`
-	Action        string      `json:"action"`
-	Proposal      Proposal    `json:"proposal"`
-	Deliveries    []Delivery  `json:"delivery"`
-	Omitted       []Omitted   `json:"omitted"`
-	RequestID     *int64      `json:"requestId"`
-	Clarification *string     `json:"clarification"`
-	Model         Model       `json:"model"`
-	Fallback      *string     `json:"fallback"`
-	Awareness     []Awareness `json:"awareness"`
-	Context       Context     `json:"context"`
+	SchemaVersion int        `json:"schemaVersion"`
+	DecisionID    int64      `json:"decisionId"`
+	Action        string     `json:"action"`
+	Proposal      Proposal   `json:"proposal"`
+	Deliveries    []Delivery `json:"delivery"`
+	Omitted       []Omitted  `json:"omitted"`
+	RequestID     *int64     `json:"requestId"`
+	Clarification *string    `json:"clarification"`
+	Model         Model      `json:"model"`
+	Fallback      *string    `json:"fallback"`
+	Hints         *HintMap   `json:"hints,omitempty"`
+	Context       Context    `json:"context"`
 }
 
 type DecisionRecord struct {
@@ -174,6 +184,7 @@ type DecisionRecord struct {
 	Proposal   Proposal
 	Action     string
 	Deliveries []Delivery
+	Hints      *HintMap
 	RequestID  *int64
 	Model      Model
 	Fallback   *string
@@ -208,6 +219,7 @@ type Decision struct {
 	Proposal      Proposal   `json:"proposal"`
 	FinalAction   string     `json:"finalAction"`
 	Deliveries    []Delivery `json:"delivery"`
+	Hints         *HintMap   `json:"hints,omitempty"`
 	RequestID     *int64     `json:"requestId"`
 	ModelID       *string    `json:"modelId"`
 	ModelRevision *string    `json:"modelRevision"`

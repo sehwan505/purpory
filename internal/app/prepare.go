@@ -105,7 +105,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 
 	result := PrepareResult{
 		SchemaVersion: contextprepare.SchemaVersion, Proposal: proposal, Model: model, Fallback: fallback,
-		Deliveries: []contextprepare.Delivery{}, Omitted: []contextprepare.Omitted{}, Awareness: []contextprepare.Awareness{},
+		Deliveries: []contextprepare.Delivery{}, Omitted: []contextprepare.Omitted{},
 		Context: contextprepare.Context{Catalog: catalog},
 	}
 	switch proposal.Action {
@@ -136,11 +136,6 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	} else {
 		result.Clarification = nil
 	}
-	if result.Action == "retrieve" && len(result.Awareness) > 0 {
-		if err := s.store.SaveAwarenessExposures(ctx, s.project.ID, request.SessionID, result.Awareness); err != nil {
-			return PrepareResult{}, err
-		}
-	}
 	inputHash := contextprepare.Hash(request.Message)
 	var inputText *string
 	if request.RetainInput {
@@ -149,7 +144,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	decisionID, err := s.store.SavePrepareDecision(ctx, contextprepare.DecisionRecord{
 		ProjectID: s.project.ID, SessionID: request.SessionID, InputHash: inputHash, InputText: inputText,
 		Proposal: result.Proposal, Action: result.Action, Deliveries: result.Deliveries, RequestID: result.RequestID,
-		Model: result.Model, Fallback: result.Fallback,
+		Hints: result.Hints, Model: result.Model, Fallback: result.Fallback,
 	})
 	if err != nil {
 		return PrepareResult{}, err
@@ -196,8 +191,8 @@ func (s *Service) searchAndDeliver(
 	search := &contextprepare.Search{Query: query, Scopes: normalizedScopes(result.Proposal.Scopes), Terms: terms, Candidates: ranked}
 	result.Context.Search = search
 	if request.HintsOnly {
-		result.Awareness = prepareHints(ranked)
-		if len(result.Awareness) > 0 {
+		result.Hints = prepareHintMap(semanticSeeds, bm25, physicalGraph.nodes, physicalGraph.edges, request.TokenBudget)
+		if result.Hints != nil {
 			agent := sessionAgent(request.SessionID)
 			if err := s.SaveSessionAt(ctx, request.WorkingDirectory, request.SessionID, agent, "active"); err != nil {
 				return err
@@ -222,13 +217,6 @@ func (s *Service) searchAndDeliver(
 		if err := s.store.SaveDeliveries(ctx, s.project.ID, request.SessionID, sessionDeliveries); err != nil {
 			return err
 		}
-		nodeIDs := make([]string, len(deliveries))
-		for index, item := range deliveries {
-			nodeIDs[index] = item.NodeID
-		}
-		if err := s.store.MarkAwarenessFollowUps(ctx, s.project.ID, request.SessionID, nodeIDs); err != nil {
-			return err
-		}
 		for _, item := range deliveries {
 			if strings.HasPrefix(item.Key, "material.") || strings.HasPrefix(item.Key, "resource.") {
 				continue
@@ -251,7 +239,7 @@ func (s *Service) searchAndDeliver(
 		hash := contextprepare.Hash(result.Context.Rendered)
 		result.Context.Hash = &hash
 	}
-	if len(deliveries) > 0 || len(result.Awareness) > 0 {
+	if len(deliveries) > 0 {
 		result.Action = "retrieve"
 	} else if hasOmission(omitted, "already-delivered") || result.Proposal.ReasonCode == "GATE_UNAVAILABLE" {
 		result.Action = "skip"
@@ -458,28 +446,114 @@ func uniqueCandidates(lanes ...[]contextprepare.Candidate) []contextprepare.Cand
 	return result
 }
 
-func prepareHints(candidates []contextprepare.Candidate) []contextprepare.Awareness {
-	result := make([]contextprepare.Awareness, 0, min(len(candidates), contextprepare.MaxAwarenessHints))
-	for _, candidate := range candidates[:min(len(candidates), contextprepare.MaxAwarenessHints)] {
-		reason := "bm25"
-		var relation *string
-		for _, signal := range candidate.Signals {
-			switch {
-			case strings.HasPrefix(signal, "semantic:"):
-				reason = "semantic"
-			case strings.HasPrefix(signal, "path:"):
-				reason = "graph-path"
-				value := strings.TrimPrefix(signal, "path:")
-				relation = &value
-			}
+func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, budget int) *contextprepare.HintMap {
+	byID := make(map[string]graph.Node, len(nodes))
+	for _, node := range nodes {
+		byID[node.ID] = node
+	}
+	hints := &contextprepare.HintMap{}
+	selected := map[string]bool{}
+	addAnchor := func(candidate contextprepare.Candidate, match string) {
+		if selected[candidate.NodeID] {
+			return
 		}
-		result = append(result, contextprepare.Awareness{
-			NodeID: candidate.NodeID, Key: candidate.Key, Namespace: candidate.Namespace,
-			Label: candidate.Label, Kind: candidate.Kind, Source: candidate.Source,
-			Reason: reason, Relation: relation,
+		node, found := byID[candidate.NodeID]
+		if !found {
+			return
+		}
+		trial := *hints
+		trial.Nodes = append(append([]contextprepare.HintNode(nil), hints.Nodes...), prepareHintNode(node, match))
+		limit := budget / 2
+		if len(hints.Nodes) == 0 {
+			limit = budget
+		}
+		if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) > limit {
+			return
+		}
+		hints.Nodes = trial.Nodes
+		selected[node.ID] = true
+	}
+	for _, candidate := range semantic {
+		addAnchor(candidate, "semantic")
+	}
+	for _, candidate := range lexical {
+		addAnchor(candidate, "bm25")
+	}
+	if len(hints.Nodes) == 0 {
+		return nil
+	}
+
+	type neighbor struct {
+		id   string
+		edge graph.Edge
+	}
+	adjacent := map[string][]neighbor{}
+	for _, edge := range edges {
+		adjacent[edge.SourceID] = append(adjacent[edge.SourceID], neighbor{edge.TargetID, edge})
+		adjacent[edge.TargetID] = append(adjacent[edge.TargetID], neighbor{edge.SourceID, edge})
+	}
+	for id := range adjacent {
+		sort.Slice(adjacent[id], func(i, j int) bool {
+			return adjacent[id][i].edge.Relation+adjacent[id][i].id < adjacent[id][j].edge.Relation+adjacent[id][j].id
 		})
 	}
-	return result
+	frontier := make([]string, len(hints.Nodes))
+	for index, node := range hints.Nodes {
+		frontier[index] = node.ID
+	}
+	seenEdges := map[string]bool{}
+	for level := 0; level < 2 && len(frontier) > 0; level++ {
+		var next []string
+		for position := 0; ; position++ {
+			advanced := false
+			for _, current := range frontier {
+				if position >= len(adjacent[current]) {
+					continue
+				}
+				advanced = true
+				item := adjacent[current][position]
+				edgeKey := item.edge.SourceID + "\x00" + item.edge.Relation + "\x00" + item.edge.TargetID
+				if seenEdges[edgeKey] {
+					continue
+				}
+				edge := contextprepare.HintEdge{SourceID: item.edge.SourceID, TargetID: item.edge.TargetID, Relation: item.edge.Relation}
+				trial := *hints
+				trial.Edges = append(append([]contextprepare.HintEdge(nil), hints.Edges...), edge)
+				if !selected[item.id] {
+					node, found := byID[item.id]
+					if !found {
+						continue
+					}
+					trial.Nodes = append(append([]contextprepare.HintNode(nil), hints.Nodes...), prepareHintNode(node, "path"))
+				}
+				if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) > budget {
+					continue
+				}
+				hints.Nodes, hints.Edges = trial.Nodes, trial.Edges
+				seenEdges[edgeKey] = true
+				if !selected[item.id] {
+					selected[item.id] = true
+					next = append(next, item.id)
+				}
+			}
+			if !advanced {
+				break
+			}
+		}
+		frontier = next
+	}
+	return hints
+}
+
+func prepareHintNode(node graph.Node, match string) contextprepare.HintNode {
+	source := node.MaterialURI
+	if node.Locator != "" {
+		source += "#" + node.Locator
+	}
+	return contextprepare.HintNode{
+		ID: node.ID, Label: node.Label, Kind: node.Kind, Subkind: node.Subkind,
+		State: node.State, Source: source, Match: match, Provenance: node.Provenance,
+	}
 }
 
 func deliverCandidates(candidates []contextprepare.Candidate, prior map[string]string, budget int) ([]contextprepare.Delivery, []contextprepare.Omitted, []project.Delivery) {

@@ -40,7 +40,7 @@ func TestMigrationAddsAwarenessFollowUpColumn(t *testing.T) {
 			PRIMARY KEY (project_id, session_id, node_id)
 		) STRICT;
 		INSERT INTO schema_migrations(version)
-		VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (14), (15);
+		VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (14), (15), (16);
 	`); err != nil {
 		db.Close()
 		t.Fatal(err)

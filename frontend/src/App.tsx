@@ -370,7 +370,7 @@ export default function App() {
               <div><p className="eyebrow">PREPARE</p><h2>Agent 전달 맥락 미리보기</h2></div>
               <label htmlFor="prepareMessage">작업 의도</label><textarea id="prepareMessage" value={prepareMessage} onChange={event => setPrepareMessage(event.target.value)} placeholder="예: 업데이트가 의도와 Material의 연결을 보존하는지 확인해줘" />
               <button disabled={busy}>Context 준비</button>
-              {prepared && <div className="prepared"><span>{prepared.action}</span><pre>{prepared.context?.rendered || prepared.clarification || "전달할 맥락이 없습니다."}</pre>{(prepared.awareness?.length ?? 0) > 0 && <ul>{prepared.awareness.map(item => <li key={item.nodeId}><strong>{item.label}</strong><span>{item.reason}{item.relation ? ` · ${item.relation}` : ""}</span></li>)}</ul>}</div>}
+              {prepared && <div className="prepared"><span>{prepared.action}</span><pre>{prepared.context?.rendered || prepared.clarification || "전달할 맥락이 없습니다."}</pre></div>}
             </form>
           </div>
         </section>}
