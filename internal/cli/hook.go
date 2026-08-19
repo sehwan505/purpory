@@ -75,7 +75,7 @@ func runPreflight(ctx context.Context, service *product.Service, agent string, i
 	}
 	prepared, err := service.PrepareContext(ctx, contextprepare.Request{
 		Message: payload.Prompt, SessionID: sessionID, WorkingDirectory: payload.CWD,
-		TokenBudget: budget, RetainInput: retainHookInput(), HintsOnly: true,
+		TokenBudget: budget, RetainInput: retainHookInput(),
 	})
 	if err != nil {
 		return writeHookFailure(output)

@@ -5,27 +5,10 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 func EstimateTokens(value string) int {
 	return max(1, (len([]byte(value))+3)/4)
-}
-
-func Truncate(value string, budget int) (string, bool) {
-	if EstimateTokens(value) <= budget {
-		return value, false
-	}
-	marker := "\n\n[truncated by Purpory context budget]\n"
-	maximum := max(1, budget*4-len(marker))
-	raw := []byte(value)
-	if maximum > len(raw) {
-		maximum = len(raw)
-	}
-	for maximum > 0 && !utf8.Valid(raw[:maximum]) {
-		maximum--
-	}
-	return strings.TrimSpace(string(raw[:maximum])) + marker, true
 }
 
 func Hash(value string) string {

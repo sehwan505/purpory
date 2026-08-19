@@ -74,13 +74,6 @@ type Review struct {
 	ResolvedAt      string `json:"resolvedAt,omitempty"`
 }
 
-type Usage struct {
-	SelectedCount int    `json:"selectedCount"`
-	ExpandedCount int    `json:"expandedCount"`
-	LastSelected  string `json:"lastSelectedAt,omitempty"`
-	LastExpanded  string `json:"lastExpandedAt,omitempty"`
-}
-
 type BatchChange struct {
 	Key             string  `json:"key"`
 	Kind            Kind    `json:"kind"`

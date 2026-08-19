@@ -32,7 +32,7 @@ func TestProjectMustBeRegisteredBeforeNormalCommands(t *testing.T) {
 
 	output.Reset()
 	errorOutput.Reset()
-	if code := Run([]string{"--db", database, "project", "add", root, "--id", "demo", "--name", "Demo"}, strings.NewReader(""), &output, &errorOutput); code != 0 {
+	if code := Run([]string{"--db", database, "project", "add", "--id", "demo", "--name", "Demo", root}, strings.NewReader(""), &output, &errorOutput); code != 0 {
 		t.Fatalf("project add failed: %s", errorOutput.String())
 	}
 	var registered project.Project

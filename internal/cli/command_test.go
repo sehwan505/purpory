@@ -27,19 +27,6 @@ func openCLIService(t *testing.T, root, database, id string) *product.Service {
 	return service
 }
 
-func TestNormalizeRememberArguments(t *testing.T) {
-	got := normalizeRememberArguments([]string{"decision.database", "--kind", "decision", "--value", "Use SQLite"})
-	want := []string{"--kind", "decision", "--value", "Use SQLite", "decision.database"}
-	if len(got) != len(want) {
-		t.Fatalf("unexpected arguments: %#v", got)
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("unexpected arguments: %#v", got)
-		}
-	}
-}
-
 func TestUpdateJSON(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "brief.txt"), []byte("A project for everyone."), 0o600); err != nil {
@@ -112,7 +99,7 @@ func TestPrepareCLIOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	arguments := []string{"prepare", "decision.database", "--session", "cli", "--budget", "512", "--path", "internal/store", "--json", "--no-retain-input"}
+	arguments := []string{"prepare", "--session", "cli", "--budget", "512", "--path", "internal/store", "--json", "--no-retain-input", "decision.database"}
 	if err := runCLI(context.Background(), service, arguments, bytes.NewReader(nil), &output); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +107,7 @@ func TestPrepareCLIOptions(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "retrieve" || len(result.Deliveries) != 1 || result.DecisionID == 0 {
+	if result.Action != "retrieve" || result.Hints == nil || len(result.Hints.Nodes) == 0 || result.DecisionID == 0 {
 		t.Fatalf("unexpected prepare result: %#v", result)
 	}
 }
@@ -171,7 +158,7 @@ func TestMemoryLifecycleCLI(t *testing.T) {
 		t.Fatalf("batch CLI did not apply: %#v %v", result, err)
 	}
 	output.Reset()
-	if err := runCLI(ctx, service, []string{"remember", "knowledge.demo", "--confirm"}, bytes.NewReader(nil), &output); err != nil || output.String() != "true\n" {
+	if err := runCLI(ctx, service, []string{"remember", "--confirm", "knowledge.demo"}, bytes.NewReader(nil), &output); err != nil || output.String() != "true\n" {
 		t.Fatalf("confirm CLI failed: %q %v", output.String(), err)
 	}
 }

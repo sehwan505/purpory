@@ -277,30 +277,3 @@ func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, material
 	}
 	return nil
 }
-
-func (s *Store) SearchNodes(ctx context.Context, projectID, query string, limit int) ([]graph.Node, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-	pattern := "%" + escapeLike(strings.TrimSpace(query)) + "%"
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, label, kind, subkind, ref, owner, state, provenance, material_id, material_uri, locator, content FROM nodes
-		WHERE project_id = ? AND owner = 'observed' AND state = 'active'
-		  AND (id = ? OR ref = ? OR label LIKE ? ESCAPE '\' OR material_uri LIKE ? ESCAPE '\' OR content LIKE ? ESCAPE '\')
-		ORDER BY CASE WHEN id = ? THEN 0 WHEN label = ? THEN 1 WHEN material_uri = ? AND kind = 'material' THEN 2 ELSE 3 END,
-		         label, material_uri, locator LIMIT ?
-	`, projectID, query, query, pattern, pattern, pattern, query, query, query, limit)
-	if err != nil {
-		return nil, fmt.Errorf("search nodes: %w", err)
-	}
-	defer rows.Close()
-	var nodes []graph.Node
-	for rows.Next() {
-		var node graph.Node
-		if err := rows.Scan(&node.ID, &node.Label, &node.Kind, &node.Subkind, &node.Ref, &node.Owner, &node.State, &node.Provenance, &node.MaterialID, &node.MaterialURI, &node.Locator, &node.Content); err != nil {
-			return nil, fmt.Errorf("search nodes: scan: %w", err)
-		}
-		nodes = append(nodes, node)
-	}
-	return nodes, rows.Err()
-}

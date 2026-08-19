@@ -37,7 +37,7 @@ func runProjectCommand(ctx context.Context, config launch.Config, arguments []st
 	flags.SetOutput(output)
 	id := flags.String("id", config.ProjectID, "project ID")
 	name := flags.String("name", "", "project name")
-	if err := flags.Parse(normalizeProjectAddArguments(arguments[1:])); err != nil {
+	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() > 1 {
@@ -49,21 +49,4 @@ func runProjectCommand(ctx context.Context, config launch.Config, arguments []st
 	}
 	value, err := product.RegisterProject(ctx, root, config.DBPath, *id, *name)
 	return writeJSON(output, value, err)
-}
-
-func normalizeProjectAddArguments(arguments []string) []string {
-	var options, positional []string
-	for index := 0; index < len(arguments); index++ {
-		argument := arguments[index]
-		if argument == "--id" || argument == "--name" {
-			options = append(options, argument)
-			if index+1 < len(arguments) {
-				index++
-				options = append(options, arguments[index])
-			}
-			continue
-		}
-		positional = append(positional, argument)
-	}
-	return append(options, positional...)
 }

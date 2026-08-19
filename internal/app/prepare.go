@@ -3,14 +3,10 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
@@ -60,7 +56,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	}
 	var nodes []graph.Node
 	for _, node := range graphNodes {
-		if node.Owner == graph.OwnerObserved && node.State == graph.StateActive {
+		if node.State == graph.StateActive {
 			nodes = append(nodes, node)
 		}
 	}
@@ -69,7 +65,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	prior, err := s.store.SessionDeliveryHashes(ctx, s.project.ID, request.SessionID)
+	opened, err := s.store.SessionItemKeys(ctx, s.project.ID, request.SessionID)
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -77,10 +73,9 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	catalog := prepareCatalog(s.project.ID, memories, nodes, workspace, len(prior), openRequests)
-	request.PriorKeys = mapKeys(prior)
+	catalog := prepareCatalog(s.project.ID, memories, nodes, workspace, len(opened), openRequests)
+	request.OpenedNodes = mapKeys(opened)
 	request.Catalog = catalog
-	request.Orientation = prepareOrientation(s.project.Root, request.Message, memories, prior)
 
 	proposal := contextprepare.Fallback(request.Message)
 	var model contextprepare.Model
@@ -103,11 +98,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		fallback = &reason
 	}
 
-	result := PrepareResult{
-		SchemaVersion: contextprepare.SchemaVersion, Proposal: proposal, Model: model, Fallback: fallback,
-		Deliveries: []contextprepare.Delivery{}, Omitted: []contextprepare.Omitted{},
-		Context: contextprepare.Context{Catalog: catalog},
-	}
+	result := PrepareResult{SchemaVersion: contextprepare.SchemaVersion, Proposal: proposal, Model: model, Fallback: fallback}
 	switch proposal.Action {
 	case "skip":
 		result.Action = "skip"
@@ -115,7 +106,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		result.Action = "ask"
 		result.Clarification = proposal.Clarification
 	default:
-		if err := s.searchAndDeliver(ctx, request, nodes, physicalGraph, memories, workspace, prior, &result); err != nil {
+		if err := s.prepareHints(ctx, request, physicalGraph, opened, &result); err != nil {
 			return PrepareResult{}, err
 		}
 	}
@@ -143,7 +134,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	}
 	decisionID, err := s.store.SavePrepareDecision(ctx, contextprepare.DecisionRecord{
 		ProjectID: s.project.ID, SessionID: request.SessionID, InputHash: inputHash, InputText: inputText,
-		Proposal: result.Proposal, Action: result.Action, Deliveries: result.Deliveries, RequestID: result.RequestID,
+		Proposal: result.Proposal, Action: result.Action, RequestID: result.RequestID,
 		Hints: result.Hints, Model: result.Model, Fallback: result.Fallback,
 	})
 	if err != nil {
@@ -153,99 +144,32 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	return result, nil
 }
 
-func (s *Service) searchAndDeliver(
+func (s *Service) prepareHints(
 	ctx context.Context,
 	request contextprepare.Request,
-	nodes []graph.Node,
 	physicalGraph contextGraph,
-	memories []memory.Memory,
-	workspace project.Workspace,
-	prior map[string]string,
+	opened map[string]bool,
 	result *PrepareResult,
 ) error {
 	query := request.Message
 	if result.Proposal.Query != nil {
 		query = *result.Proposal.Query
 	}
-	allCandidates := prepareCandidates(s.project.Root, nil, memories, nodes, workspace)
-	for _, node := range nodes {
-		if node.Kind == "material" && node.Content == "" {
-			allCandidates = append(allCandidates, prepareNodeCandidate(node))
-		}
-	}
-	semanticLimit := min(3, len(prior)+1)
-	if request.HintsOnly {
-		semanticLimit = 8
-	}
-	semantic, err := s.semanticMatches(ctx, query, physicalGraph.nodes, semanticLimit)
+	allCandidates := prepareCandidates(physicalGraph.nodes)
+	semantic, err := s.semanticMatches(ctx, query, physicalGraph.nodes, 8)
 	if err != nil {
 		return err
 	}
-	searchable := make([]contextprepare.Candidate, 0, len(allCandidates))
-	for _, candidate := range allCandidates {
-		if deliverableCandidate(candidate) {
-			searchable = append(searchable, candidate)
-		}
-	}
 	semanticSeeds := semanticCandidates(allCandidates, semantic)
-	bm25, terms := contextprepare.BM25(searchable, query, result.Proposal.Keywords)
-	semanticLane := expandGraphCandidates(semanticSeeds, allCandidates, physicalGraph.edges, 2)
-	bm25Lane := expandGraphCandidates(bm25, allCandidates, physicalGraph.edges, 2)
-	ranked := uniqueCandidates(semanticSeeds, bm25, semanticLane, bm25Lane)
-	search := &contextprepare.Search{Query: query, Scopes: normalizedScopes(result.Proposal.Scopes), Terms: terms, Candidates: ranked}
-	result.Context.Search = search
-	if request.HintsOnly {
-		result.Hints = prepareHintMap(semanticSeeds, bm25, physicalGraph.nodes, physicalGraph.edges, prior, request.TokenBudget)
-		if result.Hints != nil {
-			agent := sessionAgent(request.SessionID)
-			if err := s.SaveSessionAt(ctx, request.WorkingDirectory, request.SessionID, agent, "active"); err != nil {
-				return err
-			}
-			result.Action = "retrieve"
-		} else if result.Proposal.ReasonCode == "GATE_UNAVAILABLE" {
-			result.Action = "skip"
-		} else {
-			result.Action = "ask"
-		}
-		return nil
-	}
-
-	deliveries, omitted, sessionDeliveries := deliverCandidates(ranked, prior, request.TokenBudget)
-	result.Deliveries, result.Omitted = deliveries, omitted
-
-	if len(sessionDeliveries) > 0 {
+	bm25, _ := contextprepare.BM25(allCandidates, query, result.Proposal.Keywords)
+	result.Hints = prepareHintMap(semanticSeeds, bm25, physicalGraph.nodes, physicalGraph.edges, opened, request.TokenBudget)
+	if result.Hints != nil {
 		agent := sessionAgent(request.SessionID)
 		if err := s.SaveSessionAt(ctx, request.WorkingDirectory, request.SessionID, agent, "active"); err != nil {
 			return err
 		}
-		if err := s.store.SaveDeliveries(ctx, s.project.ID, request.SessionID, sessionDeliveries); err != nil {
-			return err
-		}
-		for _, item := range deliveries {
-			if strings.HasPrefix(item.Key, "material.") || strings.HasPrefix(item.Key, "resource.") {
-				continue
-			}
-			if err := s.store.RecordMemoryUsage(ctx, s.project.ID, item.Key, "selected"); err != nil {
-				return err
-			}
-		}
-	}
-	var rendered strings.Builder
-	for _, item := range deliveries {
-		rendered.WriteString(strings.TrimSpace(item.Rendered))
-		rendered.WriteString("\n")
-	}
-	result.Context.Rendered = rendered.String()
-	for _, item := range deliveries {
-		result.Context.EstimatedTokens += item.EstimatedTokens
-	}
-	if result.Context.Rendered != "" {
-		hash := contextprepare.Hash(result.Context.Rendered)
-		result.Context.Hash = &hash
-	}
-	if len(deliveries) > 0 {
 		result.Action = "retrieve"
-	} else if hasOmission(omitted, "already-delivered") || result.Proposal.ReasonCode == "GATE_UNAVAILABLE" {
+	} else if result.Proposal.ReasonCode == "GATE_UNAVAILABLE" {
 		result.Action = "skip"
 	} else {
 		result.Action = "ask"
@@ -253,7 +177,7 @@ func (s *Service) searchAndDeliver(
 	return nil
 }
 
-func prepareCatalog(projectID string, memories []memory.Memory, nodes []graph.Node, workspace project.Workspace, priorCount, openRequests int) contextprepare.Catalog {
+func prepareCatalog(projectID string, memories []memory.Memory, nodes []graph.Node, workspace project.Workspace, openedCount, openRequests int) contextprepare.Catalog {
 	prefixes := map[string]int{}
 	for _, entry := range memories {
 		prefix := strings.SplitN(entry.Key, ".", 2)[0]
@@ -265,38 +189,9 @@ func prepareCatalog(projectID string, memories []memory.Memory, nodes []graph.No
 	}
 	return contextprepare.Catalog{
 		SchemaVersion: contextprepare.ContextVersion, ProjectID: projectID,
-		Counts:          contextprepare.Counts{Human: len(memories), Nodes: len(nodes), Resource: len(workspace.Resources), PriorCount: priorCount, OpenRequests: openRequests},
+		Counts:          contextprepare.Counts{Human: len(memories), Nodes: len(nodes), Resource: len(workspace.Resources), OpenedCount: openedCount, OpenRequests: openRequests},
 		TopicNamespaces: sortedCounts(prefixes, 32), NodeKinds: sortedCounts(kinds, 32),
 	}
-}
-
-func prepareOrientation(root, message string, memories []memory.Memory, prior map[string]string) []contextprepare.Orientation {
-	candidates := prepareCandidates(root, []string{"human", "session"}, memories, nil, project.Workspace{})
-	ranked, _ := contextprepare.Rank(candidates, message, nil, nil, mapKeys(prior))
-	result := make([]contextprepare.Orientation, 0, 2)
-	seen := map[string]bool{}
-	for _, candidate := range ranked {
-		result = append(result, contextprepare.Orientation{Key: candidate.Key, Label: candidate.Label, Kind: candidate.Kind, Source: candidate.Source, Preview: previewText(candidate.Content)})
-		seen[candidate.Key] = true
-		if len(result) == 2 {
-			return result
-		}
-	}
-	byKey := map[string]contextprepare.Candidate{}
-	for _, candidate := range candidates {
-		byKey[candidate.Key] = candidate
-	}
-	for _, key := range mapKeys(prior) {
-		candidate, found := byKey[key]
-		if !found || seen[key] {
-			continue
-		}
-		result = append(result, contextprepare.Orientation{Key: candidate.Key, Label: candidate.Label, Kind: candidate.Kind, Source: candidate.Source, Preview: previewText(candidate.Content)})
-		if len(result) == 2 {
-			break
-		}
-	}
-	return result
 }
 
 func sortedCounts(values map[string]int, limit int) []contextprepare.NamespaceCount {
@@ -313,39 +208,11 @@ func sortedCounts(values map[string]int, limit int) []contextprepare.NamespaceCo
 	return result[:min(len(result), limit)]
 }
 
-func prepareCandidates(root string, scopes []string, memories []memory.Memory, nodes []graph.Node, workspace project.Workspace) []contextprepare.Candidate {
-	selected := scopeSet(scopes)
-	// ponytail: rank the current project snapshot in memory; move scoring into SQL only after project-size profiling says this is the bottleneck.
-	result := make([]contextprepare.Candidate, 0, len(memories)+len(nodes)+len(workspace.Resources))
-	if selected["human"] || selected["session"] {
-		for _, entry := range memories {
-			content, mode := resolveMemory(root, entry)
-			source := ""
-			if entry.Source != nil {
-				source = *entry.Source
-			}
-			updated, _ := time.Parse(time.RFC3339, entry.UpdatedAt)
-			result = append(result, contextprepare.Candidate{
-				NodeID: memoryNodeID(entry), Key: entry.Key,
-				Namespace: "memory", Label: entry.Key, Kind: string(entry.Kind), Origin: "human", Source: source, Content: content, Mode: mode,
-				UpdatedAt: updated.Unix(),
-			})
-		}
-	}
-	if selected["material"] {
-		for _, node := range nodes {
-			if node.Kind == "material" && node.Content == "" {
-				continue
-			}
+func prepareCandidates(nodes []graph.Node) []contextprepare.Candidate {
+	result := make([]contextprepare.Candidate, 0, len(nodes))
+	for _, node := range nodes {
+		if node.State == graph.StateActive && strings.TrimSpace(node.Content) != "" {
 			result = append(result, prepareNodeCandidate(node))
-		}
-	}
-	if selected["resource"] {
-		for _, resource := range workspace.Resources {
-			result = append(result, contextprepare.Candidate{
-				NodeID: resource.ID, Key: "resource." + resource.ID, Namespace: "resource", Label: resource.Label,
-				Kind: resource.Provider, Origin: "observed", Source: resource.Identity, Content: resource.Identity, Mode: "resource",
-			})
 		}
 	}
 	return result
@@ -361,96 +228,11 @@ func prepareNodeCandidate(node graph.Node) contextprepare.Candidate {
 		kind = node.Subkind
 	}
 	return contextprepare.Candidate{
-		NodeID: node.ID, Key: "material." + node.ID[:min(20, len(node.ID))], Namespace: "material",
-		Label: node.Label, Kind: kind, Origin: "structural", Source: source, Content: node.Content, Mode: "context-graph",
+		NodeID: node.ID, Key: node.ID, Label: node.Label, Kind: kind, Source: source, Content: node.Content,
 	}
 }
 
-func deliverableCandidate(candidate contextprepare.Candidate) bool {
-	return candidate.Namespace != "resource" && strings.TrimSpace(candidate.Content) != ""
-}
-
-func expandGraphCandidates(seeds, all []contextprepare.Candidate, edges []graph.Edge, depth int) []contextprepare.Candidate {
-	byID := map[string]contextprepare.Candidate{}
-	for _, candidate := range all {
-		byID[candidate.NodeID] = candidate
-	}
-	type link struct{ id, relation string }
-	adjacent := map[string][]link{}
-	for _, edge := range edges {
-		adjacent[edge.SourceID] = append(adjacent[edge.SourceID], link{edge.TargetID, edge.Relation})
-		adjacent[edge.TargetID] = append(adjacent[edge.TargetID], link{edge.SourceID, edge.Relation})
-	}
-	for id := range adjacent {
-		sort.Slice(adjacent[id], func(i, j int) bool {
-			return adjacent[id][i].relation+adjacent[id][i].id < adjacent[id][j].relation+adjacent[id][j].id
-		})
-	}
-	type step struct {
-		id      string
-		score   float64
-		signals []string
-	}
-	seen := map[string]bool{}
-	frontier := make([]step, 0, len(seeds))
-	result := make([]contextprepare.Candidate, 0, len(seeds))
-	for _, seed := range seeds {
-		if seen[seed.NodeID] {
-			continue
-		}
-		seen[seed.NodeID] = true
-		frontier = append(frontier, step{seed.NodeID, seed.Score, seed.Signals})
-		result = append(result, seed)
-	}
-	for level := 0; level < depth && len(frontier) > 0; level++ {
-		var next []step
-		for position := 0; ; position++ {
-			added := false
-			for _, current := range frontier {
-				if position >= len(adjacent[current.id]) {
-					continue
-				}
-				added = true
-				neighbor := adjacent[current.id][position]
-				if seen[neighbor.id] {
-					continue
-				}
-				seen[neighbor.id] = true
-				signals := append(append([]string(nil), current.signals...), "path:"+neighbor.relation)
-				next = append(next, step{neighbor.id, current.score / 2, signals})
-				candidate, found := byID[neighbor.id]
-				if !found || !deliverableCandidate(candidate) {
-					continue
-				}
-				candidate.Score = current.score / 2
-				candidate.Signals = signals
-				result = append(result, candidate)
-			}
-			if !added {
-				break
-			}
-		}
-		frontier = next
-	}
-	return result
-}
-
-func uniqueCandidates(lanes ...[]contextprepare.Candidate) []contextprepare.Candidate {
-	seen := map[string]bool{}
-	var result []contextprepare.Candidate
-	for _, lane := range lanes {
-		for _, candidate := range lane {
-			if seen[candidate.NodeID] {
-				continue
-			}
-			seen[candidate.NodeID] = true
-			result = append(result, candidate)
-		}
-	}
-	return result
-}
-
-func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, opened map[string]string, budget int) *contextprepare.HintMap {
+func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, opened map[string]bool, budget int) *contextprepare.HintMap {
 	byID := make(map[string]graph.Node, len(nodes))
 	for _, node := range nodes {
 		if node.Path == "" {
@@ -462,7 +244,7 @@ func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.
 	selected := map[string]bool{}
 	branches := map[string]bool{}
 	addAnchor := func(candidate contextprepare.Candidate, match string) bool {
-		if len(hints.Nodes) == 3 || selected[candidate.NodeID] || opened[candidate.NodeID] != "" || opened[candidate.Key] != "" {
+		if len(hints.Nodes) == 3 || selected[candidate.NodeID] || opened[candidate.NodeID] || opened[candidate.Key] {
 			return false
 		}
 		node, found := byID[candidate.NodeID]
@@ -547,117 +329,6 @@ func prepareHintNode(node graph.Node, match string) contextprepare.HintNode {
 	}
 }
 
-func deliverCandidates(candidates []contextprepare.Candidate, prior map[string]string, budget int) ([]contextprepare.Delivery, []contextprepare.Omitted, []project.Delivery) {
-	remaining := budget
-	deliveries := []contextprepare.Delivery{}
-	omitted := []contextprepare.Omitted{}
-	var sessionDeliveries []project.Delivery
-	for _, candidate := range candidates {
-		rendered := renderCandidate(candidate)
-		hash := contextprepare.Hash(rendered)
-		if prior[candidate.Key] == hash {
-			omitted = append(omitted, contextprepare.Omitted{Key: candidate.Key, Reason: "already-delivered"})
-			continue
-		}
-		tokens := contextprepare.EstimateTokens(rendered)
-		truncated := false
-		if tokens > remaining {
-			if len(deliveries) > 0 || remaining < contextprepare.MinTokenBudget {
-				omitted = append(omitted, contextprepare.Omitted{NodeID: candidate.NodeID, Key: candidate.Key, Reason: "token-budget", EstimatedTokens: tokens})
-				continue
-			}
-			rendered, truncated = contextprepare.Truncate(rendered, remaining)
-			tokens = contextprepare.EstimateTokens(rendered)
-			hash = contextprepare.Hash(rendered)
-		}
-		delivery := contextprepare.Delivery{
-			NodeID: candidate.NodeID, Key: candidate.Key, Kind: candidate.Kind, Origin: candidate.Origin,
-			Mode: candidate.Mode, Truncated: truncated, Score: candidate.Score, Signals: candidate.Signals,
-			EstimatedTokens: tokens, Hash: hash, Rendered: rendered,
-		}
-		deliveries = append(deliveries, delivery)
-		sessionDeliveries = append(sessionDeliveries, project.Delivery{Key: candidate.Key, Kind: candidate.Kind, Label: candidate.Label, Source: candidate.Source, Preview: previewText(rendered), Hash: hash})
-		remaining -= tokens
-	}
-	return deliveries, omitted, sessionDeliveries
-}
-
-func renderCandidate(candidate contextprepare.Candidate) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "## %s\n\n", candidate.Label)
-	if candidate.Source != "" {
-		fmt.Fprintf(&b, "Source: %s\n", candidate.Source)
-	}
-	if candidate.Kind != "" {
-		fmt.Fprintf(&b, "Kind: %s\n", candidate.Kind)
-	}
-	if candidate.Content != "" {
-		b.WriteString("\n")
-		b.WriteString(strings.TrimSpace(candidate.Content))
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-func resolveMemory(root string, entry memory.Memory) (string, string) {
-	if entry.Value != nil {
-		return *entry.Value, "inline"
-	}
-	if entry.Source == nil {
-		return "", "unresolved"
-	}
-	source := *entry.Source
-	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		return source, "external"
-	}
-	reference := strings.SplitN(source, "#", 2)[0]
-	reference = strings.TrimPrefix(reference, "@repo/")
-	reference = strings.TrimPrefix(reference, "@root/")
-	path := reference
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(root, filepath.FromSlash(path))
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || !withinRoot(root, resolved) {
-		return source, "unresolved"
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return source, "unresolved"
-	}
-	if info.IsDir() {
-		var files []string
-		_ = filepath.WalkDir(resolved, func(path string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil || len(files) >= 250 {
-				return walkErr
-			}
-			if entry.IsDir() {
-				return nil
-			}
-			relative, err := filepath.Rel(root, path)
-			if err == nil {
-				files = append(files, filepath.ToSlash(relative))
-			}
-			return nil
-		})
-		sort.Strings(files)
-		return strings.Join(files, "\n"), "pointer-dir"
-	}
-	file, err := os.Open(resolved)
-	if err != nil {
-		return source, "unresolved"
-	}
-	defer file.Close()
-	content, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
-	if err != nil {
-		return source, "unresolved"
-	}
-	if len(content) > 1<<20 {
-		return string(content[:1<<20]) + "\n\n[truncated after 1048576 bytes]", "pointer-file"
-	}
-	return string(content), "pointer-file"
-}
-
 func withinRoot(root, path string) bool {
 	root, rootErr := filepath.Abs(root)
 	path, pathErr := filepath.Abs(path)
@@ -666,13 +337,6 @@ func withinRoot(root, path string) bool {
 	}
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-func normalizedScopes(scopes []string) []string {
-	if len(scopes) == 0 {
-		return []string{"human", "material", "resource", "session"}
-	}
-	return scopes
 }
 
 func normalizeActivePaths(root string, paths []string) []string {
@@ -714,23 +378,6 @@ func canonicalPath(path string) string {
 		resolved = filepath.Join(resolved, missing[index])
 	}
 	return resolved
-}
-
-func scopeSet(scopes []string) map[string]bool {
-	result := map[string]bool{}
-	for _, scope := range normalizedScopes(scopes) {
-		result[scope] = true
-	}
-	return result
-}
-
-func hasOmission(items []contextprepare.Omitted, reason string) bool {
-	for _, item := range items {
-		if item.Reason == reason {
-			return true
-		}
-	}
-	return false
 }
 
 func mapKeys[V any](values map[string]V) []string {

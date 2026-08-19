@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -13,54 +12,6 @@ import (
 	"github.com/sehwan505/purpory/internal/memory"
 	"github.com/sehwan505/purpory/internal/project"
 )
-
-func TestMigrationAddsAwarenessFollowUpColumn(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "context.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE schema_migrations (
-			version INTEGER PRIMARY KEY,
-			applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-		) STRICT;
-		CREATE TABLE awareness_exposures (
-			project_id TEXT NOT NULL,
-			session_id TEXT NOT NULL,
-			node_id TEXT NOT NULL,
-			key TEXT NOT NULL,
-			label TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			source TEXT NOT NULL DEFAULT '',
-			reason TEXT NOT NULL,
-			relation TEXT,
-			shown_at INTEGER NOT NULL DEFAULT (unixepoch()),
-			PRIMARY KEY (project_id, session_id, node_id)
-		) STRICT;
-		INSERT INTO schema_migrations(version)
-		VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (14), (15), (16);
-	`); err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	database, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	var columns int
-	if err := database.db.QueryRowContext(ctx, `
-		SELECT count(*) FROM pragma_table_info('awareness_exposures') WHERE name = 'followed_up_at'
-	`).Scan(&columns); err != nil || columns != 1 {
-		t.Fatalf("followed_up_at columns = %d, %v", columns, err)
-	}
-}
 
 func TestProjectRoundTrip(t *testing.T) {
 	ctx := context.Background()
@@ -248,10 +199,6 @@ func TestKnowledgeRoundTrip(t *testing.T) {
 	if err != nil || len(gotNodes) != 2 || len(gotClaims) != 1 || gotNodes[1].MaterialID != "readme" {
 		t.Fatalf("knowledge mismatch: %#v, %#v, %v", gotNodes, gotClaims, err)
 	}
-	found, err := database.SearchNodes(ctx, current.ID, "Purpose", 10)
-	if err != nil || len(found) != 1 || found[0].MaterialID != "readme" {
-		t.Fatalf("search mismatch: %#v, %v", found, err)
-	}
 }
 
 func TestUpdateSnapshotPreservesIntentLinks(t *testing.T) {
@@ -346,10 +293,6 @@ func TestMemoryRoundTrip(t *testing.T) {
 	versions, err := store.MemoryVersions(ctx, want.ProjectID, want.Key)
 	if err != nil || len(versions) != 1 || versions[0].ID != created.VersionID {
 		t.Fatalf("versions mismatch: %#v, %v", versions, err)
-	}
-	found, err := store.SearchMemories(ctx, want.ProjectID, "SQLite", 10)
-	if err != nil || len(found) != 1 || found[0].Key != want.Key {
-		t.Fatalf("search mismatch: %#v, %v", found, err)
 	}
 	if deleted, err := store.DeleteMemory(ctx, want.ProjectID, want.Key); err != nil || !deleted {
 		t.Fatalf("delete memory = %v, %v", deleted, err)

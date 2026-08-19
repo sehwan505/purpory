@@ -95,17 +95,13 @@ func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
 	if err != nil || len(found.Seeds) != 1 || found.Seeds[0].ID != "intent:decision.auth" {
 		t.Fatalf("semantic graph seed missing: %#v %v", found, err)
 	}
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
 	prepared, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "semantic", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil || len(prepared.Deliveries) != 1 || prepared.Deliveries[0].Key != "decision.auth" {
+	if err != nil || prepared.Hints == nil || len(prepared.Hints.Nodes) != 1 || prepared.Hints.Nodes[0].Path != "decision.auth" {
 		t.Fatalf("semantic memory was not retrieved: %#v %v", prepared, err)
 	}
 	if _, err := service.Explain(ctx, "decision.auth"); err != nil {
 		t.Fatal(err)
-	}
-	usage, err := service.store.MemoryUsage(ctx, "demo")
-	if err != nil || usage["decision.auth"].SelectedCount != 1 || usage["decision.auth"].ExpandedCount != 1 {
-		t.Fatalf("usage was not recorded: %#v %v", usage, err)
 	}
 }
 
@@ -130,9 +126,9 @@ func TestPrepareFillsRemainingEmbeddingBudgetWithBM25(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := "fallback-marker"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	result, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "hybrid", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil || len(result.Deliveries) != 2 || result.Deliveries[0].Key != "knowledge.dense" || result.Deliveries[1].Key != "knowledge.lexical" || !strings.HasPrefix(result.Deliveries[0].Signals[0], "semantic:") || !strings.HasPrefix(result.Deliveries[1].Signals[0], "bm25:") {
+	if err != nil || result.Hints == nil || len(result.Hints.Nodes) != 2 || result.Hints.Nodes[0].ID != "knowledge:knowledge.dense" || result.Hints.Nodes[0].Match != "semantic" || result.Hints.Nodes[1].ID != "knowledge:knowledge.lexical" || result.Hints.Nodes[1].Match != "bm25" {
 		t.Fatalf("embedding-first BM25 fill failed: %#v %v", result, err)
 	}
 }
@@ -212,25 +208,6 @@ func TestSemanticMapProgressesAcrossSessionCalls(t *testing.T) {
 		t.Fatalf("observed knowledge was not a semantic map seed: %#v %v", found.Seeds, err)
 	}
 
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
-	request := contextprepare.Request{Message: query, SessionID: "codex:map", WorkingDirectory: root, TokenBudget: 512}
-	first, err := service.PrepareContext(ctx, request)
-	if err != nil || len(first.Deliveries) != 1 || first.Context.EstimatedTokens > request.TokenBudget {
-		t.Fatalf("first semantic map failed: %#v %v", first, err)
-	}
-	second, err := service.PrepareContext(ctx, request)
-	if err != nil {
-		t.Fatalf("second semantic map failed: %#v %v", second, err)
-	}
-	firstIDs := map[string]bool{}
-	for _, delivery := range first.Deliveries {
-		firstIDs[delivery.NodeID] = true
-	}
-	for _, delivery := range second.Deliveries {
-		if firstIDs[delivery.NodeID] {
-			t.Fatalf("session map did not progress: first=%#v second=%#v", first.Deliveries, second.Deliveries)
-		}
-	}
 }
 
 func TestHintExplorationUsesPathsAndSkipsOnlyOpenedNodes(t *testing.T) {
@@ -274,8 +251,8 @@ func TestHintExplorationUsesPathsAndSkipsOnlyOpenedNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := "롤 플레이 규칙"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
-	request := contextprepare.Request{Message: query, SessionID: "codex:explore", WorkingDirectory: root, TokenBudget: 512, HintsOnly: true}
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	request := contextprepare.Request{Message: query, SessionID: "codex:explore", WorkingDirectory: root, TokenBudget: 512}
 	first, err := service.PrepareContext(ctx, request)
 	if err != nil || first.Hints == nil || len(first.Hints.Nodes) == 0 || len(first.Hints.Nodes) > 3 {
 		t.Fatalf("first hint map failed: %#v %v", first, err)

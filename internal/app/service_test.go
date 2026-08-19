@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -148,26 +147,7 @@ func TestWorkspaceObserverKeepsCoreDomainNeutral(t *testing.T) {
 	}
 }
 
-func TestPrepareResolvesProjectSource(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "decision.md"), []byte("Keep the core small."), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
-	source := "decision.md"
-	if _, err := service.Remember(context.Background(), "decision.core", memory.Reference, nil, &source); err != nil {
-		t.Fatal(err)
-	}
-	result, err := service.Prepare(context.Background(), "decision.core", 128)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Context.Rendered, "Keep the core small.") {
-		t.Fatalf("source content missing: %q", result.Context.Rendered)
-	}
-}
-
-func TestPrepareRecordsExactDeliveryAndSuppressesDuplicates(t *testing.T) {
+func TestPrepareReturnsAndAuditsHintMap(t *testing.T) {
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
 	value := "PostgreSQL is the transactional source of truth."
@@ -175,55 +155,30 @@ func TestPrepareRecordsExactDeliveryAndSuppressesDuplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := "database decision"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, Keywords: []string{"PostgreSQL"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Keywords: []string{"PostgreSQL"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
 	request := contextprepare.Request{Message: "Which database did we choose?", SessionID: "codex:one", WorkingDirectory: root, TokenBudget: 512, RetainInput: true}
 
-	first, err := service.PrepareContext(context.Background(), request)
+	result, err := service.PrepareContext(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Action != "retrieve" || first.SchemaVersion != 1 || len(first.Deliveries) != 1 || first.Deliveries[0].Key != "decision.database" || first.Context.Hash == nil {
-		t.Fatalf("unexpected first preparation: %#v", first)
+	if result.Action != "retrieve" || result.SchemaVersion != 1 || result.Hints == nil || len(result.Hints.Nodes) != 1 || result.Hints.Nodes[0].Path != "decision.database" {
+		t.Fatalf("unexpected preparation: %#v", result)
+	}
+	if rendered := contextprepare.RenderHintMap(result.Hints); strings.Contains(rendered, value) || !strings.Contains(rendered, "purpory explain") {
+		t.Fatalf("hint leaked content or was not navigable: %q", rendered)
 	}
 	decisions, err := service.store.PrepareDecisions(context.Background(), "demo", 10)
-	if err != nil || len(decisions) != 1 || decisions[0].InputText == nil || *decisions[0].InputText != request.Message {
+	if err != nil || len(decisions) != 1 || decisions[0].InputText == nil || *decisions[0].InputText != request.Message || decisions[0].Hints == nil {
 		t.Fatalf("decision audit missing: %#v %v", decisions, err)
-	}
-	workspace, err := service.Workspace(context.Background())
-	if err != nil || len(workspace.Resources[0].Views[0].Sessions) != 1 || workspace.Resources[0].Views[0].Sessions[0].Deliveries[0].Hash != first.Deliveries[0].Hash {
-		t.Fatalf("exact delivery was not recorded: %#v %v", workspace, err)
-	}
-
-	second, err := service.PrepareContext(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.Action != "skip" || len(second.Deliveries) != 0 || len(second.Omitted) != 1 || second.Omitted[0].Reason != "already-delivered" {
-		t.Fatalf("duplicate context was not suppressed: %#v", second)
 	}
 }
 
-func TestPrepareTraversesGraphPathsAndDeduplicatesAsk(t *testing.T) {
+func TestPrepareDeduplicatesAsk(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "auth.md"), []byte("# Auth\nSigned browser sessions authenticate requests.\n\n## Token\nTokens expire after one hour.\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
-	if _, err := service.Update(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	auth := "signed browser sessions"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &auth, Scopes: []string{"material"}, ReasonCode: "CODE_CONTEXT_REQUIRED"}}
-	result, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: "Where is Auth?", SessionID: "agent", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Action != "retrieve" || len(result.Deliveries) != 2 || result.Deliveries[0].Mode != "context-graph" || !strings.Contains(result.Deliveries[1].Rendered, "Tokens expire") || !slices.Contains(result.Deliveries[1].Signals, "path:contains") {
-		t.Fatalf("graph paths were not delivered as content: %#v", result)
-	}
-
 	missing := "missing deployment policy"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &missing, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &missing, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	request := contextprepare.Request{Message: "How do we deploy?", SessionID: "agent", WorkingDirectory: root, TokenBudget: 512}
 	first, err := service.PrepareContext(context.Background(), request)
 	if err != nil {
@@ -256,52 +211,6 @@ func TestPrepareHintMapBudgetsSemanticBM25AndPaths(t *testing.T) {
 	}
 }
 
-func TestPrepareSurfacesPriorSessionAssociation(t *testing.T) {
-	root := t.TempDir()
-	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
-	for key, value := range map[string]string{
-		"decision.auth":              "Use signed sessions for authentication.",
-		"knowledge.audit-constraint": "Login changes require audit events.",
-	} {
-		value := value
-		if _, err := service.Remember(context.Background(), key, memory.Decision, &value, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	priorQuery := "decision.auth knowledge.audit-constraint"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &priorQuery, Scopes: []string{"human"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
-	if result, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: priorQuery, SessionID: "prior", WorkingDirectory: root, TokenBudget: 512}); err != nil || len(result.Deliveries) != 2 {
-		t.Fatalf("prior delivery setup failed: %#v %v", result, err)
-	}
-	authQuery := "signed sessions authentication"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &authQuery, Scopes: []string{"human"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
-	result, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: authQuery, SessionID: "current", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Deliveries) != 1 || result.Deliveries[0].Key != "decision.auth" {
-		t.Fatalf("valid lexical evidence was not isolated: %#v", result)
-	}
-}
-
-func TestPrepareEnforcesTokenBudget(t *testing.T) {
-	root := t.TempDir()
-	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
-	value := strings.Repeat("architecture ", 2_000)
-	if _, err := service.Remember(context.Background(), "architecture.large", memory.Note, &value, nil); err != nil {
-		t.Fatal(err)
-	}
-	query := "architecture"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
-	result, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: query, SessionID: "agent", WorkingDirectory: root, TokenBudget: 128})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Action != "retrieve" || !result.Deliveries[0].Truncated || result.Deliveries[0].EstimatedTokens > 128 || !strings.Contains(result.Deliveries[0].Rendered, "truncated by Purpory") {
-		t.Fatalf("token budget was not enforced: %#v", result)
-	}
-}
-
 func TestPrepareDoesNotForceActivePathEvidence(t *testing.T) {
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
@@ -310,7 +219,7 @@ func TestPrepareDoesNotForceActivePathEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := "unrelated"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	result, err := service.PrepareContext(context.Background(), contextprepare.Request{
 		Message: query, SessionID: "agent", WorkingDirectory: root,
 		ActivePaths: []string{filepath.Join(root, "src", "auth", "service.go")}, TokenBudget: 512,
@@ -318,12 +227,12 @@ func TestPrepareDoesNotForceActivePathEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "ask" || len(result.Deliveries) != 0 {
+	if result.Action != "ask" || result.Hints != nil {
 		t.Fatalf("active path forced invalid evidence: %#v", result)
 	}
 }
 
-func TestIntentGraphDeliversLinkedMaterialEvidence(t *testing.T) {
+func TestIntentGraphLinksMaterialEvidence(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "release.md"), []byte("# Release\nShip from tagged builds.\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -354,12 +263,6 @@ func TestIntentGraphDeliversLinkedMaterialEvidence(t *testing.T) {
 		t.Fatalf("intent path missing: %#v %v", path, err)
 	}
 
-	query := "artifacts provenance"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
-	prepared, err := service.PrepareContext(context.Background(), contextprepare.Request{Message: query, SessionID: "agent", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil || len(prepared.Deliveries) != 2 || prepared.Deliveries[0].Key != "intent.release" || !strings.Contains(prepared.Deliveries[1].Rendered, "file:release.md") || !slices.Contains(prepared.Deliveries[1].Signals, "path:"+graph.RelationRealizedBy) {
-		t.Fatalf("linked material was not delivered with intent: %#v %v", prepared, err)
-	}
 }
 
 func TestUpdateDiscoversMaterialsIncrementally(t *testing.T) {

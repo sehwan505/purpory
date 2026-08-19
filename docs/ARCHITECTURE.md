@@ -104,25 +104,23 @@ Directories are added only when their first behavior is implemented.
   reconciliation refresh those vectors immediately.
 - `prepare` owns the complete context gateway: bounded input validation,
   optional gate classification, embedding-first retrieval, BM25 fallback,
-  graph traversal, exact per-session delivery suppression, token budgeting, and
-  decision audit. CLI, Wails, and agent hooks call this same path.
+  graph-aware signposting, token budgeting, and decision audit. CLI, Wails, and
+  agent hooks call this same path.
 - Durable memory keys are topic-first dot paths. Kind remains independent, and
   old redundant kind prefixes are removed only in the query-time projection.
   This derived hierarchy adds no Topic rows or edges to the canonical graph.
-- Agent preflight uses the gateway's hint-only mode and returns at most three
-  content-free start paths: a semantic anchor, a distinct BM25 anchor when one
-  exists, and an alternate branch when one exists. Typed edges are included
-  only between selected signposts. `query` browses path branches, `explain`
-  opens one or more nodes and records the nodes actually explored, and `path`
-  exposes both topic hierarchy and physical edges. Each HintMap remains audited
-  with its prepare decision.
+- Prepare returns at most three content-free start paths: a semantic anchor, a
+  distinct BM25 anchor when one exists, and an alternate branch when one exists.
+  Typed edges are included only between selected signposts. `query` browses path
+  branches, `explain` opens one or more nodes and records the nodes actually
+  explored, and `path` exposes both topic hierarchy and physical edges. Each
+  HintMap remains audited with its prepare decision.
 - Embeddings rank relative top-k candidates without an absolute similarity
   cutoff. Prepare starts from one semantic candidate, then uses BM25 to fill
-  distinct evidence and advances its small semantic window after opened content.
-  It delivers only
-  content-bearing nodes; workspace Resources and empty graph nodes are traversal
-  structure, not direct evidence. Repeated calls skip exact content already
-  delivered to that Session without mutating the canonical graph.
+  distinct evidence. It suggests only content-bearing nodes; workspace Resources
+  and empty graph nodes are traversal structure, not direct evidence. Repeated
+  calls skip nodes actually opened in that Session without mutating the canonical
+  graph.
 
 ## Product direction
 

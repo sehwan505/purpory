@@ -115,7 +115,7 @@ export default function App() {
         setSelectedNode(first);
         setExplanation(await Explain(first.id));
       }
-      setMessage(`${found.memories?.length ?? 0}개 메모리 · ${found.nodes?.length ?? 0}개 노드`);
+      setMessage(`${found.nodes?.length ?? 0}개 노드`);
     });
   }
 
@@ -353,9 +353,8 @@ export default function App() {
             <NodeDetails node={selectedNode} explanation={explanation} onSelect={node => void explainNode(node)} />
           </div>}
           {results && <div className="results">
-            {(results.memories ?? []).map(item => <article key={item.key}><span>{item.kind}</span><strong>{item.key}</strong><p>{item.value ?? item.source}</p></article>)}
             {(results.nodes ?? []).slice(0, 12).map(node => <button type="button" className="resultCard" key={node.id} onClick={() => void explainNode(node)}><span>{node.kind}</span><strong>{node.label}</strong><p>{node.content || `${node.materialUri}${node.locator ? `#${node.locator}` : ""}`}</p></button>)}
-            {(results.memories?.length ?? 0) + (results.nodes?.length ?? 0) === 0 && <p className="empty">관련 맥락을 찾지 못했습니다.</p>}
+            {(results.nodes?.length ?? 0) === 0 && <p className="empty">관련 맥락을 찾지 못했습니다.</p>}
           </div>}
 
           <div className="toolGrid">
@@ -370,7 +369,7 @@ export default function App() {
               <div><p className="eyebrow">PREPARE</p><h2>Agent 전달 맥락 미리보기</h2></div>
               <label htmlFor="prepareMessage">작업 의도</label><textarea id="prepareMessage" value={prepareMessage} onChange={event => setPrepareMessage(event.target.value)} placeholder="예: 업데이트가 의도와 Material의 연결을 보존하는지 확인해줘" />
               <button disabled={busy}>Context 준비</button>
-              {prepared && <div className="prepared"><span>{prepared.action}</span><pre>{prepared.context?.rendered || prepared.clarification || "전달할 맥락이 없습니다."}</pre></div>}
+              {prepared && <div className="prepared"><span>{prepared.action}</span><pre>{prepared.hints ? JSON.stringify(prepared.hints, null, 2) : prepared.clarification || "탐색할 경로가 없습니다."}</pre></div>}
             </form>
           </div>
         </section>}
@@ -421,7 +420,7 @@ export default function App() {
               <div className="cardTitle"><div><p className="eyebrow">DECISION AUDIT</p><h3>최근 Prepare 판단</h3></div><strong>{decisions.length}</strong></div>
               {decisions.length === 0 ? <p className="empty">기록된 Prepare 판단이 없습니다.</p> : <div className="auditList">{decisions.map(decision => <details key={decision.id}>
                 <summary><span className={`action ${decision.finalAction}`}>{decision.finalAction}</span><strong>{decision.inputText || `입력 해시 ${decision.inputHash.slice(0, 12)}`}</strong><small>{relativeTime(decision.createdAt)} · {decision.modelId || "deterministic"}</small></summary>
-                <div className="auditBody"><p>{decision.proposal.reasonCode} · {(decision.delivery ?? []).map(item => item.key).join(", ") || "전달 없음"}</p>
+                <div className="auditBody"><p>{decision.proposal.reasonCode} · {(decision.hints?.nodes ?? []).map(item => item.path || item.id).join(", ") || "힌트 없음"}</p>
                   <form className="feedbackForm" onSubmit={event => void submitFeedback(event, decision.id)}>
                     <label htmlFor={`verdict-${decision.id}`}>판단 평가</label><select id={`verdict-${decision.id}`} name="verdict" defaultValue={decision.feedback?.verdict || "correct"}><option value="correct">맞음</option><option value="incorrect">수정 필요</option></select>
                     <label htmlFor={`expected-${decision.id}`}>기대한 동작</label><select id={`expected-${decision.id}`} name="expectedAction" defaultValue={decision.feedback?.expectedAction || ""}><option value="">해당 없음</option><option value="skip">skip</option><option value="retrieve">retrieve</option><option value="ask">ask</option></select>

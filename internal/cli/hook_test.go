@@ -40,7 +40,7 @@ func TestAgentHooksTrackSession(t *testing.T) {
 		t.Fatalf("session not started: %#v %q %v", workspace, output.String(), err)
 	}
 	decisions, err := service.ContextDecisions(context.Background(), 1)
-	if err != nil || len(decisions) != 1 || decisions[0].Hints == nil || len(decisions[0].Hints.Nodes) == 0 || len(decisions[0].Deliveries) != 0 {
+	if err != nil || len(decisions) != 1 || decisions[0].Hints == nil || len(decisions[0].Hints.Nodes) == 0 {
 		t.Fatalf("hint map audit missing: %#v %v", decisions, err)
 	}
 	payload["hook_event_name"] = "SessionEnd"
@@ -74,18 +74,6 @@ func TestHookContextPreservesAskAndReturnsHintMap(t *testing.T) {
 	hints := hookContext(product.PrepareResult{Action: "retrieve", Hints: &contextprepare.HintMap{Nodes: []contextprepare.HintNode{{ID: "knowledge:token", Label: "TokenRepository", Kind: "knowledge", Match: "semantic"}}}})
 	if !strings.Contains(hints, "MEMORY MAP — CONTENT NOT LOADED") || !strings.Contains(hints, `purpory explain`) || strings.Contains(hints, "USE FOR THIS TURN") {
 		t.Fatalf("hint map was promoted to evidence: %q", hints)
-	}
-}
-
-func TestHookContextNeverIncludesPreparedContent(t *testing.T) {
-	result := product.PrepareResult{
-		Action:  "retrieve",
-		Context: contextprepare.Context{Rendered: "secret source body"},
-		Hints:   &contextprepare.HintMap{Nodes: []contextprepare.HintNode{{ID: "knowledge:hint", Label: "Hint", Kind: "knowledge", Match: "semantic"}}},
-	}
-	context := hookContext(result)
-	if strings.Contains(context, "secret source body") || !strings.Contains(context, `knowledge:hint`) || !strings.Contains(context, `purpory explain`) {
-		t.Fatalf("hook leaked prepared content: %q", context)
 	}
 }
 

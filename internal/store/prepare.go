@@ -14,24 +14,21 @@ import (
 	"github.com/sehwan505/purpory/internal/prepare"
 )
 
-func (s *Store) SessionDeliveryHashes(ctx context.Context, projectID, sessionID string) (map[string]string, error) {
+func (s *Store) SessionItemKeys(ctx context.Context, projectID, sessionID string) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT key, value_hash FROM session_items
-		WHERE project_id = ? AND session_id = ? ORDER BY delivered_at DESC
+		SELECT DISTINCT key FROM session_items WHERE project_id = ? AND session_id = ?
 	`, projectID, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("load session deliveries: %w", err)
+		return nil, fmt.Errorf("load session items: %w", err)
 	}
 	defer rows.Close()
-	result := map[string]string{}
+	result := map[string]bool{}
 	for rows.Next() {
-		var key, hash string
-		if err := rows.Scan(&key, &hash); err != nil {
-			return nil, fmt.Errorf("load session deliveries: scan: %w", err)
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("load session items: scan: %w", err)
 		}
-		if _, found := result[key]; !found {
-			result[key] = hash
-		}
+		result[key] = true
 	}
 	return result, rows.Err()
 }
@@ -138,10 +135,6 @@ func (s *Store) SavePrepareDecision(ctx context.Context, record prepare.Decision
 	if err != nil {
 		return 0, fmt.Errorf("save prepare decision: encode proposal: %w", err)
 	}
-	delivery, err := json.Marshal(record.Deliveries)
-	if err != nil {
-		return 0, fmt.Errorf("save prepare decision: encode delivery: %w", err)
-	}
 	hints, err := json.Marshal(record.Hints)
 	if err != nil {
 		return 0, fmt.Errorf("save prepare decision: encode hints: %w", err)
@@ -149,10 +142,10 @@ func (s *Store) SavePrepareDecision(ctx context.Context, record prepare.Decision
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO context_decisions(
 			project_id, session_id, input_hash, input_text, proposal_json, final_action,
-			delivery_json, hints_json, request_id, model_id, model_revision, prompt_version, latency_ms, fallback_reason
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			hints_json, request_id, model_id, model_revision, prompt_version, latency_ms, fallback_reason
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, record.ProjectID, record.SessionID, record.InputHash, record.InputText, string(proposal), record.Action,
-		string(delivery), string(hints), record.RequestID, record.Model.ID, record.Model.Revision, prepare.PromptVersion, record.Model.LatencyMS, record.Fallback)
+		string(hints), record.RequestID, record.Model.ID, record.Model.Revision, prepare.PromptVersion, record.Model.LatencyMS, record.Fallback)
 	if err != nil {
 		return 0, fmt.Errorf("save prepare decision: %w", err)
 	}
@@ -169,7 +162,7 @@ func (s *Store) PrepareDecisions(ctx context.Context, projectID string, limit in
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.session_id, d.project_id, d.input_hash, d.input_text, d.final_action,
-		       d.proposal_json, d.delivery_json, d.hints_json, d.request_id, d.model_id, d.model_revision,
+		       d.proposal_json, d.hints_json, d.request_id, d.model_id, d.model_revision,
 		       d.prompt_version, d.latency_ms, d.fallback_reason, d.created_at,
 		       f.verdict, f.expected_action, f.expected_keys_json, f.note, f.created_at
 		FROM context_decisions d LEFT JOIN gate_feedback f ON f.decision_id = d.id
@@ -183,13 +176,13 @@ func (s *Store) PrepareDecisions(ctx context.Context, projectID string, limit in
 	for rows.Next() {
 		var value prepare.Decision
 		var input sql.NullString
-		var proposalJSON, deliveryJSON, hintsJSON string
+		var proposalJSON, hintsJSON string
 		var requestID, latency, createdAt sql.NullInt64
 		var modelID, modelRevision, fallback sql.NullString
 		var verdict, expectedAction, expectedKeys, note sql.NullString
 		var feedbackAt sql.NullInt64
 		if err := rows.Scan(&value.ID, &value.SessionID, &value.ProjectID, &value.InputHash, &input, &value.FinalAction,
-			&proposalJSON, &deliveryJSON, &hintsJSON, &requestID, &modelID, &modelRevision, &value.PromptVersion, &latency, &fallback, &createdAt,
+			&proposalJSON, &hintsJSON, &requestID, &modelID, &modelRevision, &value.PromptVersion, &latency, &fallback, &createdAt,
 			&verdict, &expectedAction, &expectedKeys, &note, &feedbackAt); err != nil {
 			return nil, fmt.Errorf("load prepare decisions: scan: %w", err)
 		}
@@ -198,9 +191,6 @@ func (s *Store) PrepareDecisions(ctx context.Context, projectID string, limit in
 		}
 		if err := json.Unmarshal([]byte(proposalJSON), &value.Proposal); err != nil {
 			return nil, fmt.Errorf("load prepare decisions: decode proposal: %w", err)
-		}
-		if err := json.Unmarshal([]byte(deliveryJSON), &value.Deliveries); err != nil {
-			return nil, fmt.Errorf("load prepare decisions: decode delivery: %w", err)
 		}
 		if err := json.Unmarshal([]byte(hintsJSON), &value.Hints); err != nil {
 			return nil, fmt.Errorf("load prepare decisions: decode hints: %w", err)

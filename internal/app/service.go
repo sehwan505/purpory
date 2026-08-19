@@ -46,11 +46,10 @@ type Status struct {
 }
 
 type QueryResult struct {
-	Memories []memory.Memory `json:"memories"`
-	Seeds    []graph.Node    `json:"seeds"`
-	Nodes    []graph.Node    `json:"nodes"`
-	Edges    []graph.Edge    `json:"edges"`
-	Paths    []string        `json:"paths,omitempty"`
+	Seeds []graph.Node `json:"seeds"`
+	Nodes []graph.Node `json:"nodes"`
+	Edges []graph.Edge `json:"edges"`
+	Paths []string     `json:"paths,omitempty"`
 }
 
 type GraphResult struct {
@@ -268,10 +267,6 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	memories, nodes, err := s.search(ctx, query, limit)
-	if err != nil {
-		return QueryResult{}, err
-	}
 	contextGraph, err := s.contextGraph(ctx)
 	if err != nil {
 		return QueryResult{}, err
@@ -280,26 +275,18 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 	if err != nil {
 		return QueryResult{}, err
 	}
-	ids := make([]string, 0, len(memories)+len(nodes))
-	seenMemories := map[string]bool{}
-	for _, entry := range memories {
-		ids = append(ids, memoryNodeID(entry))
-		seenMemories[entry.Key] = true
-	}
-	for _, node := range nodes {
-		ids = append(ids, node.ID)
-	}
+	ids := contextGraph.seeds(query)
 	seeds := make([]graph.Node, 0, len(semantic))
 	for _, match := range semantic {
 		ids = append(ids, match.node.ID)
 		seeds = append(seeds, match.node)
-		if entry, found := contextGraph.memoryByNode[match.node.ID]; found && !seenMemories[entry.Key] {
-			memories = append(memories, entry)
-			seenMemories[entry.Key] = true
-		}
+	}
+	lexical, _ := contextprepare.BM25(prepareCandidates(contextGraph.nodes), query, nil)
+	for _, candidate := range lexical {
+		ids = append(ids, candidate.NodeID)
 	}
 	nodes, edges := contextGraph.neighborhood(ids, 2, limit*4)
-	return QueryResult{Memories: memories, Seeds: seeds, Nodes: nodes, Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
+	return QueryResult{Seeds: seeds, Nodes: nodes, Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
 }
 
 func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResult, error) {
@@ -316,55 +303,6 @@ func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResu
 	}
 	nodes, edges := contextGraph.neighborhood(seeds, 2, limit)
 	return GraphResult{Nodes: nodes, Edges: edges, TotalNodes: len(contextGraph.nodes), TotalEdges: len(contextGraph.edges), Truncated: len(contextGraph.nodes) > len(nodes)}, nil
-}
-
-func (s *Service) search(ctx context.Context, query string, limit int) ([]memory.Memory, []graph.Node, error) {
-	memories, err := s.store.SearchMemories(ctx, s.project.ID, query, limit)
-	if err != nil {
-		return nil, nil, err
-	}
-	nodes, err := s.store.SearchNodes(ctx, s.project.ID, query, limit)
-	if err != nil || len(memories) > 0 || len(nodes) > 0 {
-		return memories, nodes, err
-	}
-	seenMemories := map[string]bool{}
-	seenNodes := map[string]bool{}
-	for _, term := range searchTerms(query) {
-		foundMemories, err := s.store.SearchMemories(ctx, s.project.ID, term, limit)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, entry := range foundMemories {
-			if !seenMemories[entry.Key] && len(memories) < limit {
-				seenMemories[entry.Key] = true
-				memories = append(memories, entry)
-			}
-		}
-		foundNodes, err := s.store.SearchNodes(ctx, s.project.ID, term, limit)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, node := range foundNodes {
-			if !seenNodes[node.ID] && len(nodes) < limit {
-				seenNodes[node.ID] = true
-				nodes = append(nodes, node)
-			}
-		}
-	}
-	return memories, nodes, nil
-}
-
-func searchTerms(query string) []string {
-	stop := map[string]bool{"a": true, "an": true, "and": true, "how": true, "is": true, "the": true, "to": true, "what": true, "where": true, "who": true, "why": true}
-	var terms []string
-	for _, term := range strings.FieldsFunc(query, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' && r != '-'
-	}) {
-		if len(term) >= 2 && !stop[strings.ToLower(term)] {
-			terms = append(terms, term)
-		}
-	}
-	return terms
 }
 
 func (s *Service) Explain(ctx context.Context, query string) (ExplainResult, error) {
@@ -397,9 +335,6 @@ func (s *Service) ExplainMany(ctx context.Context, queries []string) ([]ExplainR
 		explanation := contextGraph.explanation(node)
 		result := ExplainResult{Graph: &explanation}
 		if entry, found := contextGraph.memoryByNode[node.ID]; found {
-			if err := s.store.RecordMemoryUsage(ctx, s.project.ID, entry.Key, "expanded"); err != nil {
-				return nil, err
-			}
 			result.Memory = &entry
 		}
 		opened = append(opened, project.Delivery{Key: node.ID, Kind: node.Kind, Label: node.Label, Source: node.Path, Preview: previewText(node.Content), Hash: contextprepare.Hash(node.ID + "\x00" + node.Content)})

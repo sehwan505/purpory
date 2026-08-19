@@ -210,7 +210,7 @@ func semanticCandidates(all []contextprepare.Candidate, matches []semanticMatch)
 	result := make([]contextprepare.Candidate, 0, len(matches))
 	for _, match := range matches {
 		candidate, available := byID[match.node.ID]
-		if !available || !deliverableCandidate(candidate) {
+		if !available {
 			continue
 		}
 		candidate.Score = math.Round(match.score*1_000_000) / 1_000_000
