@@ -39,7 +39,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		apply := flags.Bool("apply", false, "apply a batch after optimistic-hash validation")
 		session := flags.String("session", "", "reconciliation session ID")
 		prefix := flags.String("prefix", "", "key prefix")
-		if err := flags.Parse(normalizeRememberArguments(arguments[1:])); err != nil {
+		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
 		if *list {
@@ -207,7 +207,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			result, err := service.EmbeddingStatus(ctx)
 			return writeJSON(output, result, err)
 		}
-		limit := 100
+		limit := 0
 		if len(arguments) == 2 {
 			parsed, err := strconv.Atoi(arguments[1])
 			if err != nil || parsed <= 0 {
@@ -230,7 +230,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		jsonOutput := flags.Bool("json", false, "write the full result as JSON")
 		retainInput := flags.Bool("retain-input", false, "retain request text in the decision audit")
 		noRetainInput := flags.Bool("no-retain-input", false, "store only the request hash")
-		if err := flags.Parse(normalizePrepareArguments(arguments[1:])); err != nil {
+		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 1 {
@@ -252,8 +252,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 		switch result.Action {
 		case "retrieve":
-			parts := []string{strings.TrimSpace(result.Context.Rendered), contextprepare.RenderAwareness(result.Awareness)}
-			_, err = fmt.Fprintln(output, strings.TrimSpace(strings.Join(parts, "\n\n")))
+			_, err = fmt.Fprintln(output, contextprepare.RenderHintMap(result.Hints))
 			return err
 		case "ask":
 			if result.Clarification != nil {
@@ -264,10 +263,10 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			return nil
 		}
 	case "explain":
-		if len(arguments) != 2 {
-			return errors.New("explain requires one key or node")
+		if len(arguments) < 2 {
+			return errors.New("explain requires at least one key or node")
 		}
-		result, err := service.Explain(ctx, arguments[1])
+		result, err := service.ExplainMany(ctx, arguments[1:])
 		return writeJSON(output, result, err)
 	case "path":
 		if len(arguments) != 3 {
@@ -429,30 +428,6 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 	}
 }
 
-func normalizeRememberArguments(arguments []string) []string {
-	var options, positional []string
-	for index := 0; index < len(arguments); index++ {
-		argument := arguments[index]
-		switch argument {
-		case "--list", "--history", "--delete", "--confirm", "--apply":
-			options = append(options, argument)
-		case "--value", "--source", "--kind", "--prefix", "--batch", "--session":
-			options = append(options, argument)
-			if index+1 < len(arguments) {
-				index++
-				options = append(options, arguments[index])
-			}
-		default:
-			if len(argument) > 2 && argument[:2] == "--" {
-				options = append(options, argument)
-			} else {
-				positional = append(positional, argument)
-			}
-		}
-	}
-	return append(options, positional...)
-}
-
 func readMemoryBatch(input io.Reader, path string) ([]memory.BatchChange, error) {
 	var reader io.Reader = input
 	if path != "-" {
@@ -475,30 +450,6 @@ func readMemoryBatch(input io.Reader, path string) ([]memory.BatchChange, error)
 		return nil, fmt.Errorf("read memory batch: %w", err)
 	}
 	return changes, nil
-}
-
-func normalizePrepareArguments(arguments []string) []string {
-	var options, positional []string
-	for index := 0; index < len(arguments); index++ {
-		argument := arguments[index]
-		switch argument {
-		case "--json", "--retain-input", "--no-retain-input":
-			options = append(options, argument)
-		case "--path", "--cwd", "--session", "--budget":
-			options = append(options, argument)
-			if index+1 < len(arguments) {
-				index++
-				options = append(options, arguments[index])
-			}
-		default:
-			if strings.HasPrefix(argument, "--") {
-				options = append(options, argument)
-			} else {
-				positional = append(positional, argument)
-			}
-		}
-	}
-	return append(options, positional...)
 }
 
 type stringList []string

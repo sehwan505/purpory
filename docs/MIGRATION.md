@@ -34,8 +34,8 @@ Reference implementation: `../purpory-python` at upstream `main`.
 4. Make `update` discover Materials, incrementally extract facts, resolve
    relationships, and atomically publish project knowledge.
 5. Add optional Ollama features and model management.
-6. Port context request resolution, gate feedback, memory review, embedding and
-   freshness/usage ranking, and explicit fail-closed submit hooks.
+6. Port context request resolution, gate feedback, memory review,
+   embedding/BM25 HintMaps, and explicit fail-closed submit hooks.
 7. Complete the separate dashboard and CLI, hooks, installers, and cross-OS
    release checks.
 

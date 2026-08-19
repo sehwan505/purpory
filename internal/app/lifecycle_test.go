@@ -15,7 +15,7 @@ func TestContextAndMemoryLifecycle(t *testing.T) {
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
 
 	missing := "deployment policy"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &missing, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &missing, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	prepared, err := service.PrepareContext(ctx, contextprepare.Request{Message: missing, SessionID: "test", WorkingDirectory: root, TokenBudget: 512})
 	if err != nil || prepared.Action != "ask" || prepared.RequestID == nil {
 		t.Fatalf("request was not created: %#v %v", prepared, err)

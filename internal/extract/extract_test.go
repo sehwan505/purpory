@@ -33,7 +33,7 @@ func TestMaterialExtractsDocumentsAndJVMSource(t *testing.T) {
 			}
 			found := false
 			for _, node := range facts.Nodes {
-				found = found || node.Kind == test.kind && node.Label == test.label
+				found = found || node.Kind == "knowledge" && node.Subkind == test.kind && node.Label == test.label
 				if test.mediaType == "text/markdown" && node.Label == "Guide" && !strings.Contains(node.Content, "# Not a section") {
 					t.Fatalf("markdown body content missing: %#v", facts.Nodes)
 				}

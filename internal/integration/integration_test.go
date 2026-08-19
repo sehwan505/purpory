@@ -18,7 +18,7 @@ func TestInstallAndUninstall(t *testing.T) {
 		t.Fatalf("install: %q %v", action, err)
 	}
 	content, _ := os.ReadFile(path)
-	if strings.Count(string(content), startMarker) != 1 || !strings.Contains(string(content), "# Existing") {
+	if strings.Count(string(content), startMarker) != 1 || !strings.Contains(string(content), "# Existing") || !strings.Contains(string(content), "graph hints") {
 		t.Fatalf("unexpected content: %s", content)
 	}
 	hooksContent, err := os.ReadFile(filepath.Join(root, ".codex", "hooks.json"))

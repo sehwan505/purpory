@@ -9,7 +9,6 @@ import (
 
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
-	"github.com/sehwan505/purpory/internal/resolve"
 )
 
 type contextGraph struct {
@@ -23,109 +22,30 @@ func (s *Service) contextGraph(ctx context.Context) (contextGraph, error) {
 	if err != nil {
 		return contextGraph{}, err
 	}
-	nodes, claims, err := s.store.Knowledge(ctx, s.project.ID)
+	nodes, edges, err := s.store.Graph(ctx, s.project.ID)
 	if err != nil {
 		return contextGraph{}, err
 	}
-	links, err := s.store.Links(ctx, s.project.ID)
-	if err != nil {
-		return contextGraph{}, err
-	}
-	return newContextGraph(memories, nodes, resolve.Claims(nodes, claims), links), nil
+	return newContextGraph(memories, nodes, edges), nil
 }
 
-func newContextGraph(memories []memory.Memory, nodes []graph.Node, edges []graph.Edge, links []graph.Link) contextGraph {
-	result := contextGraph{memoryByNode: map[string]memory.Memory{}}
-	intentRefs := map[string]string{}
-	materialRefs := map[string]string{}
-	knowledgeRefs := map[string]string{}
+func newContextGraph(memories []memory.Memory, nodes []graph.Node, edges []graph.Edge) contextGraph {
+	result := contextGraph{nodes: nodes, edges: edges, memoryByNode: map[string]memory.Memory{}}
+	for index := range result.nodes {
+		result.nodes[index].Path = graph.TopicPath(result.nodes[index])
+	}
 	for _, entry := range memories {
-		node := memoryGraphNode(entry)
-		result.nodes = append(result.nodes, node)
-		result.memoryByNode[node.ID] = entry
-		switch entry.Kind {
-		case memory.Decision:
-			intentRefs[entry.Key] = node.ID
-		case memory.Note:
-			knowledgeRefs[entry.Key] = node.ID
-		case memory.Reference:
-			materialRefs[entry.Key] = node.ID
-		}
+		result.memoryByNode[memoryNodeID(entry)] = entry
 	}
 	sort.Slice(result.nodes, func(i, j int) bool {
-		leftIntent := result.nodes[i].Kind == "intent"
-		rightIntent := result.nodes[j].Kind == "intent"
+		leftIntent := result.nodes[i].Kind == graph.KindIntent
+		rightIntent := result.nodes[j].Kind == graph.KindIntent
 		if leftIntent != rightIntent {
 			return leftIntent
 		}
 		return result.nodes[i].Label < result.nodes[j].Label
 	})
-	for _, node := range nodes {
-		result.nodes = append(result.nodes, node)
-		knowledgeRefs[node.ID] = node.ID
-		if node.MaterialURI != "" && node.Locator != "" {
-			knowledgeRefs[node.MaterialURI+"#"+node.Locator] = node.ID
-		}
-		if node.Kind == "material" {
-			materialRefs[node.ID] = node.ID
-			materialRefs[node.MaterialURI] = node.ID
-		}
-	}
-	result.edges = append(result.edges, edges...)
-	seenNodes := map[string]bool{}
-	for _, node := range result.nodes {
-		seenNodes[node.ID] = true
-	}
-	seenEdges := map[string]bool{}
-	for _, edge := range result.edges {
-		seenEdges[edge.SourceID+"\x00"+edge.TargetID+"\x00"+edge.Relation] = true
-	}
-	resolve := func(kind, ref string) string {
-		var id string
-		switch kind {
-		case "intent":
-			id = intentRefs[ref]
-		case "material":
-			id = materialRefs[ref]
-		case "knowledge":
-			id = knowledgeRefs[ref]
-		}
-		if id != "" {
-			return id
-		}
-		id = "missing:" + kind + ":" + ref
-		if !seenNodes[id] {
-			seenNodes[id] = true
-			result.nodes = append(result.nodes, graph.Node{ID: id, Label: ref, Kind: "missing", Content: "Unresolved " + kind + " reference"})
-		}
-		return id
-	}
-	for _, link := range links {
-		edge := graph.Edge{SourceID: resolve(link.SourceKind, link.SourceRef), TargetID: resolve(link.TargetKind, link.TargetRef), Relation: link.Relation}
-		key := edge.SourceID + "\x00" + edge.TargetID + "\x00" + edge.Relation
-		if !seenEdges[key] {
-			seenEdges[key] = true
-			result.edges = append(result.edges, edge)
-		}
-	}
 	return result
-}
-
-func memoryGraphNode(entry memory.Memory) graph.Node {
-	kind := "knowledge"
-	switch entry.Kind {
-	case memory.Decision:
-		kind = "intent"
-	case memory.Reference:
-		kind = "reference"
-	}
-	content := ""
-	if entry.Value != nil {
-		content = *entry.Value
-	} else if entry.Source != nil {
-		content = *entry.Source
-	}
-	return graph.Node{ID: memoryNodeID(entry), Label: entry.Key, Kind: kind, Content: content}
 }
 
 func (g contextGraph) find(query string) (graph.Node, bool) {
@@ -134,12 +54,12 @@ func (g contextGraph) find(query string) (graph.Node, bool) {
 		return graph.Node{}, false
 	}
 	for _, node := range g.nodes {
-		if node.ID == query || node.Label == query {
+		if node.ID == query || node.Label == query || node.Path == query {
 			return node, true
 		}
 	}
 	for _, node := range g.nodes {
-		if node.Kind == "material" && node.MaterialURI == query {
+		if node.Kind == graph.KindMaterial && node.MaterialURI == query {
 			return node, true
 		}
 	}
@@ -161,7 +81,7 @@ func (g contextGraph) seeds(query string) []string {
 	query = strings.ToLower(strings.TrimSpace(query))
 	var result []string
 	for _, node := range g.nodes {
-		if query == "" || strings.Contains(strings.ToLower(strings.Join([]string{node.ID, node.Label, node.Kind, node.MaterialURI, node.Locator, node.Content}, " ")), query) {
+		if query == "" || strings.Contains(strings.ToLower(strings.Join([]string{node.ID, node.Path, node.Label, node.Kind, node.MaterialURI, node.Locator, node.Content}, " ")), query) {
 			result = append(result, node.ID)
 		}
 	}
@@ -245,6 +165,63 @@ func (g contextGraph) explanation(node graph.Node) graph.Explanation {
 	sort.Slice(result.Connections, func(i, j int) bool {
 		return result.Connections[i].Direction+result.Connections[i].Relation+result.Connections[i].Node.Label < result.Connections[j].Direction+result.Connections[j].Relation+result.Connections[j].Node.Label
 	})
+	if parent := topicParent(node.Path); parent != "" {
+		result.Paths = g.branches(parent, 12)
+	}
+	return result
+}
+
+func (g contextGraph) branches(prefix string, limit int) []string {
+	prefix = strings.TrimSuffix(strings.TrimSpace(prefix), ".")
+	seen := map[string]bool{}
+	var result []string
+	for _, node := range g.nodes {
+		path := node.Path
+		if path == "" || path != prefix && !strings.HasPrefix(path, prefix+".") {
+			continue
+		}
+		branch := path
+		if rest := strings.TrimPrefix(path, prefix+"."); path != prefix {
+			if segment, _, found := strings.Cut(rest, "."); found {
+				branch = prefix + "." + segment
+			}
+		}
+		if !seen[branch] {
+			seen[branch] = true
+			result = append(result, branch)
+		}
+	}
+	sort.Strings(result)
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result
+}
+
+func topicParent(path string) string {
+	last := strings.LastIndex(path, ".")
+	if last < 0 {
+		return ""
+	}
+	return path[:last]
+}
+
+func topicBridge(source, target string) []string {
+	left, right := strings.Split(source, "."), strings.Split(target, ".")
+	common := 0
+	for common < len(left) && common < len(right) && left[common] == right[common] {
+		common++
+	}
+	if common == 0 {
+		return nil
+	}
+	var result []string
+	for end := len(left); end >= common; end-- {
+		result = append(result, strings.Join(left[:end], "."))
+	}
+	for end := common + 1; end <= len(right); end++ {
+		result = append(result, strings.Join(right[:end], "."))
+	}
 	return result
 }
 
@@ -286,7 +263,11 @@ func (g contextGraph) path(sourceQuery, targetQuery string) (graph.Path, error) 
 		}
 	}
 	if _, found := previous[target.ID]; !found {
-		return graph.Path{}, sql.ErrNoRows
+		bridge := topicBridge(source.Path, target.Path)
+		if len(bridge) == 0 {
+			return graph.Path{}, sql.ErrNoRows
+		}
+		return graph.Path{Nodes: []graph.Node{source, target}, TopicPaths: bridge}, nil
 	}
 	ids := []string{target.ID}
 	var edges []graph.Edge
@@ -306,7 +287,7 @@ func (g contextGraph) path(sourceQuery, targetQuery string) (graph.Path, error) 
 	for _, node := range g.nodes {
 		byID[node.ID] = node
 	}
-	result := graph.Path{Edges: edges}
+	result := graph.Path{Edges: edges, TopicPaths: topicBridge(source.Path, target.Path)}
 	for _, id := range ids {
 		result.Nodes = append(result.Nodes, byID[id])
 	}

@@ -35,11 +35,11 @@ type databaseRunner interface {
 }
 
 func saveMemory(ctx context.Context, database databaseRunner, value memory.Memory) (SaveResult, error) {
-	var currentHash string
+	var currentHash, currentKind string
 	err := database.QueryRowContext(ctx,
-		"SELECT content_hash FROM memories WHERE project_id = ? AND key = ?",
+		"SELECT content_hash, kind FROM memories WHERE project_id = ? AND key = ?",
 		value.ProjectID, value.Key,
-	).Scan(&currentHash)
+	).Scan(&currentHash, &currentKind)
 	action := "updated"
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -47,6 +47,9 @@ func saveMemory(ctx context.Context, database databaseRunner, value memory.Memor
 	case err != nil:
 		return SaveResult{}, fmt.Errorf("save memory: load current: %w", err)
 	case currentHash == value.Hash:
+		if err := upsertMemoryNode(ctx, database, value); err != nil {
+			return SaveResult{}, err
+		}
 		return SaveResult{Action: "unchanged"}, nil
 	}
 
@@ -62,6 +65,14 @@ func saveMemory(ctx context.Context, database databaseRunner, value memory.Memor
 	`, value.ProjectID, value.Key, value.Kind, value.Value, value.Source, value.Hash); err != nil {
 		return SaveResult{}, fmt.Errorf("save memory: upsert: %w", err)
 	}
+	if currentKind != "" && memory.Kind(currentKind).NodeKind() != value.Kind.NodeKind() {
+		if _, err := database.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?`, value.ProjectID, memory.Kind(currentKind).NodeKind(), value.Key); err != nil {
+			return SaveResult{}, fmt.Errorf("save memory: replace graph kind: %w", err)
+		}
+	}
+	if err := upsertMemoryNode(ctx, database, value); err != nil {
+		return SaveResult{}, err
+	}
 	result, err := database.ExecContext(ctx, `
 		INSERT INTO memory_versions (project_id, key, kind, value, source, content_hash)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -74,6 +85,26 @@ func saveMemory(ctx context.Context, database databaseRunner, value memory.Memor
 		return SaveResult{}, fmt.Errorf("save memory: version ID: %w", err)
 	}
 	return SaveResult{Action: action, VersionID: versionID}, nil
+}
+
+func upsertMemoryNode(ctx context.Context, database databaseRunner, value memory.Memory) error {
+	content := ""
+	if value.Value != nil {
+		content = *value.Value
+	} else if value.Source != nil {
+		content = *value.Source
+	}
+	kind := value.Kind.NodeKind()
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO nodes(project_id, id, label, kind, subkind, ref, owner, state, provenance, content)
+		VALUES (?, ?, ?, ?, ?, ?, 'durable', 'active', 'memory', ?)
+		ON CONFLICT(project_id, id) DO UPDATE SET
+			label=excluded.label, kind=excluded.kind, subkind=excluded.subkind, ref=excluded.ref,
+			owner='durable', state='active', provenance='memory', content=excluded.content
+	`, value.ProjectID, graph.ReferenceID(kind, value.Key), value.Key, kind, value.Kind, value.Key, content); err != nil {
+		return fmt.Errorf("save memory: upsert graph node: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposals []MemoryProposal) ([]SaveResult, error) {
@@ -164,16 +195,11 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 			changes = append(changes, auditChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs})
 		}
 		for _, link := range proposal.Links {
-			result, err := connection.ExecContext(ctx, `
-				INSERT INTO links(project_id, source_kind, source_ref, relation, target_kind, target_ref)
-				VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
-			`, projectID, link.SourceKind, link.SourceRef, link.Relation, link.TargetKind, link.TargetRef)
+			created, err := saveGraphLink(ctx, connection, projectID, link, "reconcile:"+sessionID)
 			if err != nil {
 				return nil, fmt.Errorf("reconcile memory: save link: %w", err)
 			}
-			if count, err := result.RowsAffected(); err != nil {
-				return nil, fmt.Errorf("reconcile memory: link result: %w", err)
-			} else if count > 0 {
+			if created {
 				links = append(links, auditLink{Link: link, EvidenceIDs: proposal.EvidenceIDs})
 			}
 		}
@@ -261,44 +287,6 @@ func (s *Store) Memories(ctx context.Context, projectID, prefix string) ([]memor
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list memories: %w", err)
-	}
-	return values, nil
-}
-
-func (s *Store) SearchMemories(ctx context.Context, projectID, query string, limit int) ([]memory.Memory, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, errors.New("search memories: query is empty")
-	}
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-	pattern := "%" + escapeLike(query) + "%"
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT project_id, key, kind, value, source, content_hash, updated_at
-		FROM memories
-		WHERE project_id = ? AND (key LIKE ? ESCAPE '\' OR value LIKE ? ESCAPE '\' OR source LIKE ? ESCAPE '\')
-		ORDER BY CASE WHEN key = ? THEN 0 WHEN key LIKE ? ESCAPE '\' THEN 1 ELSE 2 END, updated_at DESC, key
-		LIMIT ?
-	`, projectID, pattern, pattern, pattern, query, escapeLike(query)+"%", limit)
-	if err != nil {
-		return nil, fmt.Errorf("search memories: %w", err)
-	}
-	defer rows.Close()
-	var values []memory.Memory
-	for rows.Next() {
-		var value memory.Memory
-		var timestamp int64
-		if err := rows.Scan(
-			&value.ProjectID, &value.Key, &value.Kind, &value.Value, &value.Source, &value.Hash, &timestamp,
-		); err != nil {
-			return nil, fmt.Errorf("search memories: scan: %w", err)
-		}
-		value.UpdatedAt = time.Unix(timestamp, 0).UTC().Format(time.RFC3339)
-		values = append(values, value)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("search memories: %w", err)
 	}
 	return values, nil
 }

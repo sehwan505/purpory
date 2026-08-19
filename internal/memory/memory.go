@@ -18,6 +18,19 @@ const (
 	Reference Kind = "reference"
 )
 
+func (k Kind) NodeKind() string {
+	switch k {
+	case Decision:
+		return "intent"
+	case Reference:
+		return "reference"
+	case Note:
+		return "knowledge"
+	default:
+		return ""
+	}
+}
+
 var keyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9][A-Za-z0-9_-]*)*$`)
 
 type Memory struct {
@@ -59,13 +72,6 @@ type Review struct {
 	ResultVersionID *int64 `json:"resultVersionId,omitempty"`
 	CreatedAt       string `json:"createdAt"`
 	ResolvedAt      string `json:"resolvedAt,omitempty"`
-}
-
-type Usage struct {
-	SelectedCount int    `json:"selectedCount"`
-	ExpandedCount int    `json:"expandedCount"`
-	LastSelected  string `json:"lastSelectedAt,omitempty"`
-	LastExpanded  string `json:"lastExpandedAt,omitempty"`
 }
 
 type BatchChange struct {

@@ -46,9 +46,10 @@ type Status struct {
 }
 
 type QueryResult struct {
-	Memories []memory.Memory `json:"memories"`
-	Nodes    []graph.Node    `json:"nodes"`
-	Edges    []graph.Edge    `json:"edges"`
+	Seeds []graph.Node `json:"seeds"`
+	Nodes []graph.Node `json:"nodes"`
+	Edges []graph.Edge `json:"edges"`
+	Paths []string     `json:"paths,omitempty"`
 }
 
 type GraphResult struct {
@@ -182,7 +183,14 @@ func (s *Service) Remember(ctx context.Context, key string, kind memory.Kind, va
 	if err != nil {
 		return store.SaveResult{}, err
 	}
-	return s.store.SaveMemory(ctx, entry)
+	result, err := s.store.SaveMemory(ctx, entry)
+	if err != nil {
+		return store.SaveResult{}, err
+	}
+	if err := s.syncNodeEmbeddings(ctx, []string{memoryNodeID(entry)}); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (s *Service) Memories(ctx context.Context, prefix string) ([]memory.Memory, error) {
@@ -205,7 +213,22 @@ func (s *Service) ReconcileMemoryBatch(ctx context.Context, changes []memory.Bat
 	if strings.TrimSpace(sessionID) == "" {
 		sessionID = currentSessionID("")
 	}
-	return s.store.PreviewMemoryBatch(ctx, s.project.ID, changes, apply, sessionID)
+	result, err := s.store.PreviewMemoryBatch(ctx, s.project.ID, changes, apply, sessionID)
+	if err != nil || !result.Applied {
+		return result, err
+	}
+	var nodeIDs []string
+	for _, change := range result.Changes {
+		entry, loadErr := s.store.Memory(ctx, s.project.ID, change.Key)
+		if loadErr != nil {
+			return result, loadErr
+		}
+		nodeIDs = append(nodeIDs, memoryNodeID(entry))
+	}
+	if err := s.syncNodeEmbeddings(ctx, nodeIDs); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (s *Service) CreateNeedsReview(ctx context.Context, key, sourceType, sourceID, contentHash, reason string) (memory.Review, error) {
@@ -241,23 +264,29 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 	if query == "" {
 		return QueryResult{}, errors.New("query context: query is empty")
 	}
-	memories, nodes, err := s.search(ctx, query, limit)
-	if err != nil {
-		return QueryResult{}, err
+	if limit <= 0 || limit > 100 {
+		limit = 20
 	}
 	contextGraph, err := s.contextGraph(ctx)
 	if err != nil {
 		return QueryResult{}, err
 	}
-	ids := make([]string, 0, len(memories)+len(nodes))
-	for _, entry := range memories {
-		ids = append(ids, memoryNodeID(entry))
+	semantic, err := s.semanticMatches(ctx, query, contextGraph.nodes, limit)
+	if err != nil {
+		return QueryResult{}, err
 	}
-	for _, node := range nodes {
-		ids = append(ids, node.ID)
+	ids := contextGraph.seeds(query)
+	seeds := make([]graph.Node, 0, len(semantic))
+	for _, match := range semantic {
+		ids = append(ids, match.node.ID)
+		seeds = append(seeds, match.node)
+	}
+	lexical, _ := contextprepare.BM25(prepareCandidates(contextGraph.nodes), query, nil)
+	for _, candidate := range lexical {
+		ids = append(ids, candidate.NodeID)
 	}
 	nodes, edges := contextGraph.neighborhood(ids, 2, limit*4)
-	return QueryResult{Memories: memories, Nodes: nodes, Edges: edges}, nil
+	return QueryResult{Seeds: seeds, Nodes: nodes, Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
 }
 
 func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResult, error) {
@@ -276,73 +305,49 @@ func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResu
 	return GraphResult{Nodes: nodes, Edges: edges, TotalNodes: len(contextGraph.nodes), TotalEdges: len(contextGraph.edges), Truncated: len(contextGraph.nodes) > len(nodes)}, nil
 }
 
-func (s *Service) search(ctx context.Context, query string, limit int) ([]memory.Memory, []graph.Node, error) {
-	memories, err := s.store.SearchMemories(ctx, s.project.ID, query, limit)
-	if err != nil {
-		return nil, nil, err
-	}
-	nodes, err := s.store.SearchNodes(ctx, s.project.ID, query, limit)
-	if err != nil || len(memories) > 0 || len(nodes) > 0 {
-		return memories, nodes, err
-	}
-	seenMemories := map[string]bool{}
-	seenNodes := map[string]bool{}
-	for _, term := range searchTerms(query) {
-		foundMemories, err := s.store.SearchMemories(ctx, s.project.ID, term, limit)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, entry := range foundMemories {
-			if !seenMemories[entry.Key] && len(memories) < limit {
-				seenMemories[entry.Key] = true
-				memories = append(memories, entry)
-			}
-		}
-		foundNodes, err := s.store.SearchNodes(ctx, s.project.ID, term, limit)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, node := range foundNodes {
-			if !seenNodes[node.ID] && len(nodes) < limit {
-				seenNodes[node.ID] = true
-				nodes = append(nodes, node)
-			}
-		}
-	}
-	return memories, nodes, nil
-}
-
-func searchTerms(query string) []string {
-	stop := map[string]bool{"a": true, "an": true, "and": true, "how": true, "is": true, "the": true, "to": true, "what": true, "where": true, "who": true, "why": true}
-	var terms []string
-	for _, term := range strings.FieldsFunc(query, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' && r != '-'
-	}) {
-		if len(term) >= 2 && !stop[strings.ToLower(term)] {
-			terms = append(terms, term)
-		}
-	}
-	return terms
-}
-
 func (s *Service) Explain(ctx context.Context, query string) (ExplainResult, error) {
-	contextGraph, err := s.contextGraph(ctx)
+	results, err := s.ExplainMany(ctx, []string{query})
 	if err != nil {
 		return ExplainResult{}, err
 	}
-	node, found := contextGraph.find(query)
-	if !found {
-		return ExplainResult{}, fmt.Errorf("explain context: %w", sql.ErrNoRows)
+	return results[0], nil
+}
+
+func (s *Service) ExplainMany(ctx context.Context, queries []string) ([]ExplainResult, error) {
+	if len(queries) == 0 {
+		return nil, errors.New("explain context: query is required")
 	}
-	explanation := contextGraph.explanation(node)
-	result := ExplainResult{Graph: &explanation}
-	if entry, found := contextGraph.memoryByNode[node.ID]; found {
-		if err := s.store.RecordMemoryUsage(ctx, s.project.ID, entry.Key, "expanded"); err != nil {
-			return ExplainResult{}, err
+	contextGraph, err := s.contextGraph(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nodes := make([]graph.Node, len(queries))
+	for index, query := range queries {
+		node, found := contextGraph.find(query)
+		if !found {
+			return nil, fmt.Errorf("explain context %q: %w", query, sql.ErrNoRows)
 		}
-		result.Memory = &entry
+		nodes[index] = node
 	}
-	return result, nil
+	results := make([]ExplainResult, 0, len(nodes))
+	opened := make([]project.Delivery, 0, len(nodes))
+	for _, node := range nodes {
+		explanation := contextGraph.explanation(node)
+		result := ExplainResult{Graph: &explanation}
+		if entry, found := contextGraph.memoryByNode[node.ID]; found {
+			result.Memory = &entry
+		}
+		opened = append(opened, project.Delivery{Key: node.ID, Kind: node.Kind, Label: node.Label, Source: node.Path, Preview: previewText(node.Content), Hash: contextprepare.Hash(node.ID + "\x00" + node.Content)})
+		results = append(results, result)
+	}
+	sessionID := currentSessionID("")
+	if err := s.SaveSessionAt(ctx, s.project.Root, sessionID, sessionAgent(sessionID), "active"); err != nil {
+		return nil, err
+	}
+	if err := s.store.SaveDeliveries(ctx, s.project.ID, sessionID, opened); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (s *Service) Path(ctx context.Context, source, target string) (graph.Path, error) {

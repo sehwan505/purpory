@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,19 +25,6 @@ func openCLIService(t *testing.T, root, database, id string) *product.Service {
 	}
 	t.Cleanup(func() { _ = service.Close() })
 	return service
-}
-
-func TestNormalizeRememberArguments(t *testing.T) {
-	got := normalizeRememberArguments([]string{"decision.database", "--kind", "decision", "--value", "Use SQLite"})
-	want := []string{"--kind", "decision", "--value", "Use SQLite", "decision.database"}
-	if len(got) != len(want) {
-		t.Fatalf("unexpected arguments: %#v", got)
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("unexpected arguments: %#v", got)
-		}
-	}
 }
 
 func TestUpdateJSON(t *testing.T) {
@@ -61,6 +50,47 @@ func TestUpdateJSON(t *testing.T) {
 	}
 }
 
+func TestEmbedCLIBackfillsAllMissingNodes(t *testing.T) {
+	vector := make([]float64, 512)
+	vector[0] = 1
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(response, err.Error(), http.StatusBadRequest)
+			return
+		}
+		vectors := make([][]float64, len(body.Input))
+		for index := range vectors {
+			vectors[index] = vector
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"embeddings": vectors})
+	}))
+	defer server.Close()
+	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
+
+	ctx := context.Background()
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	for key, kind := range map[string]memory.Kind{"intent.one": memory.Decision, "knowledge.two": memory.Note} {
+		value := "project context"
+		if _, err := service.Remember(ctx, key, kind, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runCLI(ctx, service, []string{"embed"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var result product.EmbeddingSyncResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.Embedded != 2 {
+		t.Fatalf("embed CLI did not backfill all nodes: %#v %v", result, err)
+	}
+}
+
 func TestPrepareCLIOptions(t *testing.T) {
 	root := t.TempDir()
 	service := openCLIService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
@@ -69,7 +99,7 @@ func TestPrepareCLIOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	arguments := []string{"prepare", "decision.database", "--session", "cli", "--budget", "512", "--path", "internal/store", "--json", "--no-retain-input"}
+	arguments := []string{"prepare", "--session", "cli", "--budget", "512", "--path", "internal/store", "--json", "--no-retain-input", "decision.database"}
 	if err := runCLI(context.Background(), service, arguments, bytes.NewReader(nil), &output); err != nil {
 		t.Fatal(err)
 	}
@@ -77,8 +107,30 @@ func TestPrepareCLIOptions(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "retrieve" || len(result.Deliveries) != 1 || result.DecisionID == 0 {
+	if result.Action != "retrieve" || result.Hints == nil || len(result.Hints.Nodes) == 0 || result.DecisionID == 0 {
 		t.Fatalf("unexpected prepare result: %#v", result)
+	}
+}
+
+func TestExplainCLIAcceptsMultipleNodes(t *testing.T) {
+	ctx := context.Background()
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	for key, kind := range map[string]memory.Kind{"intent.one": memory.Decision, "knowledge.two": memory.Note} {
+		value := key + " content"
+		if _, err := service.Remember(ctx, key, kind, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := runCLI(ctx, service, []string{"explain", "intent.one", "knowledge.two"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var results []product.ExplainResult
+	if err := json.Unmarshal(output.Bytes(), &results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || results[0].Memory == nil || results[0].Memory.Key != "intent.one" || results[1].Memory == nil || results[1].Memory.Key != "knowledge.two" {
+		t.Fatalf("unexpected explanations: %#v", results)
 	}
 }
 
@@ -106,7 +158,7 @@ func TestMemoryLifecycleCLI(t *testing.T) {
 		t.Fatalf("batch CLI did not apply: %#v %v", result, err)
 	}
 	output.Reset()
-	if err := runCLI(ctx, service, []string{"remember", "knowledge.demo", "--confirm"}, bytes.NewReader(nil), &output); err != nil || output.String() != "true\n" {
+	if err := runCLI(ctx, service, []string{"remember", "--confirm", "knowledge.demo"}, bytes.NewReader(nil), &output); err != nil || output.String() != "true\n" {
 		t.Fatalf("confirm CLI failed: %q %v", output.String(), err)
 	}
 }

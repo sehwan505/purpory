@@ -88,24 +88,15 @@ func environmentTrue(name string) bool {
 }
 
 func (g ollamaGate) Propose(ctx context.Context, request contextprepare.Request) (contextprepare.ProviderResult, error) {
-	catalog, err := json.Marshal(request.Catalog)
-	if err != nil {
-		return contextprepare.ProviderResult{}, fmt.Errorf("prepare gate: encode catalog: %w", err)
-	}
-	var contextCatalog map[string]any
-	if err := json.Unmarshal(catalog, &contextCatalog); err != nil {
-		return contextprepare.ProviderResult{}, fmt.Errorf("prepare gate: decode catalog: %w", err)
-	}
-	contextCatalog["orientation"] = request.Orientation
 	payload, err := json.Marshal(map[string]any{
-		"request":            request.Message,
-		"sessionId":          request.SessionID,
-		"project":            request.ProjectID,
-		"workingDirectory":   request.WorkingDirectory,
-		"activePaths":        request.ActivePaths,
-		"tokenBudget":        request.TokenBudget,
-		"previousDeliveries": request.PriorKeys,
-		"contextCatalog":     contextCatalog,
+		"request":          request.Message,
+		"sessionId":        request.SessionID,
+		"project":          request.ProjectID,
+		"workingDirectory": request.WorkingDirectory,
+		"activePaths":      request.ActivePaths,
+		"tokenBudget":      request.TokenBudget,
+		"openedNodes":      request.OpenedNodes,
+		"contextCatalog":   request.Catalog,
 	})
 	if err != nil {
 		return contextprepare.ProviderResult{}, fmt.Errorf("prepare gate: encode request: %w", err)
@@ -119,12 +110,11 @@ func (g ollamaGate) Propose(ctx context.Context, request contextprepare.Request)
 		"properties": map[string]any{
 			"action":        map[string]any{"type": "string", "enum": []string{"skip", "search", "ask"}},
 			"query":         map[string]any{"type": []string{"string", "null"}},
-			"scopes":        map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"human", "resource", "material", "session"}}},
 			"keywords":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"reasonCode":    map[string]any{"type": "string", "enum": []string{"SELF_CONTAINED", "CONTEXT_SEARCH_REQUIRED", "PRIOR_DECISION_REFERENCED", "PROJECT_CONTEXT_REQUIRED", "SESSION_HISTORY_REQUIRED", "CODE_CONTEXT_REQUIRED", "USER_INPUT_REQUIRED", "AMBIGUOUS_REQUEST"}},
 			"clarification": map[string]any{"type": []string{"string", "null"}},
 		},
-		"required": []string{"action", "query", "scopes", "keywords", "reasonCode", "clarification"},
+		"required": []string{"action", "query", "keywords", "reasonCode", "clarification"},
 	}
 	started := time.Now()
 	system := "Classify whether the request needs project context. Return only the strict JSON schema. Never answer the request. Use skip for self-contained work, search for project evidence, and ask only when user input is required."

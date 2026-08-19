@@ -36,8 +36,12 @@ func TestAgentHooksTrackSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace, err := service.Workspace(context.Background())
-	if err != nil || len(workspace.Resources[0].Views[0].Sessions) != 1 || workspace.Resources[0].Views[0].Sessions[0].Status != "active" || len(workspace.Resources[0].Views[0].Sessions[0].Deliveries) == 0 || output.Len() == 0 {
+	if err != nil || len(workspace.Resources[0].Views[0].Sessions) != 1 || workspace.Resources[0].Views[0].Sessions[0].Status != "active" || len(workspace.Resources[0].Views[0].Sessions[0].Deliveries) != 0 || output.Len() == 0 || !strings.Contains(output.String(), `purpory explain`) || strings.Contains(output.String(), intent) {
 		t.Fatalf("session not started: %#v %q %v", workspace, output.String(), err)
+	}
+	decisions, err := service.ContextDecisions(context.Background(), 1)
+	if err != nil || len(decisions) != 1 || decisions[0].Hints == nil || len(decisions[0].Hints.Nodes) == 0 {
+		t.Fatalf("hint map audit missing: %#v %v", decisions, err)
 	}
 	payload["hook_event_name"] = "SessionEnd"
 	transcript := filepath.Join(root, "session.jsonl")
@@ -60,17 +64,16 @@ func TestAgentHooksTrackSession(t *testing.T) {
 	}
 }
 
-func TestHookContextPreservesAskAndSeparatesAwareness(t *testing.T) {
+func TestHookContextPreservesAskAndReturnsHintMap(t *testing.T) {
 	requestID := int64(17)
 	clarification := "Which environment do you mean?"
 	ask := hookContext(product.PrepareResult{Action: "ask", RequestID: &requestID, Clarification: &clarification})
 	if !strings.Contains(ask, "INTENT ALIGNMENT SUGGESTION") || !strings.Contains(ask, "Request ID: 17") || !strings.Contains(ask, clarification) {
 		t.Fatalf("ask response missing: %q", ask)
 	}
-	relation := "calls"
-	awareness := hookContext(product.PrepareResult{Action: "retrieve", Awareness: []contextprepare.Awareness{{NodeID: "token", Key: "material.token", Label: "TokenRepository", Relation: &relation}}})
-	if !strings.Contains(awareness, "RELATED CONTEXT AVAILABLE — NOT LOADED") || strings.Contains(awareness, "USE FOR THIS TURN") {
-		t.Fatalf("awareness response was promoted to evidence: %q", awareness)
+	hints := hookContext(product.PrepareResult{Action: "retrieve", Hints: &contextprepare.HintMap{Nodes: []contextprepare.HintNode{{ID: "knowledge:token", Label: "TokenRepository", Kind: "knowledge", Match: "semantic"}}}})
+	if !strings.Contains(hints, "MEMORY MAP — CONTENT NOT LOADED") || !strings.Contains(hints, `purpory explain`) || strings.Contains(hints, "USE FOR THIS TURN") {
+		t.Fatalf("hint map was promoted to evidence: %q", hints)
 	}
 }
 

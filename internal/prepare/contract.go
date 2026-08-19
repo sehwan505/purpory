@@ -8,36 +8,25 @@ import (
 )
 
 const (
-	SchemaVersion     = 1
-	ContextVersion    = 2
-	PromptVersion     = "purpory-gate-v5"
-	MinTokenBudget    = 128
-	MaxTokenBudget    = 32_768
-	MaxMessageChars   = 1_048_576
-	MaxQueryChars     = 4_096
-	MaxDirectEvidence = 2
-	MaxAwarenessHints = 6
+	SchemaVersion   = 1
+	ContextVersion  = 2
+	PromptVersion   = "purpory-gate-v6"
+	MinTokenBudget  = 128
+	MaxTokenBudget  = 32_768
+	MaxMessageChars = 1_048_576
+	MaxQueryChars   = 4_096
 )
 
 type Request struct {
-	Message          string        `json:"message"`
-	SessionID        string        `json:"sessionId"`
-	ProjectID        string        `json:"project"`
-	WorkingDirectory string        `json:"workingDirectory"`
-	ActivePaths      []string      `json:"activePaths"`
-	TokenBudget      int           `json:"tokenBudget"`
-	RetainInput      bool          `json:"retainInput"`
-	PriorKeys        []string      `json:"previousDeliveries"`
-	Catalog          Catalog       `json:"contextCatalog"`
-	Orientation      []Orientation `json:"orientation"`
-}
-
-type Orientation struct {
-	Key     string `json:"key"`
-	Label   string `json:"label"`
-	Kind    string `json:"kind"`
-	Source  string `json:"source,omitempty"`
-	Preview string `json:"preview,omitempty"`
+	Message          string   `json:"message"`
+	SessionID        string   `json:"sessionId"`
+	ProjectID        string   `json:"project"`
+	WorkingDirectory string   `json:"workingDirectory"`
+	ActivePaths      []string `json:"activePaths"`
+	TokenBudget      int      `json:"tokenBudget"`
+	RetainInput      bool     `json:"retainInput"`
+	OpenedNodes      []string `json:"openedNodes"`
+	Catalog          Catalog  `json:"contextCatalog"`
 }
 
 type Provider interface {
@@ -54,7 +43,6 @@ type ProviderResult struct {
 type Proposal struct {
 	Action        string   `json:"action"`
 	Query         *string  `json:"query"`
-	Scopes        []string `json:"scopes"`
 	Keywords      []string `json:"keywords"`
 	ReasonCode    string   `json:"reasonCode"`
 	Clarification *string  `json:"clarification"`
@@ -67,59 +55,44 @@ type Model struct {
 }
 
 type Candidate struct {
-	NodeID        string   `json:"nodeId"`
-	Key           string   `json:"key"`
-	Namespace     string   `json:"namespace"`
-	Label         string   `json:"label"`
-	Kind          string   `json:"kind"`
-	Origin        string   `json:"origin"`
-	Source        string   `json:"source,omitempty"`
-	Content       string   `json:"-"`
-	Mode          string   `json:"-"`
-	UpdatedAt     int64    `json:"-"`
-	SelectedCount int      `json:"-"`
-	ExpandedCount int      `json:"-"`
-	Score         float64  `json:"score"`
-	Signals       []string `json:"signals"`
+	NodeID  string
+	Key     string
+	Label   string
+	Kind    string
+	Source  string
+	Content string
+	Score   float64
+	Signals []string
 }
 
-type Delivery struct {
-	NodeID          string   `json:"nodeId"`
-	Key             string   `json:"key"`
-	Kind            string   `json:"kind"`
-	Origin          string   `json:"origin"`
-	Mode            string   `json:"mode"`
-	Truncated       bool     `json:"truncated"`
-	Score           float64  `json:"score"`
-	Signals         []string `json:"signals"`
-	EstimatedTokens int      `json:"estimatedTokens"`
-	Hash            string   `json:"valueHash"`
-	Rendered        string   `json:"rendered"`
+type HintMap struct {
+	Nodes []HintNode `json:"nodes"`
+	Edges []HintEdge `json:"edges"`
 }
 
-type Omitted struct {
-	NodeID          string `json:"nodeId,omitempty"`
-	Key             string `json:"key,omitempty"`
-	Reason          string `json:"reason"`
-	EstimatedTokens int    `json:"estimatedTokens,omitempty"`
+type HintNode struct {
+	ID         string `json:"id"`
+	Path       string `json:"path,omitempty"`
+	Label      string `json:"label"`
+	Kind       string `json:"kind"`
+	Subkind    string `json:"subkind,omitempty"`
+	State      string `json:"state,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Match      string `json:"match"`
+	Provenance string `json:"provenance,omitempty"`
 }
 
-type Awareness struct {
-	NodeID    string  `json:"nodeId"`
-	Key       string  `json:"key"`
-	Namespace string  `json:"namespace"`
-	Label     string  `json:"label"`
-	Kind      string  `json:"kind"`
-	Source    string  `json:"source,omitempty"`
-	Reason    string  `json:"reason"`
-	Relation  *string `json:"relation"`
+type HintEdge struct {
+	SourceID string `json:"sourceId"`
+	TargetID string `json:"targetId"`
+	Relation string `json:"relation"`
 }
 
 type Counts struct {
 	Human        int `json:"human"`
 	Nodes        int `json:"material"`
 	Resource     int `json:"resource"`
-	PriorCount   int `json:"previousDeliveries"`
+	OpenedCount  int `json:"openedNodes"`
 	OpenRequests int `json:"openRequests"`
 }
 
@@ -136,47 +109,29 @@ type Catalog struct {
 	NodeKinds       []NamespaceCount `json:"materialTypes"`
 }
 
-type Search struct {
-	Query      string      `json:"query"`
-	Scopes     []string    `json:"scopes"`
-	Terms      []string    `json:"terms"`
-	Candidates []Candidate `json:"candidates"`
-}
-
-type Context struct {
-	Catalog         Catalog `json:"manifest"`
-	Search          *Search `json:"search"`
-	Rendered        string  `json:"rendered"`
-	EstimatedTokens int     `json:"estimatedTokens"`
-	Hash            *string `json:"valueHash"`
-}
-
 type Result struct {
-	SchemaVersion int         `json:"schemaVersion"`
-	DecisionID    int64       `json:"decisionId"`
-	Action        string      `json:"action"`
-	Proposal      Proposal    `json:"proposal"`
-	Deliveries    []Delivery  `json:"delivery"`
-	Omitted       []Omitted   `json:"omitted"`
-	RequestID     *int64      `json:"requestId"`
-	Clarification *string     `json:"clarification"`
-	Model         Model       `json:"model"`
-	Fallback      *string     `json:"fallback"`
-	Awareness     []Awareness `json:"awareness"`
-	Context       Context     `json:"context"`
+	SchemaVersion int      `json:"schemaVersion"`
+	DecisionID    int64    `json:"decisionId"`
+	Action        string   `json:"action"`
+	Proposal      Proposal `json:"proposal"`
+	RequestID     *int64   `json:"requestId"`
+	Clarification *string  `json:"clarification"`
+	Model         Model    `json:"model"`
+	Fallback      *string  `json:"fallback"`
+	Hints         *HintMap `json:"hints,omitempty"`
 }
 
 type DecisionRecord struct {
-	ProjectID  string
-	SessionID  string
-	InputHash  string
-	InputText  *string
-	Proposal   Proposal
-	Action     string
-	Deliveries []Delivery
-	RequestID  *int64
-	Model      Model
-	Fallback   *string
+	ProjectID string
+	SessionID string
+	InputHash string
+	InputText *string
+	Proposal  Proposal
+	Action    string
+	Hints     *HintMap
+	RequestID *int64
+	Model     Model
+	Fallback  *string
 }
 
 type ContextRequest struct {
@@ -200,22 +155,22 @@ type Feedback struct {
 }
 
 type Decision struct {
-	ID            int64      `json:"id"`
-	SessionID     string     `json:"sessionId"`
-	ProjectID     string     `json:"project"`
-	InputHash     string     `json:"inputHash"`
-	InputText     *string    `json:"inputText"`
-	Proposal      Proposal   `json:"proposal"`
-	FinalAction   string     `json:"finalAction"`
-	Deliveries    []Delivery `json:"delivery"`
-	RequestID     *int64     `json:"requestId"`
-	ModelID       *string    `json:"modelId"`
-	ModelRevision *string    `json:"modelRevision"`
-	PromptVersion string     `json:"promptVersion"`
-	LatencyMS     *int       `json:"latencyMs"`
-	Fallback      *string    `json:"fallbackReason"`
-	CreatedAt     string     `json:"createdAt"`
-	Feedback      *Feedback  `json:"feedback,omitempty"`
+	ID            int64     `json:"id"`
+	SessionID     string    `json:"sessionId"`
+	ProjectID     string    `json:"project"`
+	InputHash     string    `json:"inputHash"`
+	InputText     *string   `json:"inputText"`
+	Proposal      Proposal  `json:"proposal"`
+	FinalAction   string    `json:"finalAction"`
+	Hints         *HintMap  `json:"hints,omitempty"`
+	RequestID     *int64    `json:"requestId"`
+	ModelID       *string   `json:"modelId"`
+	ModelRevision *string   `json:"modelRevision"`
+	PromptVersion string    `json:"promptVersion"`
+	LatencyMS     *int      `json:"latencyMs"`
+	Fallback      *string   `json:"fallbackReason"`
+	CreatedAt     string    `json:"createdAt"`
+	Feedback      *Feedback `json:"feedback,omitempty"`
 }
 
 func ValidateRequest(value Request) (Request, error) {
@@ -285,30 +240,10 @@ func ValidateProposal(value Proposal) (Proposal, error) {
 		}
 		value.Clarification = &clarification
 	}
-	allowedScopes := map[string]bool{"human": true, "resource": true, "material": true, "session": true}
-	seen := map[string]bool{}
-	var scopes []string
-	for _, scope := range value.Scopes {
-		scope = strings.ToLower(strings.TrimSpace(scope))
-		if scope == "code" {
-			scope = "material"
-		}
-		if !allowedScopes[scope] {
-			return Proposal{}, errors.New("prepare context: unsupported proposal scope")
-		}
-		if !seen[scope] {
-			seen[scope] = true
-			scopes = append(scopes, scope)
-		}
-	}
-	value.Scopes = scopes
-	if value.Scopes == nil {
-		value.Scopes = []string{}
-	}
 	if len(value.Keywords) > 8 {
 		return Proposal{}, errors.New("prepare context: proposal cannot contain more than 8 keywords")
 	}
-	seen = map[string]bool{}
+	seen := map[string]bool{}
 	keywords := make([]string, 0, len(value.Keywords))
 	for _, keyword := range value.Keywords {
 		keyword = strings.TrimSpace(keyword)

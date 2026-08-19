@@ -115,7 +115,7 @@ export default function App() {
         setSelectedNode(first);
         setExplanation(await Explain(first.id));
       }
-      setMessage(`${found.memories?.length ?? 0}개 메모리 · ${found.nodes?.length ?? 0}개 노드`);
+      setMessage(`${found.nodes?.length ?? 0}개 노드`);
     });
   }
 
@@ -271,7 +271,7 @@ export default function App() {
 
   async function syncEmbeddings() {
     await perform(async () => {
-      const result = await SyncEmbeddings(100);
+      const result = await SyncEmbeddings(0);
       setMessage(`${result.embedded}개 embedding 생성 · ${result.current}개 최신`);
       await refresh();
     });
@@ -353,9 +353,8 @@ export default function App() {
             <NodeDetails node={selectedNode} explanation={explanation} onSelect={node => void explainNode(node)} />
           </div>}
           {results && <div className="results">
-            {(results.memories ?? []).map(item => <article key={item.key}><span>{item.kind}</span><strong>{item.key}</strong><p>{item.value ?? item.source}</p></article>)}
             {(results.nodes ?? []).slice(0, 12).map(node => <button type="button" className="resultCard" key={node.id} onClick={() => void explainNode(node)}><span>{node.kind}</span><strong>{node.label}</strong><p>{node.content || `${node.materialUri}${node.locator ? `#${node.locator}` : ""}`}</p></button>)}
-            {(results.memories?.length ?? 0) + (results.nodes?.length ?? 0) === 0 && <p className="empty">관련 맥락을 찾지 못했습니다.</p>}
+            {(results.nodes?.length ?? 0) === 0 && <p className="empty">관련 맥락을 찾지 못했습니다.</p>}
           </div>}
 
           <div className="toolGrid">
@@ -370,7 +369,7 @@ export default function App() {
               <div><p className="eyebrow">PREPARE</p><h2>Agent 전달 맥락 미리보기</h2></div>
               <label htmlFor="prepareMessage">작업 의도</label><textarea id="prepareMessage" value={prepareMessage} onChange={event => setPrepareMessage(event.target.value)} placeholder="예: 업데이트가 의도와 Material의 연결을 보존하는지 확인해줘" />
               <button disabled={busy}>Context 준비</button>
-              {prepared && <div className="prepared"><span>{prepared.action}</span><pre>{prepared.context?.rendered || prepared.clarification || "전달할 맥락이 없습니다."}</pre>{(prepared.awareness?.length ?? 0) > 0 && <ul>{prepared.awareness.map(item => <li key={item.nodeId}><strong>{item.label}</strong><span>{item.reason}{item.relation ? ` · ${item.relation}` : ""}</span></li>)}</ul>}</div>}
+              {prepared && <div className="prepared"><span>{prepared.action}</span><pre>{prepared.hints ? JSON.stringify(prepared.hints, null, 2) : prepared.clarification || "탐색할 경로가 없습니다."}</pre></div>}
             </form>
           </div>
         </section>}
@@ -421,7 +420,7 @@ export default function App() {
               <div className="cardTitle"><div><p className="eyebrow">DECISION AUDIT</p><h3>최근 Prepare 판단</h3></div><strong>{decisions.length}</strong></div>
               {decisions.length === 0 ? <p className="empty">기록된 Prepare 판단이 없습니다.</p> : <div className="auditList">{decisions.map(decision => <details key={decision.id}>
                 <summary><span className={`action ${decision.finalAction}`}>{decision.finalAction}</span><strong>{decision.inputText || `입력 해시 ${decision.inputHash.slice(0, 12)}`}</strong><small>{relativeTime(decision.createdAt)} · {decision.modelId || "deterministic"}</small></summary>
-                <div className="auditBody"><p>{decision.proposal.reasonCode} · {(decision.delivery ?? []).map(item => item.key).join(", ") || "전달 없음"}</p>
+                <div className="auditBody"><p>{decision.proposal.reasonCode} · {(decision.hints?.nodes ?? []).map(item => item.path || item.id).join(", ") || "힌트 없음"}</p>
                   <form className="feedbackForm" onSubmit={event => void submitFeedback(event, decision.id)}>
                     <label htmlFor={`verdict-${decision.id}`}>판단 평가</label><select id={`verdict-${decision.id}`} name="verdict" defaultValue={decision.feedback?.verdict || "correct"}><option value="correct">맞음</option><option value="incorrect">수정 필요</option></select>
                     <label htmlFor={`expected-${decision.id}`}>기대한 동작</label><select id={`expected-${decision.id}`} name="expectedAction" defaultValue={decision.feedback?.expectedAction || ""}><option value="">해당 없음</option><option value="skip">skip</option><option value="retrieve">retrieve</option><option value="ask">ask</option></select>
@@ -458,7 +457,7 @@ export default function App() {
             <p className="settingsIntro">로컬 모델은 선택 사항입니다. 구조 분석과 기본 검색은 모델 없이도 동작합니다.</p>
             <div className="modelSummary"><p><strong>{model?.version || "Ollama 미연결"}</strong><span>Embedding {embeddingStatus?.current ?? 0}개 최신 · {embeddingStatus?.pending ?? 0}개 대기</span></p><button className="secondary" disabled={busy} onClick={() => void startModels()}>Ollama 시작</button><button disabled={busy || !model?.available || (embeddingStatus?.pending ?? 0) === 0} onClick={() => void syncEmbeddings()}>Embedding 동기화</button></div>
             <div className="modelRoles">{(modelState?.selected ?? []).map(selected => <form key={`${selected.role}-${selected.model}`} onSubmit={event => void selectModel(event)}>
-              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>{selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" /><button className="secondary" disabled={busy}>선택</button></div>
+              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>{selected.source === "project" ? "project · fixed" : selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" disabled={selected.role === "embedding" && selected.source === "project"} /><button className="secondary" disabled={busy || (selected.role === "embedding" && selected.source === "project")}>선택</button></div>
             </form>)}</div>
             <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><select name="installRole" aria-label="설치 후 사용할 역할"><option value="">설치만</option><option value="gate">gate</option><option value="reconcile">reconcile</option><option value="embedding">embedding</option></select><button disabled={busy}>설치</button></div></form>
           </section>

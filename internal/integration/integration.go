@@ -14,6 +14,7 @@ const (
 	startMarker = "<!-- purpory:start -->"
 	endMarker   = "<!-- purpory:end -->"
 	section     = startMarker + "\n## Purpory\n\n" +
+		"- Preflight provides graph hints, not source content. Inspect only relevant node IDs.\n" +
 		"- Before answering codebase questions, run `purpory query \"<question>\"`.\n" +
 		"- Use `purpory explain \"<concept>\"` or `purpory path \"<A>\" \"<B>\"` for focused relationships.\n" +
 		"- After modifying code, run `purpory update`.\n" + endMarker

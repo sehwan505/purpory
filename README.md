@@ -78,15 +78,15 @@ purpory project list
 purpory project remove PROJECT_ID
 purpory update
 purpory update --json
-purpory remember decision.database --kind decision --value "Use SQLite"
-purpory remember decision.database --confirm
+purpory remember --kind decision --value "Use SQLite" decision.database
+purpory remember --confirm decision.database
 purpory remember --batch changes.json          # preview
 purpory remember --batch changes.json --apply  # optimistic, atomic apply
 purpory query "database decision"
-purpory explain decision.database
-purpory path "service.go" "Service.Update()"
+purpory explain game.lol.play-rule game.lol.items
+purpory path "game.lol.play-rule" "file:docs/rules.md"
 purpory prepare "How does project update work?"
-purpory prepare "How does project update work?" --session agent-1 --path internal/app --budget 2000 --json
+purpory prepare --session agent-1 --path internal/app --budget 2000 --json "How does project update work?"
 purpory request list open
 purpory request resolve 12 decision.database
 purpory decision list
@@ -96,7 +96,8 @@ purpory model status
 purpory model start
 purpory model install qwen3-embedding:0.6b embedding
 purpory model select gate qwen3:4b
-purpory embed
+purpory embed                              # fill every missing intent/knowledge embedding
+purpory embed 100                          # optionally bound one backfill run
 purpory integration codex install
 purpory integration claude install
 ```
@@ -113,9 +114,7 @@ prompt and session-end hooks. Session-end snapshots are reconciled in a detached
 worker; only explicit user statements may become durable project memory. Failed
 jobs remain queued and are retried by the next worker. Git repositories are observed as one Resource with
 all local worktrees represented as Views; non-Git folders use the same workspace
-model. On first launch, preserved Python workspace, Session history, delivered
-context, durable memories, versions, and reconciliation audits are copied
-read-only from `~/.purpory/context.db` when present.
+model.
 
 `purpory update` discovers all local Materials, fingerprints them, extracts only
 new or changed inputs, resolves project-wide relationships, and publishes the
@@ -129,7 +128,17 @@ database and `PURPORY_OLLAMA_URL` to use a non-default Ollama endpoint.
 remote gate endpoints additionally require `PURPORY_ALLOW_REMOTE_GATE=true`.
 Reconciliation uses `qwen3.5:9b` by default; override it with
 `model select reconcile`, `PURPORY_RECONCILE_MODEL`, or its context with
-`PURPORY_RECONCILE_CONTEXT_TOKENS`. `purpory embed` materializes current memory
-vectors with the selected embedding model. Prepare then combines semantic,
-lexical, active-path, freshness, and proven-usage signals; usage alone never
-makes an unrelated memory relevant.
+`PURPORY_RECONCILE_CONTEXT_TOKENS`. The first embedding model selected or used
+is fixed for that Project. `purpory embed` backfills every missing or stale
+intent/knowledge node; later memory and reconciliation writes refresh their
+vectors immediately. Embeddings are a relative top-k candidate generator, not
+an absolute-confidence gate. Prepare starts with one semantic result and lets
+BM25 fill distinct lexical evidence; later calls advance past content already
+opened in the Session.
+Agent preflight does not inject content. It returns at most three topic-first
+paths: the leading semantic anchor, a distinct BM25 anchor when available, and
+an alternate branch when available. Typed edges are included only when they
+connect selected signposts. `query` browses path branches, `explain` opens one or
+more nodes and records that actual exploration, and `path` combines the derived
+dot hierarchy with physical graph edges. Explicit `purpory prepare` returns the
+same content-free HintMap as agent preflight.

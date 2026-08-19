@@ -57,6 +57,44 @@ func (s *Store) Projects(ctx context.Context) ([]project.Project, error) {
 	return values, rows.Err()
 }
 
+func (s *Store) ProjectEmbeddingModel(ctx context.Context, projectID string) (string, bool, error) {
+	var model string
+	err := s.db.QueryRowContext(ctx, `SELECT embedding_model FROM projects WHERE id = ?`, strings.TrimSpace(projectID)).Scan(&model)
+	if err != nil {
+		return "", false, fmt.Errorf("load project embedding model: %w", err)
+	}
+	return model, model != "", nil
+}
+
+func (s *Store) SetProjectEmbeddingModel(ctx context.Context, projectID, model string) error {
+	projectID, model = strings.TrimSpace(projectID), strings.TrimSpace(model)
+	if projectID == "" || model == "" || len(model) > 255 {
+		return errors.New("set project embedding model: project and model are required")
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE projects SET embedding_model = ?, updated_at = unixepoch()
+		WHERE id = ? AND (embedding_model = '' OR embedding_model = ?)
+	`, model, projectID, model)
+	if err != nil {
+		return fmt.Errorf("set project embedding model: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set project embedding model: result: %w", err)
+	}
+	if changed == 0 {
+		current, found, loadErr := s.ProjectEmbeddingModel(ctx, projectID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if found {
+			return fmt.Errorf("set project embedding model: project is locked to %q", current)
+		}
+		return fmt.Errorf("set project embedding model: %w", sql.ErrNoRows)
+	}
+	return nil
+}
+
 func (s *Store) RemoveProject(ctx context.Context, id string) (bool, error) {
 	result, err := s.db.ExecContext(ctx, "UPDATE projects SET registered = 0, updated_at = unixepoch() WHERE id = ? AND registered = 1", strings.TrimSpace(id))
 	if err != nil {

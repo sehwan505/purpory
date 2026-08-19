@@ -14,24 +14,21 @@ import (
 	"github.com/sehwan505/purpory/internal/prepare"
 )
 
-func (s *Store) SessionDeliveryHashes(ctx context.Context, projectID, sessionID string) (map[string]string, error) {
+func (s *Store) SessionItemKeys(ctx context.Context, projectID, sessionID string) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT key, value_hash FROM session_items
-		WHERE project_id = ? AND session_id = ? ORDER BY delivered_at DESC
+		SELECT DISTINCT key FROM session_items WHERE project_id = ? AND session_id = ?
 	`, projectID, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("load session deliveries: %w", err)
+		return nil, fmt.Errorf("load session items: %w", err)
 	}
 	defer rows.Close()
-	result := map[string]string{}
+	result := map[string]bool{}
 	for rows.Next() {
-		var key, hash string
-		if err := rows.Scan(&key, &hash); err != nil {
-			return nil, fmt.Errorf("load session deliveries: scan: %w", err)
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("load session items: scan: %w", err)
 		}
-		if _, found := result[key]; !found {
-			result[key] = hash
-		}
+		result[key] = true
 	}
 	return result, rows.Err()
 }
@@ -138,17 +135,17 @@ func (s *Store) SavePrepareDecision(ctx context.Context, record prepare.Decision
 	if err != nil {
 		return 0, fmt.Errorf("save prepare decision: encode proposal: %w", err)
 	}
-	delivery, err := json.Marshal(record.Deliveries)
+	hints, err := json.Marshal(record.Hints)
 	if err != nil {
-		return 0, fmt.Errorf("save prepare decision: encode delivery: %w", err)
+		return 0, fmt.Errorf("save prepare decision: encode hints: %w", err)
 	}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO context_decisions(
 			project_id, session_id, input_hash, input_text, proposal_json, final_action,
-			delivery_json, request_id, model_id, model_revision, prompt_version, latency_ms, fallback_reason
+			hints_json, request_id, model_id, model_revision, prompt_version, latency_ms, fallback_reason
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, record.ProjectID, record.SessionID, record.InputHash, record.InputText, string(proposal), record.Action,
-		string(delivery), record.RequestID, record.Model.ID, record.Model.Revision, prepare.PromptVersion, record.Model.LatencyMS, record.Fallback)
+		string(hints), record.RequestID, record.Model.ID, record.Model.Revision, prepare.PromptVersion, record.Model.LatencyMS, record.Fallback)
 	if err != nil {
 		return 0, fmt.Errorf("save prepare decision: %w", err)
 	}
@@ -159,111 +156,13 @@ func (s *Store) SavePrepareDecision(ctx context.Context, record prepare.Decision
 	return id, nil
 }
 
-func (s *Store) SaveAwarenessExposures(ctx context.Context, projectID, sessionID string, items []prepare.Awareness) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("save awareness exposures: begin: %w", err)
-	}
-	defer tx.Rollback()
-	for _, item := range items {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO awareness_exposures(project_id, session_id, node_id, key, label, kind, source, reason, relation)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(project_id, session_id, node_id) DO NOTHING
-		`, projectID, sessionID, item.NodeID, item.Key, item.Label, item.Kind, item.Source, item.Reason, item.Relation); err != nil {
-			return fmt.Errorf("save awareness exposures: item: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("save awareness exposures: commit: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) SessionAwarenessNodeIDs(ctx context.Context, projectID, sessionID string) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT node_id FROM awareness_exposures WHERE project_id = ? AND session_id = ?`, projectID, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("load awareness exposures: %w", err)
-	}
-	defer rows.Close()
-	result := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("load awareness exposures: scan: %w", err)
-		}
-		result[id] = true
-	}
-	return result, rows.Err()
-}
-
-func (s *Store) MarkAwarenessFollowUps(ctx context.Context, projectID, sessionID string, nodeIDs []string) error {
-	for _, nodeID := range nodeIDs {
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE awareness_exposures SET followed_up_at=COALESCE(followed_up_at, unixepoch())
-			WHERE project_id = ? AND session_id = ? AND node_id = ?
-		`, projectID, sessionID, nodeID); err != nil {
-			return fmt.Errorf("mark awareness follow-up: %w", err)
-		}
-	}
-	return nil
-}
-
-func (s *Store) AwarenessMetrics(ctx context.Context, projectID string) (exposures, followUps int, err error) {
-	err = s.db.QueryRowContext(ctx, `
-		SELECT count(*), count(followed_up_at) FROM awareness_exposures WHERE project_id = ?
-	`, projectID).Scan(&exposures, &followUps)
-	return
-}
-
-func (s *Store) AssociatedDeliveryKeys(ctx context.Context, projectID, currentSession string, anchorKeys []string, limit int) ([]string, error) {
-	if len(anchorKeys) == 0 || limit <= 0 {
-		return []string{}, nil
-	}
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(anchorKeys)), ",")
-	arguments := make([]any, 0, len(anchorKeys)*2+3)
-	arguments = append(arguments, projectID, currentSession)
-	for _, key := range anchorKeys {
-		arguments = append(arguments, key)
-	}
-	for _, key := range anchorKeys {
-		arguments = append(arguments, key)
-	}
-	arguments = append(arguments, limit)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT candidate.key
-		FROM session_items AS anchor
-		JOIN session_items AS candidate
-		  ON candidate.project_id = anchor.project_id AND candidate.session_id = anchor.session_id
-		WHERE anchor.project_id = ? AND anchor.session_id <> ?
-		  AND anchor.key IN (`+placeholders+`)
-		  AND candidate.key NOT IN (`+placeholders+`)
-		GROUP BY candidate.key
-		ORDER BY count(DISTINCT candidate.session_id) DESC, candidate.key
-		LIMIT ?
-	`, arguments...)
-	if err != nil {
-		return nil, fmt.Errorf("load delivery associations: %w", err)
-	}
-	defer rows.Close()
-	result := []string{}
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, fmt.Errorf("load delivery associations: scan: %w", err)
-		}
-		result = append(result, key)
-	}
-	return result, rows.Err()
-}
-
 func (s *Store) PrepareDecisions(ctx context.Context, projectID string, limit int) ([]prepare.Decision, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.session_id, d.project_id, d.input_hash, d.input_text, d.final_action,
-		       d.proposal_json, d.delivery_json, d.request_id, d.model_id, d.model_revision,
+		       d.proposal_json, d.hints_json, d.request_id, d.model_id, d.model_revision,
 		       d.prompt_version, d.latency_ms, d.fallback_reason, d.created_at,
 		       f.verdict, f.expected_action, f.expected_keys_json, f.note, f.created_at
 		FROM context_decisions d LEFT JOIN gate_feedback f ON f.decision_id = d.id
@@ -277,13 +176,13 @@ func (s *Store) PrepareDecisions(ctx context.Context, projectID string, limit in
 	for rows.Next() {
 		var value prepare.Decision
 		var input sql.NullString
-		var proposalJSON, deliveryJSON string
+		var proposalJSON, hintsJSON string
 		var requestID, latency, createdAt sql.NullInt64
 		var modelID, modelRevision, fallback sql.NullString
 		var verdict, expectedAction, expectedKeys, note sql.NullString
 		var feedbackAt sql.NullInt64
 		if err := rows.Scan(&value.ID, &value.SessionID, &value.ProjectID, &value.InputHash, &input, &value.FinalAction,
-			&proposalJSON, &deliveryJSON, &requestID, &modelID, &modelRevision, &value.PromptVersion, &latency, &fallback, &createdAt,
+			&proposalJSON, &hintsJSON, &requestID, &modelID, &modelRevision, &value.PromptVersion, &latency, &fallback, &createdAt,
 			&verdict, &expectedAction, &expectedKeys, &note, &feedbackAt); err != nil {
 			return nil, fmt.Errorf("load prepare decisions: scan: %w", err)
 		}
@@ -293,8 +192,8 @@ func (s *Store) PrepareDecisions(ctx context.Context, projectID string, limit in
 		if err := json.Unmarshal([]byte(proposalJSON), &value.Proposal); err != nil {
 			return nil, fmt.Errorf("load prepare decisions: decode proposal: %w", err)
 		}
-		if err := json.Unmarshal([]byte(deliveryJSON), &value.Deliveries); err != nil {
-			return nil, fmt.Errorf("load prepare decisions: decode delivery: %w", err)
+		if err := json.Unmarshal([]byte(hintsJSON), &value.Hints); err != nil {
+			return nil, fmt.Errorf("load prepare decisions: decode hints: %w", err)
 		}
 		if requestID.Valid {
 			value.RequestID = &requestID.Int64
