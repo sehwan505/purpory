@@ -125,6 +125,28 @@ func TestPrepareCLIOptions(t *testing.T) {
 	}
 }
 
+func TestExplainCLIAcceptsMultipleNodes(t *testing.T) {
+	ctx := context.Background()
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	for key, kind := range map[string]memory.Kind{"intent.one": memory.Decision, "knowledge.two": memory.Note} {
+		value := key + " content"
+		if _, err := service.Remember(ctx, key, kind, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := runCLI(ctx, service, []string{"explain", "intent.one", "knowledge.two"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var results []product.ExplainResult
+	if err := json.Unmarshal(output.Bytes(), &results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || results[0].Memory == nil || results[0].Memory.Key != "intent.one" || results[1].Memory == nil || results[1].Memory.Key != "knowledge.two" {
+		t.Fatalf("unexpected explanations: %#v", results)
+	}
+}
+
 func TestMemoryLifecycleCLI(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

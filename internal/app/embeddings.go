@@ -181,20 +181,14 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	if len(valid) == 0 {
 		return nil, nil
 	}
-	queryText := query
-	if strings.HasPrefix(model, "qwen3-embedding") {
-		queryText = "Instruct: Retrieve relevant project context\nQuery: " + query
-	}
-	vectors, err := s.ollama.Embed(ctx, model, []string{queryText}, embeddingDimensions)
+	vectors, err := s.ollama.Embed(ctx, model, []string{query}, embeddingDimensions)
 	if err != nil {
 		return nil, nil // ponytail: dense retrieval is optional; lexical and graph retrieval remain available.
 	}
 	var result []semanticMatch
 	for id, vector := range valid {
 		similarity := cosine(vectors[0], vector)
-		if similarity >= 0.6 {
-			result = append(result, semanticMatch{node: byID[id].node, score: similarity})
-		}
+		result = append(result, semanticMatch{node: byID[id].node, score: similarity})
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].score != result[j].score {

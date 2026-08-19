@@ -173,7 +173,11 @@ func (s *Service) searchAndDeliver(
 			allCandidates = append(allCandidates, prepareNodeCandidate(node))
 		}
 	}
-	semantic, err := s.semanticMatches(ctx, query, physicalGraph.nodes, 0)
+	semanticLimit := min(3, len(prior)+1)
+	if request.HintsOnly {
+		semanticLimit = 8
+	}
+	semantic, err := s.semanticMatches(ctx, query, physicalGraph.nodes, semanticLimit)
 	if err != nil {
 		return err
 	}
@@ -191,7 +195,7 @@ func (s *Service) searchAndDeliver(
 	search := &contextprepare.Search{Query: query, Scopes: normalizedScopes(result.Proposal.Scopes), Terms: terms, Candidates: ranked}
 	result.Context.Search = search
 	if request.HintsOnly {
-		result.Hints = prepareHintMap(semanticSeeds, bm25, physicalGraph.nodes, physicalGraph.edges, request.TokenBudget)
+		result.Hints = prepareHintMap(semanticSeeds, bm25, physicalGraph.nodes, physicalGraph.edges, prior, request.TokenBudget)
 		if result.Hints != nil {
 			agent := sessionAgent(request.SessionID)
 			if err := s.SaveSessionAt(ctx, request.WorkingDirectory, request.SessionID, agent, "active"); err != nil {
@@ -446,103 +450,90 @@ func uniqueCandidates(lanes ...[]contextprepare.Candidate) []contextprepare.Cand
 	return result
 }
 
-func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, budget int) *contextprepare.HintMap {
+func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, opened map[string]string, budget int) *contextprepare.HintMap {
 	byID := make(map[string]graph.Node, len(nodes))
 	for _, node := range nodes {
+		if node.Path == "" {
+			node.Path = graph.TopicPath(node)
+		}
 		byID[node.ID] = node
 	}
 	hints := &contextprepare.HintMap{}
 	selected := map[string]bool{}
-	addAnchor := func(candidate contextprepare.Candidate, match string) {
-		if selected[candidate.NodeID] {
-			return
+	branches := map[string]bool{}
+	addAnchor := func(candidate contextprepare.Candidate, match string) bool {
+		if len(hints.Nodes) == 3 || selected[candidate.NodeID] || opened[candidate.NodeID] != "" || opened[candidate.Key] != "" {
+			return false
 		}
 		node, found := byID[candidate.NodeID]
 		if !found {
-			return
+			return false
 		}
 		trial := *hints
 		trial.Nodes = append(append([]contextprepare.HintNode(nil), hints.Nodes...), prepareHintNode(node, match))
-		limit := budget / 2
-		if len(hints.Nodes) == 0 {
-			limit = budget
-		}
-		if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) > limit {
-			return
+		if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) > budget {
+			return false
 		}
 		hints.Nodes = trial.Nodes
 		selected[node.ID] = true
+		branches[topicBranch(node.Path)] = true
+		return true
 	}
-	for _, candidate := range semantic {
-		addAnchor(candidate, "semantic")
+	if len(semantic) > 0 {
+		addAnchor(semantic[0], "semantic")
 	}
 	for _, candidate := range lexical {
-		addAnchor(candidate, "bm25")
+		if addAnchor(candidate, "bm25") {
+			break
+		}
+	}
+	alternateAdded := false
+	for _, durableOnly := range []bool{true, false} {
+		for _, lane := range []struct {
+			items []contextprepare.Candidate
+			match string
+		}{{semantic, "semantic"}, {lexical, "bm25"}} {
+			for _, candidate := range lane.items {
+				node, found := byID[candidate.NodeID]
+				if found && (!durableOnly || node.Owner == graph.OwnerDurable) && !branches[topicBranch(node.Path)] && addAnchor(candidate, lane.match+":alternate-branch") {
+					alternateAdded = true
+					break
+				}
+			}
+			if alternateAdded {
+				break
+			}
+		}
+		if alternateAdded {
+			break
+		}
+	}
+	for _, lane := range []struct {
+		items []contextprepare.Candidate
+		match string
+	}{{semantic, "semantic"}, {lexical, "bm25"}} {
+		for _, candidate := range lane.items {
+			addAnchor(candidate, lane.match)
+		}
 	}
 	if len(hints.Nodes) == 0 {
 		return nil
 	}
-
-	type neighbor struct {
-		id   string
-		edge graph.Edge
-	}
-	adjacent := map[string][]neighbor{}
 	for _, edge := range edges {
-		adjacent[edge.SourceID] = append(adjacent[edge.SourceID], neighbor{edge.TargetID, edge})
-		adjacent[edge.TargetID] = append(adjacent[edge.TargetID], neighbor{edge.SourceID, edge})
-	}
-	for id := range adjacent {
-		sort.Slice(adjacent[id], func(i, j int) bool {
-			return adjacent[id][i].edge.Relation+adjacent[id][i].id < adjacent[id][j].edge.Relation+adjacent[id][j].id
-		})
-	}
-	frontier := make([]string, len(hints.Nodes))
-	for index, node := range hints.Nodes {
-		frontier[index] = node.ID
-	}
-	seenEdges := map[string]bool{}
-	for level := 0; level < 2 && len(frontier) > 0; level++ {
-		var next []string
-		for position := 0; ; position++ {
-			advanced := false
-			for _, current := range frontier {
-				if position >= len(adjacent[current]) {
-					continue
-				}
-				advanced = true
-				item := adjacent[current][position]
-				edgeKey := item.edge.SourceID + "\x00" + item.edge.Relation + "\x00" + item.edge.TargetID
-				if seenEdges[edgeKey] {
-					continue
-				}
-				edge := contextprepare.HintEdge{SourceID: item.edge.SourceID, TargetID: item.edge.TargetID, Relation: item.edge.Relation}
-				trial := *hints
-				trial.Edges = append(append([]contextprepare.HintEdge(nil), hints.Edges...), edge)
-				if !selected[item.id] {
-					node, found := byID[item.id]
-					if !found {
-						continue
-					}
-					trial.Nodes = append(append([]contextprepare.HintNode(nil), hints.Nodes...), prepareHintNode(node, "path"))
-				}
-				if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) > budget {
-					continue
-				}
-				hints.Nodes, hints.Edges = trial.Nodes, trial.Edges
-				seenEdges[edgeKey] = true
-				if !selected[item.id] {
-					selected[item.id] = true
-					next = append(next, item.id)
-				}
-			}
-			if !advanced {
-				break
+		if selected[edge.SourceID] && selected[edge.TargetID] {
+			trial := *hints
+			trial.Edges = append(append([]contextprepare.HintEdge(nil), hints.Edges...), contextprepare.HintEdge{SourceID: edge.SourceID, TargetID: edge.TargetID, Relation: edge.Relation})
+			if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) <= budget {
+				hints.Edges = trial.Edges
 			}
 		}
-		frontier = next
 	}
 	return hints
+}
+
+func topicBranch(path string) string {
+	branch, _, _ := strings.Cut(path, ".")
+	return branch
 }
 
 func prepareHintNode(node graph.Node, match string) contextprepare.HintNode {
@@ -551,7 +542,7 @@ func prepareHintNode(node graph.Node, match string) contextprepare.HintNode {
 		source += "#" + node.Locator
 	}
 	return contextprepare.HintNode{
-		ID: node.ID, Label: node.Label, Kind: node.Kind, Subkind: node.Subkind,
+		ID: node.ID, Path: node.Path, Label: node.Label, Kind: node.Kind, Subkind: node.Subkind,
 		State: node.State, Source: source, Match: match, Provenance: node.Provenance,
 	}
 }

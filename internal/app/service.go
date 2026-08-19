@@ -50,6 +50,7 @@ type QueryResult struct {
 	Seeds    []graph.Node    `json:"seeds"`
 	Nodes    []graph.Node    `json:"nodes"`
 	Edges    []graph.Edge    `json:"edges"`
+	Paths    []string        `json:"paths,omitempty"`
 }
 
 type GraphResult struct {
@@ -298,7 +299,7 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 		}
 	}
 	nodes, edges := contextGraph.neighborhood(ids, 2, limit*4)
-	return QueryResult{Memories: memories, Seeds: seeds, Nodes: nodes, Edges: edges}, nil
+	return QueryResult{Memories: memories, Seeds: seeds, Nodes: nodes, Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
 }
 
 func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResult, error) {
@@ -367,23 +368,51 @@ func searchTerms(query string) []string {
 }
 
 func (s *Service) Explain(ctx context.Context, query string) (ExplainResult, error) {
-	contextGraph, err := s.contextGraph(ctx)
+	results, err := s.ExplainMany(ctx, []string{query})
 	if err != nil {
 		return ExplainResult{}, err
 	}
-	node, found := contextGraph.find(query)
-	if !found {
-		return ExplainResult{}, fmt.Errorf("explain context: %w", sql.ErrNoRows)
+	return results[0], nil
+}
+
+func (s *Service) ExplainMany(ctx context.Context, queries []string) ([]ExplainResult, error) {
+	if len(queries) == 0 {
+		return nil, errors.New("explain context: query is required")
 	}
-	explanation := contextGraph.explanation(node)
-	result := ExplainResult{Graph: &explanation}
-	if entry, found := contextGraph.memoryByNode[node.ID]; found {
-		if err := s.store.RecordMemoryUsage(ctx, s.project.ID, entry.Key, "expanded"); err != nil {
-			return ExplainResult{}, err
+	contextGraph, err := s.contextGraph(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nodes := make([]graph.Node, len(queries))
+	for index, query := range queries {
+		node, found := contextGraph.find(query)
+		if !found {
+			return nil, fmt.Errorf("explain context %q: %w", query, sql.ErrNoRows)
 		}
-		result.Memory = &entry
+		nodes[index] = node
 	}
-	return result, nil
+	results := make([]ExplainResult, 0, len(nodes))
+	opened := make([]project.Delivery, 0, len(nodes))
+	for _, node := range nodes {
+		explanation := contextGraph.explanation(node)
+		result := ExplainResult{Graph: &explanation}
+		if entry, found := contextGraph.memoryByNode[node.ID]; found {
+			if err := s.store.RecordMemoryUsage(ctx, s.project.ID, entry.Key, "expanded"); err != nil {
+				return nil, err
+			}
+			result.Memory = &entry
+		}
+		opened = append(opened, project.Delivery{Key: node.ID, Kind: node.Kind, Label: node.Label, Source: node.Path, Preview: previewText(node.Content), Hash: contextprepare.Hash(node.ID + "\x00" + node.Content)})
+		results = append(results, result)
+	}
+	sessionID := currentSessionID("")
+	if err := s.SaveSessionAt(ctx, s.project.Root, sessionID, sessionAgent(sessionID), "active"); err != nil {
+		return nil, err
+	}
+	if err := s.store.SaveDeliveries(ctx, s.project.ID, sessionID, opened); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (s *Service) Path(ctx context.Context, source, target string) (graph.Path, error) {

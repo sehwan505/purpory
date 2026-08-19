@@ -240,17 +240,18 @@ func TestPrepareTraversesGraphPathsAndDeduplicatesAsk(t *testing.T) {
 
 func TestPrepareHintMapBudgetsSemanticBM25AndPaths(t *testing.T) {
 	nodes := []graph.Node{
-		{ID: "intent:semantic", Label: "Semantic", Kind: graph.KindIntent, Subkind: "decision", State: graph.StateActive},
-		{ID: "knowledge:lexical", Label: "Lexical", Kind: graph.KindKnowledge, Subkind: "section", State: graph.StateActive},
+		{ID: "intent:semantic", Label: "game.lol.play-rule", Kind: graph.KindIntent, Subkind: "decision", Ref: "game.lol.play-rule", Owner: graph.OwnerDurable, State: graph.StateActive},
+		{ID: "knowledge:lexical", Label: "game.lol.items", Kind: graph.KindKnowledge, Subkind: "note", Ref: "game.lol.items", Owner: graph.OwnerDurable, State: graph.StateActive},
+		{ID: "knowledge:alternate", Label: "product.discovery", Kind: graph.KindKnowledge, Subkind: "note", Ref: "product.discovery", Owner: graph.OwnerDurable, State: graph.StateActive},
 		{ID: "material:file:guide.md", Label: "guide.md", Kind: graph.KindMaterial, State: graph.StateActive, MaterialURI: "file:guide.md"},
 	}
-	edges := []graph.Edge{{SourceID: "intent:semantic", TargetID: "material:file:guide.md", Relation: graph.RelationRealizedBy}}
+	edges := []graph.Edge{{SourceID: "intent:semantic", TargetID: "knowledge:lexical", Relation: graph.RelationRealizedBy}}
 	hints := prepareHintMap(
-		[]contextprepare.Candidate{{NodeID: "intent:semantic"}},
+		[]contextprepare.Candidate{{NodeID: "intent:semantic"}, {NodeID: "knowledge:alternate"}},
 		[]contextprepare.Candidate{{NodeID: "knowledge:lexical"}},
-		nodes, edges, 512,
+		nodes, edges, nil, 512,
 	)
-	if hints == nil || len(hints.Nodes) != 3 || hints.Nodes[0].Match != "semantic" || hints.Nodes[1].Match != "bm25" || hints.Nodes[2].Match != "path" || len(hints.Edges) != 1 || contextprepare.EstimateTokens(contextprepare.RenderHintMap(hints)) > 512 {
+	if hints == nil || len(hints.Nodes) != 3 || hints.Nodes[0].Match != "semantic" || hints.Nodes[1].Match != "bm25" || hints.Nodes[2].Match != "semantic:alternate-branch" || hints.Nodes[0].Path != "game.lol.play-rule" || len(hints.Edges) != 1 || contextprepare.EstimateTokens(contextprepare.RenderHintMap(hints)) > 512 {
 		t.Fatalf("unexpected hint map: %#v", hints)
 	}
 }

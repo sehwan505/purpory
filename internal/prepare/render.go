@@ -59,7 +59,11 @@ func RenderHintMap(hints *HintMap) string {
 		if node.Source != "" {
 			details = append(details, node.Source)
 		}
-		lines = append(lines, "- "+alias+" `"+node.ID+"` ["+strings.Join(details, "; ")+"] "+node.Label)
+		address := node.ID
+		if node.Path != "" {
+			address = node.Path
+		}
+		lines = append(lines, "- "+alias+" `"+address+"` ["+strings.Join(details, "; ")+"] "+node.Label)
 	}
 	if len(hints.Edges) > 0 {
 		lines = append(lines, "Paths:")
@@ -72,9 +76,9 @@ func RenderHintMap(hints *HintMap) string {
 		}
 	}
 	lines = append(lines,
-		"Inspect a node: `purpory explain \"<node ID>\"`",
-		"Search for another need: `purpory query \"<specific question>\"`",
-		"Connect two nodes: `purpory path \"<node A>\" \"<node B>\"`",
+		"Inspect nodes: `purpory explain \"<path or node ID>\" [\"<path or node ID>\" ...]`",
+		"Browse a branch or search: `purpory query \"<path prefix or question>\"`",
+		"Connect two nodes: `purpory path \"<path or node ID>\" \"<path or node ID>\"`",
 	)
 	return strings.Join(lines, "\n")
 }

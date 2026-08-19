@@ -66,23 +66,22 @@ reconciliation audit as provenance rather than becoming graph nodes.
 
 ## Retrieval
 
-Retrieval keeps semantic and lexical anchors in separate lanes. Every embedding
-match above the similarity cutoff is selected first. If those anchors do not
-fill the anchor budget, BM25 supplies lexical anchors. The retriever then
-traverses two physical-graph hops from both anchor sets, across durable and
-observed edges alike. This supports reverse lookup and Intent-to-evidence paths
-without requiring the calling agent to plan graph traversal from scratch.
+Retrieval keeps semantic and lexical anchors in separate lanes. Embeddings rank
+a small relative top-k without pretending that cosine similarity is calibrated
+confidence. BM25 supplies distinct lexical evidence. Dot-separated durable keys
+form a topic-first hierarchy projected at query time; physical edges retain the
+cross-topic and Intent-to-evidence relationships.
 
-Preflight renders the selected anchors and paths as a content-free navigable
-subgraph: full stable IDs appear once in the node table, while edges use compact
-aliases. The agent chooses which node to load with `explain`, finds another
-anchor with `query`, or connects two nodes with `path`. Explicit `prepare` calls
-use the same selection order but may deliver content directly.
+Preflight renders at most three content-free signposts: the leading semantic
+path, a distinct BM25 path when available, and an alternate topic branch when
+available. The agent chooses one or more nodes to load with `explain`, browses a
+branch with `query`, or connects paths with `path`. Only nodes actually opened
+by the Session suppress later suggestions; merely receiving a HintMap does not.
 
-There is no forced minimum result count: no valid match means no hint. Empty
-graph nodes may appear as path bridges, while workspace Resources remain outside
-the physical knowledge graph. Exact per-session content suppression and token
-budgeting still apply. Personalized PageRank becomes
+There is no forced minimum result count: no valid embedding or lexical candidate
+means no hint. Workspace Resources remain outside the physical knowledge graph.
+Exact per-session content suppression and token budgeting still apply.
+Personalized PageRank becomes
 justified only when a multi-hop evaluation shows that this bounded traversal
 loses relevant evidence.
 
@@ -115,8 +114,8 @@ The engine must keep these checks runnable without a model or network:
 4. `update` preserves durable edges while targets disappear and reconnects them when
    targets return;
 5. Graph, Explain, and Path traverse Intent and observed evidence together;
-6. prepare orders valid semantic evidence before BM25 fallback and traversed
-   graph evidence within the token budget;
+6. prepare keeps semantic top-k and BM25 evidence distinct within the token
+   budget, while preflight never includes node content;
 7. an unresolved durable target is visible rather than silently discarded;
 8. Workspace Sessions never project into the canonical graph.
 

@@ -60,6 +60,27 @@ func TestPrepareNodeCandidateUsesKnowledgeSubkind(t *testing.T) {
 	}
 }
 
+func TestTopicPathsExposeBranchesAndConnectRelatedLeaves(t *testing.T) {
+	nodes := []graph.Node{
+		{ID: "intent:rule", Label: "game.lol.play-rule", Kind: graph.KindIntent, Ref: "game.lol.play-rule", Owner: graph.OwnerDurable, State: graph.StateActive},
+		{ID: "knowledge:items", Label: "game.lol.items", Kind: graph.KindKnowledge, Ref: "game.lol.items", Owner: graph.OwnerDurable, State: graph.StateActive},
+		{ID: "knowledge:discovery", Label: "product.discovery", Kind: graph.KindKnowledge, Ref: "product.discovery", Owner: graph.OwnerDurable, State: graph.StateActive},
+	}
+	current := newContextGraph(nil, nodes, nil)
+	branches := current.branches("game.lol", 10)
+	if len(branches) != 2 || branches[0] != "game.lol.items" || branches[1] != "game.lol.play-rule" {
+		t.Fatalf("unexpected topic branches: %#v", branches)
+	}
+	found, ok := current.find("game.lol.play-rule")
+	if !ok || found.ID != "intent:rule" {
+		t.Fatalf("topic path did not resolve: %#v", found)
+	}
+	path, err := current.path("game.lol.play-rule", "game.lol.items")
+	if err != nil || len(path.Edges) != 0 || len(path.TopicPaths) != 3 || path.TopicPaths[1] != "game.lol" {
+		t.Fatalf("semantic hierarchy did not connect leaves: %#v %v", path, err)
+	}
+}
+
 func TestReconciliationOffersOnlyTranscriptMentionedMaterials(t *testing.T) {
 	messages := []reconcile.Message{{Role: "assistant", Text: "Implemented the result in internal/app/service.go."}}
 	materials := []material.Material{{URI: "file:README.md"}, {URI: "file:internal/app/service.go"}}

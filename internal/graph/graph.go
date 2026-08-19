@@ -1,6 +1,8 @@
 // Package graph defines the structural graph shared by indexing and retrieval.
 package graph
 
+import "strings"
+
 const (
 	KindIntent    = "intent"
 	KindMaterial  = "material"
@@ -28,6 +30,7 @@ func IsIntentMaterialRelation(value string) bool {
 
 type Node struct {
 	ID          string `json:"id"`
+	Path        string `json:"path,omitempty"`
 	Label       string `json:"label"`
 	Kind        string `json:"kind"`
 	Subkind     string `json:"subkind,omitempty"`
@@ -39,6 +42,18 @@ type Node struct {
 	MaterialURI string `json:"materialUri,omitempty"`
 	Locator     string `json:"locator,omitempty"`
 	Content     string `json:"content,omitempty"`
+}
+
+// TopicPath projects a durable memory key as a kind-independent path. Observed
+// nodes keep their stable Material address instead of inventing a taxonomy.
+func TopicPath(node Node) string {
+	if node.Owner == OwnerDurable {
+		return strings.TrimPrefix(node.Ref, node.Kind+".")
+	}
+	if node.MaterialURI != "" && node.Locator != "" {
+		return node.MaterialURI + "#" + node.Locator
+	}
+	return node.MaterialURI
 }
 
 type Edge struct {
@@ -77,9 +92,11 @@ type Connection struct {
 type Explanation struct {
 	Node        Node         `json:"node"`
 	Connections []Connection `json:"connections"`
+	Paths       []string     `json:"paths,omitempty"`
 }
 
 type Path struct {
-	Nodes []Node `json:"nodes"`
-	Edges []Edge `json:"edges"`
+	Nodes      []Node   `json:"nodes"`
+	Edges      []Edge   `json:"edges"`
+	TopicPaths []string `json:"topicPaths,omitempty"`
 }

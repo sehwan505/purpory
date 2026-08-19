@@ -110,6 +110,7 @@ type HintMap struct {
 
 type HintNode struct {
 	ID         string `json:"id"`
+	Path       string `json:"path,omitempty"`
 	Label      string `json:"label"`
 	Kind       string `json:"kind"`
 	Subkind    string `json:"subkind,omitempty"`

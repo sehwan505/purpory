@@ -14,6 +14,7 @@ import (
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/reconcile"
+	"github.com/sehwan505/purpory/internal/store"
 )
 
 func useEmbeddingServer(t *testing.T) {
@@ -55,9 +56,13 @@ func useSelectiveEmbeddingServer(t *testing.T) {
 		vectors := make([][]float64, len(body.Input))
 		for index, input := range body.Input {
 			vectors[index] = make([]float64, embeddingDimensions)
-			if strings.Contains(input, "Instruct:") || strings.Contains(input, "Dense-only") {
+			switch {
+			case input == "fallback-marker":
 				vectors[index][0] = 1
-			} else {
+			case strings.Contains(input, "Dense-only"):
+				vectors[index][0] = 0.5
+				vectors[index][1] = 0.8660254037844386
+			default:
 				vectors[index][1] = 1
 			}
 		}
@@ -210,7 +215,7 @@ func TestSemanticMapProgressesAcrossSessionCalls(t *testing.T) {
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	request := contextprepare.Request{Message: query, SessionID: "codex:map", WorkingDirectory: root, TokenBudget: 512}
 	first, err := service.PrepareContext(ctx, request)
-	if err != nil || len(first.Deliveries) <= 2 || first.Context.EstimatedTokens > request.TokenBudget {
+	if err != nil || len(first.Deliveries) != 1 || first.Context.EstimatedTokens > request.TokenBudget {
 		t.Fatalf("first semantic map failed: %#v %v", first, err)
 	}
 	second, err := service.PrepareContext(ctx, request)
@@ -225,5 +230,89 @@ func TestSemanticMapProgressesAcrossSessionCalls(t *testing.T) {
 		if firstIDs[delivery.NodeID] {
 			t.Fatalf("session map did not progress: first=%#v second=%#v", first.Deliveries, second.Deliveries)
 		}
+	}
+}
+
+func TestHintExplorationUsesPathsAndSkipsOnlyOpenedNodes(t *testing.T) {
+	useEmbeddingServer(t)
+	t.Setenv("PURPORY_SESSION", "codex:explore")
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "guide.md"), []byte("# Rules\nDestroy the opposing nexus.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	if _, err := service.Update(ctx); err != nil {
+		t.Fatal(err)
+	}
+	value := "롤의 승리 조건과 기본 플레이 규칙"
+	entry, err := memory.New("demo", "game.lol.play-rule", memory.Decision, &value, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.ReconcileMemories(ctx, "codex:explore", []store.MemoryProposal{{
+		Memory: entry, EvidenceIDs: []string{"U000001"}, Links: []graph.Link{{
+			SourceKind: graph.KindIntent, SourceRef: entry.Key, Relation: graph.RelationRealizedBy,
+			TargetKind: graph.KindMaterial, TargetRef: "file:guide.md",
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{
+		"game.lol.items":    "Items available in League of Legends",
+		"product.discovery": "Explore a different product direction",
+	} {
+		value := value
+		if _, err := service.Remember(ctx, key, memory.Note, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SyncEmbeddings(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	query := "롤 플레이 규칙"
+	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Scopes: []string{"human"}, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
+	request := contextprepare.Request{Message: query, SessionID: "codex:explore", WorkingDirectory: root, TokenBudget: 512, HintsOnly: true}
+	first, err := service.PrepareContext(ctx, request)
+	if err != nil || first.Hints == nil || len(first.Hints.Nodes) == 0 || len(first.Hints.Nodes) > 3 {
+		t.Fatalf("first hint map failed: %#v %v", first, err)
+	}
+	rendered := contextprepare.RenderHintMap(first.Hints)
+	t.Logf("first hook hint map:\n%s", rendered)
+	if !strings.Contains(rendered, "game.") || strings.Contains(rendered, "승리 조건") {
+		t.Fatalf("hint map was not a content-free semantic signpost: %q", rendered)
+	}
+	opened := first.Hints.Nodes[0]
+	if _, err := service.Explain(ctx, opened.Path); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.PrepareContext(ctx, request)
+	if err != nil || second.Hints == nil {
+		t.Fatalf("second hint map failed: %#v %v", second, err)
+	}
+	for _, hint := range second.Hints.Nodes {
+		if hint.ID == opened.ID {
+			t.Fatalf("opened path was suggested again: %#v", second.Hints)
+		}
+	}
+	branch, err := service.Query(ctx, "game.lol", 10)
+	if err != nil || len(branch.Paths) != 2 {
+		t.Fatalf("topic branch was not browsable: %#v %v", branch.Paths, err)
+	}
+	path, err := service.Path(ctx, "game.lol.play-rule", "game.lol.items")
+	if err != nil || len(path.TopicPaths) == 0 {
+		t.Fatalf("topic leaves were not connectable: %#v %v", path, err)
+	}
+	crossEdge, err := service.Path(ctx, "game.lol.play-rule", "file:guide.md")
+	if err != nil || len(crossEdge.Edges) != 1 || crossEdge.Edges[0].Relation != graph.RelationRealizedBy {
+		t.Fatalf("physical cross-edge was not traversable: %#v %v", crossEdge, err)
+	}
+	t.Logf("topic path: %#v; physical edge: %#v", path.TopicPaths, crossEdge.Edges)
+	english, err := service.Query(ctx, "product", 10)
+	if err != nil || len(english.Paths) != 1 || english.Paths[0] != "product.discovery" {
+		t.Fatalf("English branch exploration failed: %#v %v", english.Paths, err)
 	}
 }

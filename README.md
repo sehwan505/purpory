@@ -83,8 +83,8 @@ purpory remember decision.database --confirm
 purpory remember --batch changes.json          # preview
 purpory remember --batch changes.json --apply  # optimistic, atomic apply
 purpory query "database decision"
-purpory explain decision.database
-purpory path "service.go" "Service.Update()"
+purpory explain game.lol.play-rule game.lol.items
+purpory path "game.lol.play-rule" "file:docs/rules.md"
 purpory prepare "How does project update work?"
 purpory prepare "How does project update work?" --session agent-1 --path internal/app --budget 2000 --json
 purpory request list open
@@ -133,13 +133,14 @@ Reconciliation uses `qwen3.5:9b` by default; override it with
 `PURPORY_RECONCILE_CONTEXT_TOKENS`. The first embedding model selected or used
 is fixed for that Project. `purpory embed` backfills every missing or stale
 intent/knowledge node; later memory and reconciliation writes refresh their
-vectors immediately. Prepare first delivers content whose embedding clears the
-similarity cutoff, fills any remaining token budget with BM25 matches, then
-uses their physical-graph paths if budget remains. It does not force a minimum
-result count, and contentless Resources are never direct evidence.
-Agent preflight does not inject that content. It returns a compact project map
-with semantic anchors first, BM25 fallback anchors next, and round-robin two-hop
-paths in the remaining hint budget. Stable node IDs appear once, typed edges use
-short aliases, and exact `purpory explain`, `query`, and `path` commands let the
-agent load only what it needs. Explicit `purpory prepare` remains available when
-direct content delivery is requested.
+vectors immediately. Embeddings are a relative top-k candidate generator, not
+an absolute-confidence gate. Prepare starts with one semantic result and lets
+BM25 fill distinct lexical evidence; later calls advance past content already
+opened in the Session.
+Agent preflight does not inject content. It returns at most three topic-first
+paths: the leading semantic anchor, a distinct BM25 anchor when available, and
+an alternate branch when available. Typed edges are included only when they
+connect selected signposts. `query` browses path branches, `explain` opens one or
+more nodes and records that actual exploration, and `path` combines the derived
+dot hierarchy with physical graph edges. Explicit `purpory prepare` remains the
+direct content-delivery command.

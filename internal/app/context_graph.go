@@ -31,6 +31,9 @@ func (s *Service) contextGraph(ctx context.Context) (contextGraph, error) {
 
 func newContextGraph(memories []memory.Memory, nodes []graph.Node, edges []graph.Edge) contextGraph {
 	result := contextGraph{nodes: nodes, edges: edges, memoryByNode: map[string]memory.Memory{}}
+	for index := range result.nodes {
+		result.nodes[index].Path = graph.TopicPath(result.nodes[index])
+	}
 	for _, entry := range memories {
 		result.memoryByNode[memoryNodeID(entry)] = entry
 	}
@@ -51,7 +54,7 @@ func (g contextGraph) find(query string) (graph.Node, bool) {
 		return graph.Node{}, false
 	}
 	for _, node := range g.nodes {
-		if node.ID == query || node.Label == query {
+		if node.ID == query || node.Label == query || node.Path == query {
 			return node, true
 		}
 	}
@@ -78,7 +81,7 @@ func (g contextGraph) seeds(query string) []string {
 	query = strings.ToLower(strings.TrimSpace(query))
 	var result []string
 	for _, node := range g.nodes {
-		if query == "" || strings.Contains(strings.ToLower(strings.Join([]string{node.ID, node.Label, node.Kind, node.MaterialURI, node.Locator, node.Content}, " ")), query) {
+		if query == "" || strings.Contains(strings.ToLower(strings.Join([]string{node.ID, node.Path, node.Label, node.Kind, node.MaterialURI, node.Locator, node.Content}, " ")), query) {
 			result = append(result, node.ID)
 		}
 	}
@@ -162,6 +165,63 @@ func (g contextGraph) explanation(node graph.Node) graph.Explanation {
 	sort.Slice(result.Connections, func(i, j int) bool {
 		return result.Connections[i].Direction+result.Connections[i].Relation+result.Connections[i].Node.Label < result.Connections[j].Direction+result.Connections[j].Relation+result.Connections[j].Node.Label
 	})
+	if parent := topicParent(node.Path); parent != "" {
+		result.Paths = g.branches(parent, 12)
+	}
+	return result
+}
+
+func (g contextGraph) branches(prefix string, limit int) []string {
+	prefix = strings.TrimSuffix(strings.TrimSpace(prefix), ".")
+	seen := map[string]bool{}
+	var result []string
+	for _, node := range g.nodes {
+		path := node.Path
+		if path == "" || path != prefix && !strings.HasPrefix(path, prefix+".") {
+			continue
+		}
+		branch := path
+		if rest := strings.TrimPrefix(path, prefix+"."); path != prefix {
+			if segment, _, found := strings.Cut(rest, "."); found {
+				branch = prefix + "." + segment
+			}
+		}
+		if !seen[branch] {
+			seen[branch] = true
+			result = append(result, branch)
+		}
+	}
+	sort.Strings(result)
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result
+}
+
+func topicParent(path string) string {
+	last := strings.LastIndex(path, ".")
+	if last < 0 {
+		return ""
+	}
+	return path[:last]
+}
+
+func topicBridge(source, target string) []string {
+	left, right := strings.Split(source, "."), strings.Split(target, ".")
+	common := 0
+	for common < len(left) && common < len(right) && left[common] == right[common] {
+		common++
+	}
+	if common == 0 {
+		return nil
+	}
+	var result []string
+	for end := len(left); end >= common; end-- {
+		result = append(result, strings.Join(left[:end], "."))
+	}
+	for end := common + 1; end <= len(right); end++ {
+		result = append(result, strings.Join(right[:end], "."))
+	}
 	return result
 }
 
@@ -203,7 +263,11 @@ func (g contextGraph) path(sourceQuery, targetQuery string) (graph.Path, error) 
 		}
 	}
 	if _, found := previous[target.ID]; !found {
-		return graph.Path{}, sql.ErrNoRows
+		bridge := topicBridge(source.Path, target.Path)
+		if len(bridge) == 0 {
+			return graph.Path{}, sql.ErrNoRows
+		}
+		return graph.Path{Nodes: []graph.Node{source, target}, TopicPaths: bridge}, nil
 	}
 	ids := []string{target.ID}
 	var edges []graph.Edge
@@ -223,7 +287,7 @@ func (g contextGraph) path(sourceQuery, targetQuery string) (graph.Path, error) 
 	for _, node := range g.nodes {
 		byID[node.ID] = node
 	}
-	result := graph.Path{Edges: edges}
+	result := graph.Path{Edges: edges, TopicPaths: topicBridge(source.Path, target.Path)}
 	for _, id := range ids {
 		result.Nodes = append(result.Nodes, byID[id])
 	}

@@ -263,10 +263,10 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			return nil
 		}
 	case "explain":
-		if len(arguments) != 2 {
-			return errors.New("explain requires one key or node")
+		if len(arguments) < 2 {
+			return errors.New("explain requires at least one key or node")
 		}
-		result, err := service.Explain(ctx, arguments[1])
+		result, err := service.ExplainMany(ctx, arguments[1:])
 		return writeJSON(output, result, err)
 	case "path":
 		if len(arguments) != 3 {
