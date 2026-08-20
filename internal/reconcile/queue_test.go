@@ -41,7 +41,7 @@ func TestQueueSnapshotsAndCompletesIdempotently(t *testing.T) {
 		t.Fatalf("failed job was not retained: %v", err)
 	}
 	runs, err := Runs("demo", 20)
-	if err != nil || len(runs) != 1 || runs[0].Phase != PhaseFailed || runs[0].Detail != "model unavailable" {
+	if err != nil || len(runs) != 1 || runs[0].Phase != PhaseFailed || runs[0].Detail != "model unavailable" || runs[0].CWD != root || runs[0].Reason != "exit" {
 		t.Fatalf("failed run was not visible: %#v %v", runs, err)
 	}
 	if err := Process(first, func(Job) error { calls++; return SetPhase(first, PhaseApplying, "후보 1개 저장") }); err != nil {

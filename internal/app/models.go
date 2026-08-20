@@ -35,22 +35,13 @@ func (s *Service) modelName(ctx context.Context, role string) (ModelSelection, e
 	if !found {
 		return ModelSelection{}, errors.New("select model: role must be gate, reconcile, or embedding")
 	}
-	if role == "embedding" {
-		if value, found, err := s.store.ProjectEmbeddingModel(ctx, s.project.ID); err != nil {
-			return ModelSelection{}, err
-		} else if found {
-			return ModelSelection{Role: role, Model: value, Source: "project"}, nil
-		}
-	}
 	if value := strings.TrimSpace(os.Getenv(config.environment)); value != "" {
 		return ModelSelection{Role: role, Model: value, Source: "environment"}, nil
 	}
-	if role != "embedding" {
-		if value, found, err := s.store.Setting(ctx, "model."+role); err != nil {
-			return ModelSelection{}, err
-		} else if found {
-			return ModelSelection{Role: role, Model: value, Source: "setting"}, nil
-		}
+	if value, found, err := s.store.Setting(ctx, "model."+role); err != nil {
+		return ModelSelection{}, err
+	} else if found {
+		return ModelSelection{Role: role, Model: value, Source: "setting"}, nil
 	}
 	return ModelSelection{Role: role, Model: config.defaultName, Source: "default"}, nil
 }
@@ -74,12 +65,6 @@ func (s *Service) SelectModel(ctx context.Context, role, model string) (ModelSel
 	}
 	if model == "" || len(model) > 255 {
 		return ModelSelection{}, errors.New("select model: model is required")
-	}
-	if role == "embedding" {
-		if err := s.store.SetProjectEmbeddingModel(ctx, s.project.ID, model); err != nil {
-			return ModelSelection{}, err
-		}
-		return ModelSelection{Role: role, Model: model, Source: "project"}, nil
 	}
 	if err := s.store.SaveSetting(ctx, "model."+role, model); err != nil {
 		return ModelSelection{}, err

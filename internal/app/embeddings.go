@@ -67,9 +67,12 @@ func (s *Service) EmbeddingStatus(ctx context.Context) (EmbeddingStatus, error) 
 // SyncEmbeddings fills every missing or stale intent/knowledge embedding.
 // A positive limit bounds one invocation; zero processes the whole project.
 func (s *Service) SyncEmbeddings(ctx context.Context, limit int) (EmbeddingSyncResult, error) {
-	selected, err := s.lockEmbeddingModel(ctx)
+	selected, err := s.modelName(ctx, "embedding")
 	if err != nil {
 		return EmbeddingSyncResult{}, err
+	}
+	if selected.Model == "" {
+		return EmbeddingSyncResult{}, fmt.Errorf("sync embeddings: no embedding model selected")
 	}
 	nodes, _, err := s.store.Graph(ctx, s.project.ID)
 	if err != nil {
@@ -79,26 +82,9 @@ func (s *Service) SyncEmbeddings(ctx context.Context, limit int) (EmbeddingSyncR
 	return EmbeddingSyncResult{Model: selected.Model, Embedded: embedded, Current: current}, err
 }
 
-func (s *Service) lockEmbeddingModel(ctx context.Context) (ModelSelection, error) {
-	selected, err := s.modelName(ctx, "embedding")
-	if err != nil {
-		return ModelSelection{}, err
-	}
-	if selected.Model == "" {
-		return ModelSelection{}, fmt.Errorf("sync embeddings: no embedding model selected")
-	}
-	if selected.Source != "project" {
-		if err := s.store.SetProjectEmbeddingModel(ctx, s.project.ID, selected.Model); err != nil {
-			return ModelSelection{}, err
-		}
-		selected.Source = "project"
-	}
-	return selected, nil
-}
-
 func (s *Service) syncNodeEmbeddings(ctx context.Context, nodeIDs []string) error {
-	model, configured, err := s.store.ProjectEmbeddingModel(ctx, s.project.ID)
-	if err != nil || !configured || len(nodeIDs) == 0 {
+	selected, err := s.modelName(ctx, "embedding")
+	if err != nil || selected.Model == "" || selected.Source == "default" || len(nodeIDs) == 0 {
 		return err
 	}
 	wanted := map[string]bool{}
@@ -115,7 +101,7 @@ func (s *Service) syncNodeEmbeddings(ctx context.Context, nodeIDs []string) erro
 			candidates = append(candidates, candidate)
 		}
 	}
-	_, _, err = s.syncEmbeddingCandidates(ctx, model, candidates, 0)
+	_, _, err = s.syncEmbeddingCandidates(ctx, selected.Model, candidates, 0)
 	return err
 }
 
@@ -159,12 +145,12 @@ func (s *Service) syncEmbeddingCandidates(ctx context.Context, model string, can
 }
 
 func (s *Service) semanticMatches(ctx context.Context, query string, nodes []graph.Node, limit int) ([]semanticMatch, error) {
-	model, configured, err := s.store.ProjectEmbeddingModel(ctx, s.project.ID)
-	if err != nil || !configured {
+	selected, err := s.modelName(ctx, "embedding")
+	if err != nil || selected.Model == "" || selected.Source == "default" {
 		return nil, err
 	}
 	candidates := embeddingCandidates(nodes)
-	existing, err := s.store.Embeddings(ctx, s.project.ID, model)
+	existing, err := s.store.Embeddings(ctx, s.project.ID, selected.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +167,7 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	if len(valid) == 0 {
 		return nil, nil
 	}
-	vectors, err := s.ollama.Embed(ctx, model, []string{query}, embeddingDimensions)
+	vectors, err := s.ollama.Embed(ctx, selected.Model, []string{query}, embeddingDimensions)
 	if err != nil {
 		return nil, nil // ponytail: dense retrieval is optional; lexical and graph retrieval remain available.
 	}

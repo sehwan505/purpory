@@ -133,19 +133,22 @@ func TestPrepareFillsRemainingEmbeddingBudgetWithBM25(t *testing.T) {
 	}
 }
 
-func TestReconcileEmbedsIntentAndKnowledgeWithLockedProjectModel(t *testing.T) {
+func TestReconcileEmbedsIntentAndKnowledgeWithGlobalModel(t *testing.T) {
 	useEmbeddingServer(t)
 	ctx := context.Background()
 	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
 	selected, err := service.SelectModel(ctx, "embedding", "tiny-embed")
-	if err != nil || selected.Source != "project" {
-		t.Fatalf("project model was not selected: %#v %v", selected, err)
+	if err != nil || selected.Source != "setting" {
+		t.Fatalf("global model was not selected: %#v %v", selected, err)
 	}
 	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
 		t.Fatalf("selecting the locked model should be idempotent: %v", err)
 	}
-	if _, err := service.SelectModel(ctx, "embedding", "other-embed"); err == nil || !strings.Contains(err.Error(), "locked") {
-		t.Fatalf("embedding model changed after project lock: %v", err)
+	if changed, err := service.SelectModel(ctx, "embedding", "other-embed"); err != nil || changed.Model != "other-embed" {
+		t.Fatalf("global embedding model did not change: %#v %v", changed, err)
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
+		t.Fatal(err)
 	}
 
 	candidates := []reconcile.Candidate{

@@ -26,6 +26,188 @@ func (s *Store) SaveWorkspace(ctx context.Context, projectID string, resources [
 	return nil
 }
 
+func (s *Store) SaveObservations(ctx context.Context, resources []project.Resource) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("save observations: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if err := saveObservations(ctx, tx, resources); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save observations: commit: %w", err)
+	}
+	return nil
+}
+
+func saveObservations(ctx context.Context, tx *sql.Tx, resources []project.Resource) error {
+	for _, resource := range resources {
+		if strings.TrimSpace(resource.ID) == "" || strings.TrimSpace(resource.Provider) == "" || strings.TrimSpace(resource.Identity) == "" {
+			return errors.New("save observations: resource ID, provider, and identity are required")
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO resource_observations(id, provider, label, identity) VALUES (?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, label=excluded.label,
+				identity=excluded.identity, observed_at=unixepoch()
+		`, resource.ID, resource.Provider, resource.Label, resource.Identity); err != nil {
+			return fmt.Errorf("save observations: resource: %w", err)
+		}
+		for _, view := range resource.Views {
+			if strings.TrimSpace(view.ID) == "" || strings.TrimSpace(view.Root) == "" {
+				return errors.New("save observations: view ID and root are required")
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO view_observations(id, resource_id, root, branch, revision, dirty, available)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(id) DO UPDATE SET resource_id=excluded.resource_id, root=excluded.root,
+					branch=excluded.branch, revision=excluded.revision, dirty=excluded.dirty,
+					available=excluded.available, observed_at=unixepoch()
+			`, view.ID, resource.ID, view.Root, view.Branch, view.Revision, view.Dirty, view.Available); err != nil {
+				return fmt.Errorf("save observations: view: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) Observations(ctx context.Context) ([]project.Observation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, provider, label, identity, observed_at
+		FROM resource_observations ORDER BY observed_at DESC, label
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list observations: %w", err)
+	}
+	defer rows.Close()
+	var values []project.Observation
+	for rows.Next() {
+		var value project.Observation
+		var observed int64
+		if err := rows.Scan(&value.Resource.ID, &value.Resource.Provider, &value.Resource.Label, &value.Resource.Identity, &observed); err != nil {
+			return nil, fmt.Errorf("list observations: scan: %w", err)
+		}
+		value.ObservedAt = time.Unix(observed, 0).UTC().Format(time.RFC3339)
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("list observations: rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("list observations: close: %w", err)
+	}
+	for index := range values {
+		value := &values[index]
+		viewRows, err := s.db.QueryContext(ctx, `
+			SELECT id, root, branch, revision, dirty, available, observed_at
+			FROM view_observations WHERE resource_id = ? ORDER BY observed_at DESC
+		`, value.Resource.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list observations: views: %w", err)
+		}
+		for viewRows.Next() {
+			var view project.View
+			var observed int64
+			if err := viewRows.Scan(&view.ID, &view.Root, &view.Branch, &view.Revision, &view.Dirty, &view.Available, &observed); err != nil {
+				viewRows.Close()
+				return nil, fmt.Errorf("list observations: scan view: %w", err)
+			}
+			view.ObservedAt = time.Unix(observed, 0).UTC().Format(time.RFC3339)
+			value.Resource.Views = append(value.Resource.Views, view)
+		}
+		if err := viewRows.Close(); err != nil {
+			return nil, fmt.Errorf("list observations: close views: %w", err)
+		}
+		projectRows, err := s.db.QueryContext(ctx, `
+			SELECT r.project_id FROM resources r JOIN projects p ON p.id = r.project_id
+			WHERE r.id = ? AND p.registered = 1 ORDER BY r.project_id
+		`, value.Resource.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list observations: projects: %w", err)
+		}
+		for projectRows.Next() {
+			var projectID string
+			if err := projectRows.Scan(&projectID); err != nil {
+				projectRows.Close()
+				return nil, fmt.Errorf("list observations: scan project: %w", err)
+			}
+			value.ProjectIDs = append(value.ProjectIDs, projectID)
+		}
+		if err := projectRows.Close(); err != nil {
+			return nil, fmt.Errorf("list observations: close projects: %w", err)
+		}
+	}
+	return values, nil
+}
+
+func (s *Store) AssignObservation(ctx context.Context, projectID, resourceID string) error {
+	projectID, resourceID = strings.TrimSpace(projectID), strings.TrimSpace(resourceID)
+	if projectID == "" || resourceID == "" {
+		return errors.New("assign observation: project and resource are required")
+	}
+	if _, err := s.Project(ctx, projectID); err != nil {
+		return fmt.Errorf("assign observation: %w", err)
+	}
+	var resource project.Resource
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT id, provider, label, identity FROM resource_observations WHERE id = ?
+	`, resourceID).Scan(&resource.ID, &resource.Provider, &resource.Label, &resource.Identity); err != nil {
+		return fmt.Errorf("assign observation: load resource: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, root, branch, revision, dirty, available, observed_at
+		FROM view_observations WHERE resource_id = ? ORDER BY observed_at DESC
+	`, resourceID)
+	if err != nil {
+		return fmt.Errorf("assign observation: views: %w", err)
+	}
+	for rows.Next() {
+		var view project.View
+		var observed int64
+		if err := rows.Scan(&view.ID, &view.Root, &view.Branch, &view.Revision, &view.Dirty, &view.Available, &observed); err != nil {
+			rows.Close()
+			return fmt.Errorf("assign observation: scan view: %w", err)
+		}
+		view.ObservedAt = time.Unix(observed, 0).UTC().Format(time.RFC3339)
+		resource.Views = append(resource.Views, view)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("assign observation: close views: %w", err)
+	}
+	return s.SaveWorkspace(ctx, projectID, []project.Resource{resource})
+}
+
+func (s *Store) UnassignResource(ctx context.Context, projectID, resourceID string) (bool, error) {
+	projectID, resourceID = strings.TrimSpace(projectID), strings.TrimSpace(resourceID)
+	if projectID == "" || resourceID == "" {
+		return false, errors.New("unassign resource: project and resource are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("unassign resource: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE sessions SET view_id = NULL
+		WHERE project_id = ? AND view_id IN (SELECT id FROM views WHERE project_id = ? AND resource_id = ?)
+	`, projectID, projectID, resourceID); err != nil {
+		return false, fmt.Errorf("unassign resource: preserve sessions: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM resources WHERE project_id = ? AND id = ?`, projectID, resourceID)
+	if err != nil {
+		return false, fmt.Errorf("unassign resource: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("unassign resource: result: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("unassign resource: commit: %w", err)
+	}
+	return changed > 0, nil
+}
+
 func saveWorkspace(ctx context.Context, tx *sql.Tx, projectID string, resources []project.Resource) error {
 	for _, resource := range resources {
 		if _, err := tx.ExecContext(ctx, `

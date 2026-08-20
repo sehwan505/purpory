@@ -20,7 +20,7 @@ func (s *Service) Prepare(ctx context.Context, message string, tokenBudget int) 
 	}
 	return s.PrepareContext(ctx, contextprepare.Request{
 		Message: message, SessionID: currentSessionID(""), ProjectID: s.project.ID,
-		WorkingDirectory: s.project.Root, TokenBudget: tokenBudget,
+		WorkingDirectory: s.currentRoot(ctx), TokenBudget: tokenBudget,
 	})
 }
 
@@ -32,7 +32,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		request.ProjectID = s.project.ID
 	}
 	if strings.TrimSpace(request.WorkingDirectory) == "" {
-		request.WorkingDirectory = s.project.Root
+		request.WorkingDirectory = s.currentRoot(ctx)
 	}
 	if request.TokenBudget == 0 {
 		request.TokenBudget = 2_000
@@ -41,7 +41,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	request.ActivePaths = normalizeActivePaths(s.project.Root, request.ActivePaths)
+	request.ActivePaths = normalizeActivePaths(s.currentRoot(ctx), request.ActivePaths)
 	if request.ProjectID != s.project.ID {
 		return PrepareResult{}, errors.New("prepare context: requested project is not active")
 	}

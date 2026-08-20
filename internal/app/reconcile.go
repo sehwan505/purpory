@@ -175,7 +175,10 @@ func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job, report fu
 }
 
 func (s *Service) Reconciliations(_ context.Context) ([]reconcile.Run, error) {
-	return reconcile.Runs(s.project.ID, 20)
+	if s.project.ID == "" {
+		return []reconcile.Run{}, nil
+	}
+	return reconcile.Runs(s.project.ID, 100)
 }
 
 func (s *Service) reconcileModel(ctx context.Context) (ollamaReconcileModel, error) {
@@ -259,7 +262,10 @@ func mentionedMaterialRefs(messages []reconcile.Message, materials []material.Ma
 	text := transcript.String()
 	result := make([]string, 0, min(64, len(materials)))
 	for _, item := range materials {
-		path := strings.TrimPrefix(item.URI, "file:")
+		path, err := material.RelativePath(item)
+		if err != nil {
+			continue
+		}
 		if path != "" && strings.Contains(text, path) {
 			result = append(result, item.URI)
 			if len(result) == 64 {

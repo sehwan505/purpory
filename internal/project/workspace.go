@@ -55,6 +55,14 @@ type Workspace struct {
 	UnmappedSessions []Session  `json:"unmappedSessions"`
 }
 
+// Observation is a Resource seen on this machine and the Projects it belongs to.
+// It carries topology metadata only; unassigned observations never contain Session data.
+type Observation struct {
+	Resource   Resource `json:"resource"`
+	ProjectIDs []string `json:"projectIds"`
+	ObservedAt string   `json:"observedAt"`
+}
+
 // Local observes the current machine. Git is one provider; ordinary folders
 // use the same Project → Resource → View shape.
 type Local struct{}

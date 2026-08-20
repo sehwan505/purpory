@@ -11,6 +11,7 @@ import (
 
 	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/project"
+	"github.com/sehwan505/purpory/internal/store"
 )
 
 func TestVersionDoesNotRequireRegisteredProject(t *testing.T) {
@@ -78,13 +79,28 @@ func TestIntegrationDoesNotRequireRegisteredProject(t *testing.T) {
 func TestUnregisteredAgentHookIsNoOp(t *testing.T) {
 	root := t.TempDir()
 	database := filepath.Join(t.TempDir(), "purpory.db")
-	payload := `{"hook_event_name":"UserPromptSubmit","prompt":"hello","session_id":"one","cwd":"` + root + `"}`
+	payload, _ := json.Marshal(map[string]string{
+		"hook_event_name": "UserPromptSubmit", "prompt": "hello", "session_id": "one", "cwd": root,
+	})
 	var output, errorOutput bytes.Buffer
-	if code := Run([]string{"--root", root, "--db", database, "preflight", "codex"}, strings.NewReader(payload), &output, &errorOutput); code != 0 {
+	if code := Run([]string{"--root", root, "--db", database, "preflight", "codex"}, bytes.NewReader(payload), &output, &errorOutput); code != 0 {
 		t.Fatalf("unregistered hook failed: %s", errorOutput.String())
 	}
 	if output.Len() != 0 || errorOutput.Len() != 0 {
 		t.Fatalf("unregistered hook was not silent: stdout=%q stderr=%q", output.String(), errorOutput.String())
+	}
+	databaseStore, err := store.Open(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer databaseStore.Close()
+	observations, err := databaseStore.Observations(context.Background())
+	resolvedRoot, resolveErr := filepath.EvalSymlinks(root)
+	if err != nil || resolveErr != nil || len(observations) != 1 || observations[0].Resource.Views[0].Root != resolvedRoot {
+		t.Fatalf("hook observation missing: %#v %v", observations, err)
+	}
+	if projects, err := databaseStore.Projects(context.Background()); err != nil || len(projects) != 0 {
+		t.Fatalf("hook created a project: %#v %v", projects, err)
 	}
 }
 

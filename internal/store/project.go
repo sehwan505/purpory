@@ -12,8 +12,8 @@ import (
 )
 
 func (s *Store) SaveProject(ctx context.Context, value project.Project) error {
-	if strings.TrimSpace(value.ID) == "" || strings.TrimSpace(value.Root) == "" || strings.TrimSpace(value.Name) == "" {
-		return errors.New("save project: id, name, and root are required")
+	if strings.TrimSpace(value.ID) == "" || strings.TrimSpace(value.Name) == "" {
+		return errors.New("save project: id and name are required")
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO projects (id, name, root, registered) VALUES (?, ?, ?, 1)
@@ -55,44 +55,6 @@ func (s *Store) Projects(ctx context.Context) ([]project.Project, error) {
 		values = append(values, value)
 	}
 	return values, rows.Err()
-}
-
-func (s *Store) ProjectEmbeddingModel(ctx context.Context, projectID string) (string, bool, error) {
-	var model string
-	err := s.db.QueryRowContext(ctx, `SELECT embedding_model FROM projects WHERE id = ?`, strings.TrimSpace(projectID)).Scan(&model)
-	if err != nil {
-		return "", false, fmt.Errorf("load project embedding model: %w", err)
-	}
-	return model, model != "", nil
-}
-
-func (s *Store) SetProjectEmbeddingModel(ctx context.Context, projectID, model string) error {
-	projectID, model = strings.TrimSpace(projectID), strings.TrimSpace(model)
-	if projectID == "" || model == "" || len(model) > 255 {
-		return errors.New("set project embedding model: project and model are required")
-	}
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE projects SET embedding_model = ?, updated_at = unixepoch()
-		WHERE id = ? AND (embedding_model = '' OR embedding_model = ?)
-	`, model, projectID, model)
-	if err != nil {
-		return fmt.Errorf("set project embedding model: %w", err)
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("set project embedding model: result: %w", err)
-	}
-	if changed == 0 {
-		current, found, loadErr := s.ProjectEmbeddingModel(ctx, projectID)
-		if loadErr != nil {
-			return loadErr
-		}
-		if found {
-			return fmt.Errorf("set project embedding model: project is locked to %q", current)
-		}
-		return fmt.Errorf("set project embedding model: %w", sql.ErrNoRows)
-	}
-	return nil
 }
 
 func (s *Store) RemoveProject(ctx context.Context, id string) (bool, error) {
@@ -140,11 +102,35 @@ func (s *Store) ProjectForWorkspace(ctx context.Context, current project.Workspa
 		}
 	}
 	if len(resourceMatches) > 0 {
+		pathMatches := map[string]project.Project{}
+		longest := 0
+		for id, candidate := range resourceMatches {
+			if strings.TrimSpace(candidate.Root) == "" {
+				continue
+			}
+			if !pathWithin(current.Project.Root, candidate.Root) {
+				continue
+			}
+			length := len(filepath.Clean(candidate.Root))
+			if length > longest {
+				pathMatches = map[string]project.Project{}
+				longest = length
+			}
+			if length == longest {
+				pathMatches[id] = candidate
+			}
+		}
+		if len(pathMatches) > 0 {
+			return oneProject(pathMatches)
+		}
 		return oneProject(resourceMatches)
 	}
 	pathMatches := map[string]project.Project{}
 	longest := 0
 	for _, candidate := range registered {
+		if strings.TrimSpace(candidate.Root) == "" {
+			continue
+		}
 		if !pathWithin(current.Project.Root, candidate.Root) {
 			continue
 		}

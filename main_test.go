@@ -2,56 +2,38 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/sehwan505/purpory/internal/launch"
-	"github.com/sehwan505/purpory/internal/project"
-	"github.com/sehwan505/purpory/internal/store"
+	product "github.com/sehwan505/purpory/internal/app"
 )
 
-func TestDesktopRootUsesKnownCurrentThenRecentProject(t *testing.T) {
+func TestDesktopOpensBeforeFirstProjectAndRestoresSelection(t *testing.T) {
 	ctx := context.Background()
-	directory := t.TempDir()
-	current := filepath.Join(directory, "current")
-	recent := filepath.Join(directory, "recent")
-	for _, path := range []string{current, recent} {
-		if err := os.Mkdir(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	databasePath := filepath.Join(directory, "current.db")
-	database, err := store.Open(ctx, databasePath)
+	databasePath := filepath.Join(t.TempDir(), "purpory.db")
+	service, err := product.OpenDesktop(ctx, databasePath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SaveProject(ctx, project.Project{ID: "current", Name: "Current", Root: current}); err != nil {
+	if status := service.Status(); status.Project.ID != "" {
+		t.Fatalf("unexpected initial Project: %#v", status.Project)
+	}
+	if runs, err := service.Reconciliations(ctx); err != nil || len(runs) != 0 {
+		t.Fatalf("empty desktop could not load: %#v %v", runs, err)
+	}
+	created, err := service.CreateProject(ctx, "First Project")
+	if err != nil || created.Project.ID == "" || created.Project.Root != "" {
+		t.Fatalf("rootless Project was not created: %#v %v", created, err)
+	}
+	if err := service.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := desktopConfig(ctx, launch.Config{Root: current, DBPath: databasePath}); got.Root != current || got.ProjectID != "current" {
-		t.Fatalf("known current project = %#v", got)
-	}
-	recentDatabasePath := filepath.Join(directory, "recent.db")
-	recentDatabase, err := store.Open(ctx, recentDatabasePath)
+	reopened, err := product.OpenDesktop(ctx, databasePath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := recentDatabase.SaveProject(ctx, project.Project{ID: "recent", Name: "Recent", Root: recent}); err != nil {
-		t.Fatal(err)
-	}
-	if err := recentDatabase.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if got := desktopConfig(ctx, launch.Config{Root: string(os.PathSeparator), DBPath: recentDatabasePath}); got.Root != recent || got.ProjectID != "recent" {
-		t.Fatalf("recent project = %#v", got)
-	}
-	explicit := filepath.Join(directory, "explicit")
-	if got := desktopConfig(ctx, launch.Config{Root: explicit, RootSet: true, DBPath: databasePath}); got.Root != explicit || got.ProjectID != "" {
-		t.Fatalf("explicit config = %#v", got)
+	defer reopened.Close()
+	if status := reopened.Status(); status.Project.ID != created.Project.ID {
+		t.Fatalf("last Project was not restored: %#v", status.Project)
 	}
 }

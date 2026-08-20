@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/launch"
-	"github.com/sehwan505/purpory/internal/store"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -38,71 +36,17 @@ func runDesktopApplication(arguments []string) error {
 		return errors.New("desktop accepts only --root, --db, and --project; use the standalone purpory CLI for commands")
 	}
 	ctx := context.Background()
-	config = desktopConfig(ctx, config)
-	service, err := product.Open(ctx, config.Root, config.DBPath, config.ProjectID)
+	var service *product.Service
+	if config.RootSet {
+		service, err = product.Open(ctx, config.Root, config.DBPath, config.ProjectID)
+	} else {
+		service, err = product.OpenDesktop(ctx, config.DBPath, config.ProjectID)
+	}
 	if err != nil {
 		return err
 	}
 	defer service.Close()
 	return runDesktop(NewApp(service))
-}
-
-func desktopConfig(ctx context.Context, config launch.Config) launch.Config {
-	if config.RootSet {
-		return config
-	}
-	database, err := store.Open(ctx, config.DBPath)
-	if err == nil {
-		defer database.Close()
-		projects, loadErr := database.Projects(ctx)
-		if loadErr == nil {
-			if config.ProjectID != "" {
-				for _, value := range projects {
-					if value.ID == config.ProjectID && usableProjectRoot(value.Root) {
-						config.Root = value.Root
-						return config
-					}
-				}
-			}
-			for _, value := range projects {
-				if samePath(value.Root, config.Root) && usableProjectRoot(value.Root) {
-					config.Root = value.Root
-					config.ProjectID = value.ID
-					return config
-				}
-			}
-			for _, value := range projects {
-				if usableProjectRoot(value.Root) {
-					config.Root = value.Root
-					config.ProjectID = value.ID
-					return config
-				}
-			}
-		}
-	}
-	if usableProjectRoot(config.Root) {
-		return config
-	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		config.Root = home
-	}
-	return config
-}
-
-func usableProjectRoot(path string) bool {
-	clean := filepath.Clean(path)
-	if clean == filepath.VolumeName(clean)+string(os.PathSeparator) {
-		return false
-	}
-	info, err := os.Stat(clean)
-	return err == nil && info.IsDir()
-}
-
-func samePath(left, right string) bool {
-	leftPath, leftErr := filepath.Abs(left)
-	rightPath, rightErr := filepath.Abs(right)
-	return leftErr == nil && rightErr == nil && leftPath == rightPath
 }
 
 func runDesktop(app *App) error {
