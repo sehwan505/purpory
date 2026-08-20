@@ -14,7 +14,6 @@ import (
 
 	"github.com/sehwan505/purpory/internal/extract"
 	"github.com/sehwan505/purpory/internal/graph"
-	"github.com/sehwan505/purpory/internal/integration"
 	"github.com/sehwan505/purpory/internal/material"
 	"github.com/sehwan505/purpory/internal/memory"
 	"github.com/sehwan505/purpory/internal/ollama"
@@ -467,12 +466,4 @@ func (s *Service) Models(ctx context.Context) ([]ollama.Model, error) {
 
 func (s *Service) RunModel(ctx context.Context, model, prompt string) (string, error) {
 	return s.ollama.Chat(ctx, model, prompt)
-}
-
-func (s *Service) InstallIntegration(agent string) (string, error) {
-	return integration.Install(s.project.Root, agent)
-}
-
-func (s *Service) UninstallIntegration(agent string) (string, error) {
-	return integration.Uninstall(s.project.Root, agent)
 }

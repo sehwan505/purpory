@@ -9,19 +9,20 @@ import (
 )
 
 func TestInstallAndUninstall(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "AGENTS.md")
+	directory := t.TempDir()
+	t.Setenv("CODEX_HOME", directory)
+	path := filepath.Join(directory, "AGENTS.md")
 	if err := os.WriteFile(path, []byte("# Existing\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if action, err := Install(root, "codex"); err != nil || action != "installed" {
+	if action, err := Install("codex"); err != nil || action != "installed" {
 		t.Fatalf("install: %q %v", action, err)
 	}
 	content, _ := os.ReadFile(path)
 	if strings.Count(string(content), startMarker) != 1 || !strings.Contains(string(content), "# Existing") || !strings.Contains(string(content), "graph hints") {
 		t.Fatalf("unexpected content: %s", content)
 	}
-	hooksContent, err := os.ReadFile(filepath.Join(root, ".codex", "hooks.json"))
+	hooksContent, err := os.ReadFile(filepath.Join(directory, "hooks.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,13 +30,13 @@ func TestInstallAndUninstall(t *testing.T) {
 	if err := json.Unmarshal(hooksContent, &settings); err != nil || !strings.Contains(string(hooksContent), "UserPromptSubmit") || !strings.Contains(string(hooksContent), "SessionEnd") {
 		t.Fatalf("hooks not installed: %s, %v", hooksContent, err)
 	}
-	if action, err := Install(root, "codex"); err != nil || action != "unchanged" {
+	if action, err := Install("codex"); err != nil || action != "unchanged" {
 		t.Fatalf("second install: %q %v", action, err)
 	}
-	if action, err := Uninstall(root, "codex"); err != nil || action != "uninstalled" {
+	if action, err := Uninstall("codex"); err != nil || action != "uninstalled" {
 		t.Fatalf("uninstall: %q %v", action, err)
 	}
-	hooksContent, _ = os.ReadFile(filepath.Join(root, ".codex", "hooks.json"))
+	hooksContent, _ = os.ReadFile(filepath.Join(directory, "hooks.json"))
 	if strings.Contains(string(hooksContent), "preflight codex") || strings.Contains(string(hooksContent), "session-end codex") {
 		t.Fatalf("hooks not removed: %s", hooksContent)
 	}
