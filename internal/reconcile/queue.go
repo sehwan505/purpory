@@ -47,6 +47,8 @@ type Run struct {
 	SessionID string `json:"sessionId"`
 	Agent     string `json:"agent"`
 	ProjectID string `json:"projectId"`
+	CWD       string `json:"cwd"`
+	Reason    string `json:"reason,omitempty"`
 	Phase     string `json:"phase"`
 	Detail    string `json:"detail,omitempty"`
 	QueuedAt  string `json:"queuedAt"`
@@ -265,6 +267,7 @@ func run(job Job, phase string, updatedAt int64) Run {
 	}
 	return Run{
 		ID: job.ID, SessionID: job.SessionID, Agent: job.Agent, ProjectID: job.ProjectID,
+		CWD: job.CWD, Reason: job.Reason,
 		Phase: phase, Detail: job.Detail,
 		QueuedAt:  time.Unix(job.QueuedAt, 0).UTC().Format(time.RFC3339),
 		UpdatedAt: time.Unix(updatedAt, 0).UTC().Format(time.RFC3339),

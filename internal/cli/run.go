@@ -11,6 +11,7 @@ import (
 	"github.com/sehwan505/purpory/internal/integration"
 	"github.com/sehwan505/purpory/internal/launch"
 	"github.com/sehwan505/purpory/internal/project"
+	"github.com/sehwan505/purpory/internal/store"
 )
 
 func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int {
@@ -54,6 +55,8 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 		if readErr == nil {
 			if payload, parseErr := readHook(bytes.NewReader(content)); parseErr == nil {
 				config.Root = payload.CWD
+				// Discovery is best effort; an observation failure must not block an agent hook.
+				_ = recordHookObservation(context.Background(), config.DBPath, payload.CWD)
 			}
 		}
 	}
@@ -71,6 +74,19 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 		return 1
 	}
 	return 0
+}
+
+func recordHookObservation(ctx context.Context, databasePath, cwd string) error {
+	workspace, err := (project.Local{}).Observe(ctx, cwd)
+	if err != nil {
+		return err
+	}
+	database, err := store.Open(ctx, databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return database.SaveObservations(ctx, workspace.Resources)
 }
 
 func runIntegrationCommand(arguments []string, output io.Writer) error {

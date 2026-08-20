@@ -72,11 +72,11 @@ func TestOpenResolvesRegisteredProjectFromChildDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	resolvedChild, err := filepath.EvalSymlinks(child)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status := service.Status(); status.Project.ID != "demo" || status.Project.Root != resolvedChild {
+	if status := service.Status(); status.Project.ID != "demo" || status.Project.Root != resolvedRoot || service.activeRoot == status.Project.Root {
 		t.Fatalf("unexpected active project: %#v", status.Project)
 	}
 }
@@ -101,6 +101,9 @@ func TestSelectProjectSwitchesWorkspaceWithoutMixingProjectData(t *testing.T) {
 	if _, err := service.Remember(ctx, "intent.first", memory.Decision, &value, nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := service.SelectModel(ctx, "reconcile", "global-reconcile"); err != nil {
+		t.Fatal(err)
+	}
 	projects, err := service.Projects(ctx)
 	if err != nil || len(projects) != 2 {
 		t.Fatalf("registered projects missing: %#v %v", projects, err)
@@ -120,6 +123,90 @@ func TestSelectProjectSwitchesWorkspaceWithoutMixingProjectData(t *testing.T) {
 	memories, err := service.Memories(ctx, "")
 	if err != nil || len(memories) != 0 {
 		t.Fatalf("project memory leaked across selection: %#v %v", memories, err)
+	}
+	models, err := service.ModelState(ctx)
+	if err != nil || models.Models[1].Model != "global-reconcile" || models.Models[1].Source != "setting" {
+		t.Fatalf("global settings did not survive Project selection: %#v %v", models, err)
+	}
+}
+
+func TestSelectProjectDoesNotRequireAvailableWorkspace(t *testing.T) {
+	ctx := context.Background()
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	for id, root := range map[string]string{"first": firstRoot, "second": secondRoot} {
+		if _, err := RegisterProject(ctx, root, database, id, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := Open(ctx, firstRoot, database, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if err := os.Remove(secondRoot); err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.SelectProject(ctx, "second")
+	if err != nil || status.Project.ID != "second" {
+		t.Fatalf("unavailable project did not switch: %#v %v", status, err)
+	}
+	workspace, err := service.Workspace(ctx)
+	if err != nil || workspace.Project.ID != "second" || len(workspace.Resources) != 1 {
+		t.Fatalf("saved workspace was unavailable after switch: %#v %v", workspace, err)
+	}
+}
+
+func TestRootlessProjectUpdatesAssignedResourcesAndResolvesCWD(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	service, err := OpenDesktop(ctx, database, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateProject(ctx, "Product")
+	if err != nil || created.Project.Root != "" {
+		t.Fatalf("rootless Project was not created: %#v %v", created, err)
+	}
+	roots := []string{t.TempDir(), t.TempDir()}
+	for index, root := range roots {
+		if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# Repository\ncontent "+string(rune('A'+index))+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		workspace, err := (project.Local{}).Observe(ctx, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.store.SaveObservations(ctx, workspace.Resources); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.AssignResource(ctx, created.Project.ID, workspace.Resources[0].ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := service.Update(ctx)
+	if err != nil || result.MaterialCount != 2 {
+		t.Fatalf("assigned Resources were not updated together: %#v %v", result, err)
+	}
+	materials, err := service.store.Materials(ctx, created.Project.ID)
+	if err != nil || len(materials) != 2 || materials[0].URI == materials[1].URI || !strings.HasPrefix(materials[0].URI, "resource:") || !strings.HasPrefix(materials[1].URI, "resource:") {
+		t.Fatalf("same relative paths collided: %#v %v", materials, err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Open(ctx, roots[1], database, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Close()
+	wantRoot, err := filepath.EvalSymlinks(roots[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := resolved.Status(); status.Project.ID != created.Project.ID || resolved.activeRoot != wantRoot {
+		t.Fatalf("CWD did not resolve the assigned Project: %#v", status)
 	}
 }
 

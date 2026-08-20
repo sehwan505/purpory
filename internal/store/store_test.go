@@ -56,32 +56,59 @@ func TestProjectRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProjectEmbeddingModelIsImmutable(t *testing.T) {
+func TestMigrationFollowsLegacyVersions(t *testing.T) {
 	ctx := context.Background()
-	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	path := filepath.Join(t.TempDir(), "context.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyProject := project.Project{ID: "legacy", Name: "Legacy", Root: "/legacy"}
+	legacyResource := project.Resource{ID: "repo", Provider: "git", Label: "Repo", Identity: "/legacy/.git", Views: []project.View{{ID: "view", Root: "/legacy", Available: true}}}
+	if err := database.SaveProject(ctx, legacyProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveWorkspace(ctx, legacyProject.ID, []project.Resource{legacyResource}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE projects SET embedding_model = 'legacy-embed' WHERE id = ?`, legacyProject.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		DROP TABLE view_observations;
+		DROP TABLE resource_observations;
+		DELETE FROM settings WHERE key = 'model.embedding';
+		DELETE FROM schema_migrations WHERE version IN (17, 18, 19);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	for version := 2; version <= 16; version++ {
+		if _, err := database.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)`, version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	for _, value := range []project.Project{{ID: "one", Name: "One", Root: "/one"}, {ID: "two", Name: "Two", Root: "/two"}} {
-		if err := database.SaveProject(ctx, value); err != nil {
-			t.Fatal(err)
-		}
+	var tables int
+	if err := database.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM sqlite_master
+		WHERE type = 'table' AND name IN ('resource_observations', 'view_observations')
+	`).Scan(&tables); err != nil || tables != 2 {
+		t.Fatalf("migration 17 was not applied after legacy versions: %d %v", tables, err)
 	}
-	if err := database.SetProjectEmbeddingModel(ctx, "one", "embed-a"); err != nil {
-		t.Fatal(err)
+	observations, err := database.Observations(ctx)
+	if err != nil || len(observations) != 1 || observations[0].Resource.ID != legacyResource.ID {
+		t.Fatalf("legacy Resource was not backfilled: %#v %v", observations, err)
 	}
-	if err := database.SetProjectEmbeddingModel(ctx, "one", "embed-a"); err != nil {
-		t.Fatalf("same model should remain valid: %v", err)
-	}
-	if err := database.SetProjectEmbeddingModel(ctx, "one", "embed-b"); err == nil {
-		t.Fatal("project embedding model was changed")
-	}
-	if _, err := database.db.ExecContext(ctx, `UPDATE projects SET embedding_model = 'embed-b' WHERE id = 'one'`); err == nil {
-		t.Fatal("database trigger allowed the project embedding model to change")
-	}
-	if err := database.SetProjectEmbeddingModel(ctx, "two", "embed-b"); err != nil {
-		t.Fatalf("another project could not select its own model: %v", err)
+	model, found, err := database.Setting(ctx, "model.embedding")
+	if err != nil || !found || model != "legacy-embed" {
+		t.Fatalf("legacy embedding setting was not migrated: %q %v %v", model, found, err)
 	}
 }
 
@@ -139,6 +166,10 @@ func TestProjectForWorkspaceUsesRegisteredResourceAndRejectsAmbiguity(t *testing
 	}
 	if got, err := database.ProjectForWorkspace(ctx, observed, second.ID); err != nil || got.ID != second.ID {
 		t.Fatalf("explicit project did not resolve ambiguity: %#v, %v", got, err)
+	}
+	observed.Project.Root = second.Root
+	if got, err := database.ProjectForWorkspace(ctx, observed, ""); err != nil || got.ID != second.ID {
+		t.Fatalf("working directory did not resolve shared resource: %#v, %v", got, err)
 	}
 }
 
@@ -380,5 +411,53 @@ func TestWorkspaceRoundTrip(t *testing.T) {
 	}
 	if len(workspace.Resources) != 1 || len(workspace.Resources[0].Views) != 1 || len(workspace.Resources[0].Views[0].Sessions) != 1 || len(workspace.UnmappedSessions) != 1 {
 		t.Fatalf("unexpected workspace: %#v", workspace)
+	}
+}
+
+func TestObservedResourceCanBelongToMultipleProjects(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, value := range []project.Project{{ID: "one", Name: "One", Root: "/one"}, {ID: "two", Name: "Two", Root: "/two"}} {
+		if err := database.SaveProject(ctx, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resource := project.Resource{ID: "repo", Provider: "git", Label: "Repo", Identity: "/repo/.git", Views: []project.View{{ID: "view", Root: "/repo", Available: true}}}
+	if err := database.SaveObservations(ctx, []project.Resource{resource}); err != nil {
+		t.Fatal(err)
+	}
+	for _, projectID := range []string{"one", "one", "two"} {
+		if err := database.AssignObservation(ctx, projectID, resource.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observations, err := database.Observations(ctx)
+	if err != nil || len(observations) != 1 || len(observations[0].ProjectIDs) != 2 {
+		t.Fatalf("unexpected observations: %#v %v", observations, err)
+	}
+	for _, current := range []project.Project{{ID: "one", Name: "One", Root: "/one"}, {ID: "two", Name: "Two", Root: "/two"}} {
+		workspace, err := database.Workspace(ctx, current)
+		if err != nil || len(workspace.Resources) != 1 || workspace.Resources[0].ID != resource.ID {
+			t.Fatalf("resource not assigned to %s: %#v %v", current.ID, workspace, err)
+		}
+	}
+	if err := database.SaveSession(ctx, "one", "view", "session", "codex", "ended"); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := database.UnassignResource(ctx, "one", resource.ID)
+	if err != nil || !removed {
+		t.Fatalf("resource was not unassigned: %v %v", removed, err)
+	}
+	one, err := database.Workspace(ctx, project.Project{ID: "one", Name: "One", Root: "/one"})
+	if err != nil || len(one.Resources) != 0 || len(one.UnmappedSessions) != 1 {
+		t.Fatalf("unassign did not preserve the session: %#v %v", one, err)
+	}
+	observations, err = database.Observations(ctx)
+	if err != nil || len(observations[0].ProjectIDs) != 1 || observations[0].ProjectIDs[0] != "two" {
+		t.Fatalf("unassign changed the wrong Project: %#v %v", observations, err)
 	}
 }

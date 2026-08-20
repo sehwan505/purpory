@@ -3,10 +3,13 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +30,7 @@ const Version = "0.1.0"
 
 type Service struct {
 	project      project.Project
+	activeRoot   string
 	store        *store.Store
 	databasePath string
 	ollama       *ollama.Client
@@ -103,6 +107,9 @@ func registerProject(ctx context.Context, root, databasePath, projectID, name st
 	if err := database.SaveWorkspace(ctx, current.ID, workspace.Resources); err != nil {
 		return project.Project{}, err
 	}
+	if err := database.SaveObservations(ctx, workspace.Resources); err != nil {
+		return project.Project{}, err
+	}
 	return current, nil
 }
 
@@ -123,25 +130,84 @@ func OpenWithObserver(ctx context.Context, root, databasePath, projectID string,
 		database.Close()
 		return nil, err
 	}
-	current := registered
-	current.Root = workspace.Project.Root
-	if err := database.SaveWorkspace(ctx, current.ID, workspace.Resources); err != nil {
+	if err := database.SaveWorkspace(ctx, registered.ID, workspace.Resources); err != nil {
 		database.Close()
 		return nil, err
 	}
+	if err := database.SaveObservations(ctx, workspace.Resources); err != nil {
+		database.Close()
+		return nil, err
+	}
+	service, err := newService(ctx, databasePath, database, observer)
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+	service.project = registered
+	service.activeRoot = workspace.Project.Root
+	return service, nil
+}
+
+// OpenDesktop opens the global desktop even when no Project exists yet.
+func OpenDesktop(ctx context.Context, databasePath, projectID string) (*Service, error) {
+	database, err := store.Open(ctx, databasePath)
+	if err != nil {
+		return nil, err
+	}
+	service, err := newService(ctx, databasePath, database, project.Local{})
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+	selectedID := strings.TrimSpace(projectID)
+	if selectedID == "" {
+		if saved, found, loadErr := database.Setting(ctx, "desktop.project"); loadErr != nil {
+			service.Close()
+			return nil, loadErr
+		} else if found {
+			selectedID = saved
+		}
+	}
+	if selectedID != "" {
+		if selected, loadErr := database.Project(ctx, selectedID); loadErr == nil {
+			service.project = selected
+			service.activeRoot = selected.Root
+			if service.activeRoot == "" {
+				service.activeRoot = service.firstProjectRoot(ctx)
+			}
+			return service, nil
+		} else if strings.TrimSpace(projectID) != "" {
+			service.Close()
+			return nil, loadErr
+		}
+	}
+	projects, err := database.Projects(ctx)
+	if err != nil {
+		service.Close()
+		return nil, err
+	}
+	if len(projects) > 0 {
+		service.project = projects[0]
+		service.activeRoot = projects[0].Root
+		if service.activeRoot == "" {
+			service.activeRoot = service.firstProjectRoot(ctx)
+		}
+	}
+	return service, nil
+}
+
+func newService(ctx context.Context, databasePath string, database *store.Store, observer WorkspaceObserver) (*Service, error) {
 	ollamaURL := strings.TrimSpace(os.Getenv("PURPORY_OLLAMA_URL"))
 	if ollamaURL == "" {
 		ollamaURL = "http://127.0.0.1:11434"
 	}
 	client, err := ollama.New(ollamaURL, 5*time.Second)
 	if err != nil {
-		database.Close()
 		return nil, err
 	}
-	service := &Service{project: current, store: database, databasePath: databasePath, ollama: client, workspace: observer}
+	service := &Service{store: database, databasePath: databasePath, ollama: client, workspace: observer}
 	gate, err := service.modelName(ctx, "gate")
 	if err != nil {
-		database.Close()
 		return nil, err
 	}
 	service.gate = newGateProvider(client, gate.Model)
@@ -160,21 +226,87 @@ func (s *Service) Projects(ctx context.Context) ([]project.Project, error) {
 	return s.store.Projects(ctx)
 }
 
+func (s *Service) CreateProject(ctx context.Context, name string) (Status, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 120 {
+		return Status{}, errors.New("create project: name must be 1-120 characters")
+	}
+	projects, err := s.store.Projects(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	for _, existing := range projects {
+		if strings.EqualFold(existing.Name, name) {
+			return Status{}, fmt.Errorf("create project: name %q already exists", name)
+		}
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return Status{}, fmt.Errorf("create project: ID: %w", err)
+	}
+	created := project.Project{ID: hex.EncodeToString(random[:]), Name: name}
+	if err := s.store.SaveProject(ctx, created); err != nil {
+		return Status{}, err
+	}
+	s.project = created
+	s.activeRoot = ""
+	if err := s.store.SaveSetting(ctx, "desktop.project", created.ID); err != nil {
+		return Status{}, err
+	}
+	return s.Status(), nil
+}
+
+func (s *Service) Observations(ctx context.Context) ([]project.Observation, error) {
+	return s.store.Observations(ctx)
+}
+
+func (s *Service) AssignResource(ctx context.Context, projectID, resourceID string) error {
+	if err := s.store.AssignObservation(ctx, projectID, resourceID); err != nil {
+		return err
+	}
+	if projectID == s.project.ID && s.activeRoot == "" {
+		s.activeRoot = s.firstProjectRoot(ctx)
+	}
+	return nil
+}
+
+func (s *Service) UnassignResource(ctx context.Context, projectID, resourceID string) (bool, error) {
+	removed, err := s.store.UnassignResource(ctx, projectID, resourceID)
+	if err == nil && removed && projectID == s.project.ID {
+		s.activeRoot = s.firstProjectRoot(ctx)
+	}
+	return removed, err
+}
+
 func (s *Service) SelectProject(ctx context.Context, projectID string) (Status, error) {
 	selected, err := s.store.Project(ctx, strings.TrimSpace(projectID))
 	if err != nil {
 		return Status{}, err
 	}
-	workspace, err := s.workspace.Observe(ctx, selected.Root)
-	if err != nil {
-		return Status{}, err
-	}
-	selected.Root = workspace.Project.Root
-	if err := s.store.SaveWorkspace(ctx, selected.ID, workspace.Resources); err != nil {
-		return Status{}, err
-	}
 	s.project = selected
+	s.activeRoot = selected.Root
+	if s.activeRoot == "" {
+		s.activeRoot = s.firstProjectRoot(ctx)
+	}
+	if err := s.store.SaveSetting(ctx, "desktop.project", selected.ID); err != nil {
+		return Status{}, err
+	}
 	return s.Status(), nil
+}
+
+func (s *Service) firstProjectRoot(ctx context.Context) string {
+	workspace, err := s.store.Workspace(ctx, s.project)
+	if err != nil {
+		return ""
+	}
+	for _, resource := range workspace.Resources {
+		for _, view := range resource.Views {
+			if view.Available {
+				return view.Root
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Service) Remember(ctx context.Context, key string, kind memory.Kind, value, source *string) (store.SaveResult, error) {
@@ -340,7 +472,7 @@ func (s *Service) ExplainMany(ctx context.Context, queries []string) ([]ExplainR
 		results = append(results, result)
 	}
 	sessionID := currentSessionID("")
-	if err := s.SaveSessionAt(ctx, s.project.Root, sessionID, sessionAgent(sessionID), "active"); err != nil {
+	if err := s.SaveSessionAt(ctx, s.currentRoot(ctx), sessionID, sessionAgent(sessionID), "active"); err != nil {
 		return nil, err
 	}
 	if err := s.store.SaveDeliveries(ctx, s.project.ID, sessionID, opened); err != nil {
@@ -361,13 +493,48 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 	// ponytail: serialize whole-project snapshots; add parallel extraction only after profiling real projects.
 	s.update.Lock()
 	defer s.update.Unlock()
-	materials, err := material.Discover(ctx, s.project.Root)
+	workspace, err := s.store.Workspace(ctx, s.project)
 	if err != nil {
 		return UpdateResult{}, err
 	}
-	for index := range materials {
-		materials[index].Processor = extract.Processor(materials[index])
+	if len(workspace.Resources) == 0 {
+		return UpdateResult{}, errors.New("update project: add a resource first")
 	}
+	primaryResourceID := ""
+	for _, resource := range workspace.Resources {
+		for _, view := range resource.Views {
+			if s.project.Root != "" && sameRoot(view.Root, s.project.Root) {
+				primaryResourceID = resource.ID
+			}
+		}
+	}
+	var materials []material.Material
+	materialRoots := map[string]string{}
+	observed := make([]project.Resource, 0, len(workspace.Resources))
+	for _, resource := range workspace.Resources {
+		root := resourceRoot(resource, s.activeRoot)
+		if root == "" {
+			return UpdateResult{}, fmt.Errorf("update project: resource %q has no available view", resource.Label)
+		}
+		currentWorkspace, err := s.workspace.Observe(ctx, root)
+		if err != nil {
+			return UpdateResult{}, fmt.Errorf("update project: observe %q: %w", resource.Label, err)
+		}
+		observed = append(observed, currentWorkspace.Resources...)
+		discovered, err := material.Discover(ctx, root)
+		if err != nil {
+			return UpdateResult{}, err
+		}
+		if resource.ID != primaryResourceID {
+			material.Scope(resource.ID, discovered)
+		}
+		for index := range discovered {
+			discovered[index].Processor = extract.Processor(discovered[index])
+			materialRoots[discovered[index].ID] = root
+		}
+		materials = append(materials, discovered...)
+	}
+	sort.Slice(materials, func(i, j int) bool { return materials[i].URI < materials[j].URI })
 	stored, err := s.store.Materials(ctx, s.project.ID)
 	if err != nil {
 		return UpdateResult{}, err
@@ -399,7 +566,7 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 	}
 	result := UpdateResult{MaterialCount: len(materials), Processed: len(changed), Changes: changes}
 	for _, value := range changed {
-		facts, extractErr := extract.Material(ctx, s.project.Root, value)
+		facts, extractErr := extract.Material(ctx, materialRoots[value.ID], value)
 		nodes = append(nodes, facts.Nodes...)
 		claims = append(claims, facts.Claims...)
 		if extractErr != nil {
@@ -415,11 +582,10 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 	if err := s.store.ReplaceKnowledge(ctx, s.project.ID, materials, nodes, claims, edges); err != nil {
 		return UpdateResult{}, err
 	}
-	workspace, err := s.workspace.Observe(ctx, s.project.Root)
-	if err != nil {
+	if err := s.store.SaveWorkspace(ctx, s.project.ID, observed); err != nil {
 		return UpdateResult{}, err
 	}
-	if err := s.store.SaveWorkspace(ctx, s.project.ID, workspace.Resources); err != nil {
+	if err := s.store.SaveObservations(ctx, observed); err != nil {
 		return UpdateResult{}, err
 	}
 	result.EntityCount = len(nodes)
@@ -427,20 +593,51 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 	return result, nil
 }
 
+func resourceRoot(resource project.Resource, activeRoot string) string {
+	for _, view := range resource.Views {
+		if view.Available && activeRoot != "" && sameRoot(view.Root, activeRoot) {
+			return view.Root
+		}
+	}
+	for _, view := range resource.Views {
+		if view.Available {
+			return view.Root
+		}
+	}
+	return ""
+}
+
+func sameRoot(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
 func (s *Service) Workspace(ctx context.Context) (project.Workspace, error) {
 	return s.store.Workspace(ctx, s.project)
 }
 
 func (s *Service) SaveSession(ctx context.Context, sessionID, agent, status string) error {
-	return s.SaveSessionAt(ctx, s.project.Root, sessionID, agent, status)
+	return s.SaveSessionAt(ctx, s.currentRoot(ctx), sessionID, agent, status)
 }
 
 func (s *Service) SaveSessionAt(ctx context.Context, cwd, sessionID, agent, status string) error {
+	if strings.TrimSpace(cwd) == "" {
+		return errors.New("save session: project has no assigned resource")
+	}
 	workspace, err := s.workspace.Observe(ctx, cwd)
 	if err != nil {
 		return err
 	}
-	if workspace.Project.Root != s.project.Root && workspace.Project.ID != s.project.ID {
+	stored, err := s.store.Workspace(ctx, s.project)
+	if err != nil {
+		return err
+	}
+	assigned := false
+	for _, observed := range workspace.Resources {
+		for _, resource := range stored.Resources {
+			assigned = assigned || observed.ID == resource.ID
+		}
+	}
+	if !assigned {
 		return errors.New("save session: working directory belongs to another project")
 	}
 	if err := s.store.SaveWorkspace(ctx, s.project.ID, workspace.Resources); err != nil {
@@ -454,6 +651,14 @@ func (s *Service) SaveSessionAt(ctx context.Context, cwd, sessionID, agent, stat
 		}
 	}
 	return s.store.SaveSession(ctx, s.project.ID, "", sessionID, agent, status)
+}
+
+func (s *Service) currentRoot(ctx context.Context) string {
+	if s.activeRoot != "" {
+		return s.activeRoot
+	}
+	s.activeRoot = s.firstProjectRoot(ctx)
+	return s.activeRoot
 }
 
 func (s *Service) ModelStatus(ctx context.Context) ollama.Status {

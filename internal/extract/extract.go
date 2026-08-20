@@ -72,7 +72,10 @@ func Processor(value material.Material) string {
 }
 
 func Material(ctx context.Context, root string, value material.Material) (Facts, error) {
-	relative := strings.TrimPrefix(value.URI, "file:")
+	relative, relativeErr := material.RelativePath(value)
+	if relativeErr != nil {
+		return Facts{}, relativeErr
+	}
 	rootNode := graph.Node{
 		ID: graph.ReferenceID(graph.KindMaterial, value.URI), Label: filepath.Base(relative), Kind: graph.KindMaterial,
 		Ref: value.URI, MaterialID: value.ID, MaterialURI: value.URI,

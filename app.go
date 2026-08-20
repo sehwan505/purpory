@@ -41,10 +41,34 @@ func (a *App) Projects() ([]project.Project, error) {
 	return a.service.Projects(a.ctx)
 }
 
+func (a *App) CreateProject(name string) (product.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.service.CreateProject(a.ctx, name)
+}
+
 func (a *App) SelectProject(projectID string) (product.Status, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.service.SelectProject(a.ctx, projectID)
+}
+
+func (a *App) Observations() ([]project.Observation, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.service.Observations(a.ctx)
+}
+
+func (a *App) AssignResource(projectID, resourceID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.service.AssignResource(a.ctx, projectID, resourceID)
+}
+
+func (a *App) UnassignResource(projectID, resourceID string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.service.UnassignResource(a.ctx, projectID, resourceID)
 }
 
 func (a *App) Remember(key, kind string, value, source *string) (store.SaveResult, error) {

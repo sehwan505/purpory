@@ -54,9 +54,11 @@ Directories are added only when their first behavior is implemented.
 
 ## Runtime and data
 
-- Projects are created only by an explicit `project add`. Ordinary CLI commands
-  and hooks resolve the working directory against those registered Projects and
-  never create one as an observation side effect.
+- Projects are created only by an explicit user action in the desktop's global
+  Projects screen or by `project add`. Ordinary CLI commands and hooks resolve
+  the working directory against those registered Projects and never create one
+  as an observation side effect. A desktop-created Project may remain empty
+  until the user assigns an observed Resource.
 - Project, Material, remembered knowledge, and session are the stable core
   concepts. Resource and view describe where a project is currently observed.
 - Workspace discovery is consumed through one small observer boundary. The Git
@@ -65,6 +67,10 @@ Directories are added only when their first behavior is implemented.
   session handling, or the dashboard.
 - Resource and View observations may update automatically inside a registered
   Project; they can never establish a new Project.
+- Agent hooks retain path-only Resource and View observations even when the
+  working directory is not assigned. The desktop may explicitly add an observed
+  Resource to one or more Projects; this never stores a Session, prompt, or
+  transcript before assignment.
 - Agent prompt/end hooks attach a Session to its observed View. Sessions without
   reliable historical View metadata remain preserved as unmapped sessions.
 - Agent instructions and hooks are installed once in user-global Codex or Claude
@@ -78,9 +84,10 @@ Directories are added only when their first behavior is implemented.
 - A Material may be a document, source file, note, media item, conversation,
   external reference, or a future input. Core retrieval never requires code,
   Git, a programming language, or a code graph.
-- `update` stores content hashes and processor versions, reuses facts from
-  unchanged Materials, resolves relationships across the combined snapshot, and
-  commits Materials, facts, claims, and relations in one SQLite transaction.
+- `update` discovers one available View per assigned Resource, namespaces equal
+  relative paths by Resource, reuses facts from unchanged Materials, resolves
+  relationships across the combined Project snapshot, and commits Materials,
+  facts, claims, and relations in one SQLite transaction.
 - `nodes` and `edges` are the one physical project graph. `kind` identifies
   Intent, Material, Knowledge, and Reference; `subkind` carries adapter details.
   `owner` separates durable and observed lifecycles, while `state` keeps missing
@@ -92,19 +99,24 @@ Directories are added only when their first behavior is implemented.
   locators. Binary Materials are cataloged without persisting their contents.
 - The desktop is viewer-first: it reads committed state when opened or focused
   and performs writes only after an explicit user action. It never watches the
-  project or starts `update` in the background.
+  project or starts `update` in the background. Project creation and Resource
+  assignment live under Global Projects; model selection lives under Global
+  Settings and applies to every Project.
 - The desktop lists registered Projects and switches the entire application
   scope between their independent Workspaces. Memories, Materials, Sessions,
   reconcile runs, queries, and graphs are never combined across that selection.
+- Project selection reads the last committed Workspace even when its local root
+  is temporarily unavailable. Only an explicit update refreshes observations.
 - Reconcile progress remains project-scoped operational state in the private
   queue. The Workspace may show its current phase on the originating Session,
   while `reconciliation_events` continues to record only committed durable
   changes and the canonical graph remains free of Workspace topology.
 - Model assistance is optional. Structural indexing and stored-memory queries
   continue to work when Ollama is absent.
-- The embedding model is fixed when first selected or used for a Project. A
-  backfill covers active Intent and Knowledge nodes; later durable writes and
-  reconciliation refresh those vectors immediately.
+- The embedding model selection is global. Each Project retains independent
+  vectors for that model; changing the global selection makes that Project's
+  nodes pending until its next explicit embedding sync, and later durable writes
+  and reconciliation refresh vectors for the selected model immediately.
 - `prepare` owns the complete context gateway: bounded input validation,
   optional gate classification, embedding-first retrieval, BM25 fallback,
   graph-aware signposting, token budgeting, and decision audit. CLI, Wails, and

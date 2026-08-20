@@ -121,10 +121,34 @@ func Diff(previous, current []Material) (Changes, []Material) {
 	return changes, changed
 }
 
-func Path(root string, value Material) (string, error) {
-	relative, found := strings.CutPrefix(value.URI, "file:")
+// Scope prevents equal relative paths in different Resources from colliding.
+func Scope(resourceID string, values []Material) {
+	for index := range values {
+		values[index].URI = "resource:" + resourceID + "/" + values[index].URI
+		values[index].ID = stableID(values[index].URI)
+	}
+}
+
+func RelativePath(value Material) (string, error) {
+	uri := value.URI
+	if strings.HasPrefix(uri, "resource:") {
+		_, scoped, found := strings.Cut(uri, "/")
+		if !found {
+			return "", fmt.Errorf("material path: unsupported URI %q", value.URI)
+		}
+		uri = scoped
+	}
+	relative, found := strings.CutPrefix(uri, "file:")
 	if !found || relative == "" || filepath.IsAbs(relative) {
 		return "", fmt.Errorf("material path: unsupported URI %q", value.URI)
+	}
+	return relative, nil
+}
+
+func Path(root string, value Material) (string, error) {
+	relative, err := RelativePath(value)
+	if err != nil {
+		return "", err
 	}
 	path := filepath.Join(root, filepath.FromSlash(relative))
 	cleanRoot, err := filepath.Abs(root)

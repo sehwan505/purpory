@@ -1,29 +1,33 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
-  ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, DeleteMemory,
+  AssignResource, ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, CreateProject, DeleteMemory,
   EmbeddingStatus, Explain, Graph, InstallModel, Memories, ModelState, NeedsReviews,
-  Path, Prepare, Projects, Query, Reconciliations, Remember, ResolveContextRequest,
-  ResolveNeedsReview, SelectModel, SelectProject, StartModels, Status, SyncEmbeddings,
+  Observations, Path, Prepare, Projects, Query, Reconciliations, Remember, ResolveContextRequest,
+  ResolveNeedsReview, SelectModel, SelectProject, StartModels, Status, SyncEmbeddings, UnassignResource,
   Update, Workspace,
 } from "../wailsjs/go/main/App";
 import type { app, graph, memory, prepare, project, reconcile } from "../wailsjs/go/models";
-import { GraphView, NavIcon, NodeDetails, ProjectPicker, WorkspaceTopology, reconciliationLabel, relativeTime, type Page } from "./ProjectViews";
+import { GraphView, NavIcon, NodeDetails, ProjectPicker, ReconciliationQueue, ResourceAssignments, WorkspaceAttention, WorkspaceHistory, WorkspaceTopology, reconciliationLabel, relativeTime, type Page } from "./ProjectViews";
 
-const pages: { id: Page; label: string; description: string }[] = [
+const projectPages: { id: Page; label: string; description: string }[] = [
   { id: "overview", label: "Overview", description: "프로젝트의 현재 상태를 한눈에 봅니다." },
-  { id: "workspace", label: "Workspace", description: "Resource, View, Session의 연결을 살펴봅니다." },
+  { id: "workspace", label: "Workspace", description: "Repository, View, Session의 연결을 살펴봅니다." },
+  { id: "reconcile", label: "Reconcile", description: "등록된 Reconcile 작업과 진행 상태를 살펴봅니다." },
   { id: "search", label: "Search", description: "프로젝트 안의 지식과 맥락을 찾습니다." },
   { id: "graph", label: "Graph", description: "Intent와 실제 Material·Knowledge의 연결을 탐색합니다." },
-  { id: "inbox", label: "Inbox", description: "확인이 필요한 요청과 판단을 처리합니다." },
-  { id: "memory", label: "Memory", description: "오래 유지할 프로젝트 맥락을 관리합니다." },
-  { id: "settings", label: "Settings", description: "로컬 모델과 Embedding을 설정합니다." },
 ];
+const globalPages: { id: Page; label: string; description: string }[] = [
+  { id: "projects", label: "Projects", description: "Project를 만들고 관찰된 Repository를 연결합니다." },
+  { id: "settings", label: "Settings", description: "모든 Project에 적용되는 로컬 모델을 설정합니다." },
+];
+const pages = [...projectPages, ...globalPages];
 
 export default function App() {
   const [page, setPage] = useState<Page>("overview");
   const [selectedViewID, setSelectedViewID] = useState("");
   const [status, setStatus] = useState<app.Status>();
   const [projects, setProjects] = useState<project.Project[]>([]);
+  const [observations, setObservations] = useState<project.Observation[]>([]);
   const [modelState, setModelState] = useState<app.ModelState>();
   const [embeddingStatus, setEmbeddingStatus] = useState<app.EmbeddingStatus>();
   const [memories, setMemories] = useState<memory.Memory[]>([]);
@@ -38,8 +42,9 @@ export default function App() {
   const [explanation, setExplanation] = useState<app.ExplainResult>();
   const [pathResult, setPathResult] = useState<graph.Path>();
   const [prepared, setPrepared] = useState<prepare.Result>();
-  const [message, setMessage] = useState("준비됨");
+  const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<"current" | "history">("current");
   const [query, setQuery] = useState("");
   const [graphScope, setGraphScope] = useState("");
   const [pathSource, setPathSource] = useState("");
@@ -48,14 +53,18 @@ export default function App() {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [kind, setKind] = useState("note");
+  const refreshGeneration = useRef(0);
 
   const refresh = useCallback(async () => {
-    const [nextStatus, nextProjects, nextMemories, nextModel, nextEmbedding, nextWorkspace, nextReconciliations, nextGraph, nextRequests, nextReviews, nextDecisions] = await Promise.all([
-      Status(), Projects(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Reconciliations(), Graph("", 80),
-      ContextRequests("open"), NeedsReviews("open"), ContextDecisions(30),
+    const generation = ++refreshGeneration.current;
+    const [nextStatus, nextProjects, nextObservations, nextMemories, nextModel, nextEmbedding, nextWorkspace, nextReconciliations, nextGraph, nextRequests, nextReviews, nextDecisions] = await Promise.all([
+      Status(), Projects(), Observations(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Reconciliations(), Graph("", 200),
+      ContextRequests(""), NeedsReviews(""), ContextDecisions(30),
     ]);
+    if (generation !== refreshGeneration.current) return;
     setStatus(nextStatus);
     setProjects(nextProjects ?? []);
+    setObservations(nextObservations ?? []);
     setMemories(nextMemories ?? []);
     setModelState(nextModel);
     setEmbeddingStatus(nextEmbedding);
@@ -74,6 +83,16 @@ export default function App() {
     return () => window.removeEventListener("focus", refreshView);
   }, [refresh]);
 
+  useEffect(() => {
+    if (status && !status.project.id && !globalPages.some(item => item.id === page)) setPage("projects");
+  }, [page, status]);
+
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(() => setMessage(""), 4000);
+    return () => window.clearTimeout(timer);
+  }, [message]);
+
   const reconciliationActive = reconciliations.some(run => run.phase !== "completed" && run.phase !== "failed");
   useEffect(() => {
     if (!reconciliationActive) return;
@@ -91,17 +110,53 @@ export default function App() {
 
   async function switchProject(projectID: string) {
     if (!projectID || projectID === status?.project.id) return;
+    refreshGeneration.current++;
     await perform(async () => {
-      await SelectProject(projectID);
-      setSelectedViewID("");
-      setSelectedNode(undefined);
-      setResults(undefined);
-      setExplanation(undefined);
-      setPathResult(undefined);
-      setPrepared(undefined);
+      setStatus(await SelectProject(projectID));
+      clearProjectView();
       await refresh();
       setMessage(`${projects.find(item => item.id === projectID)?.name ?? projectID} 프로젝트로 전환했습니다.`);
     });
+  }
+
+  async function assignResource(projectID: string, resourceID: string) {
+    await perform(async () => {
+      await AssignResource(projectID, resourceID);
+      const target = projects.find(item => item.id === projectID)?.name ?? projectID;
+      setMessage(`${target} Project에 Repository를 추가했습니다.`);
+      await refresh();
+    });
+  }
+
+  async function createProject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const name = String(new FormData(form).get("name") ?? "").trim();
+    if (!name) return;
+    await perform(async () => {
+      setStatus(await CreateProject(name));
+      form.reset();
+      clearProjectView();
+      await refresh();
+      setMessage(`${name} Project를 만들었습니다. 이제 Repository를 연결하세요.`);
+    });
+  }
+
+  async function unassignResource(projectID: string, resourceID: string) {
+    await perform(async () => {
+      if (!await UnassignResource(projectID, resourceID)) throw new Error("연결된 Repository를 찾을 수 없습니다.");
+      setMessage("Project에서 Repository 연결을 해제했습니다.");
+      await refresh();
+    });
+  }
+
+  function clearProjectView() {
+    setSelectedViewID("");
+    setSelectedNode(undefined);
+    setResults(undefined);
+    setExplanation(undefined);
+    setPathResult(undefined);
+    setPrepared(undefined);
   }
 
   async function search(event: FormEvent) {
@@ -122,7 +177,7 @@ export default function App() {
   async function loadGraph(event: FormEvent) {
     event.preventDefault();
     await perform(async () => {
-      const found = await Graph(graphScope, 80);
+      const found = await Graph(graphScope, 200);
       setMaterialGraph(found);
       setMessage(`${found.totalNodes}개 노드 · ${found.totalEdges}개 관계`);
     });
@@ -161,6 +216,8 @@ export default function App() {
       const result = await Remember(key, kind, value, null);
       setKey("");
       setValue("");
+      setSelectedNode(undefined);
+      setExplanation(undefined);
       setMessage(`메모리 ${result.action}`);
       await refresh();
     });
@@ -229,8 +286,36 @@ export default function App() {
     if (!window.confirm(`${key} 메모리를 삭제할까요? 버전 기록은 유지됩니다.`)) return;
     await perform(async () => {
       if (!await DeleteMemory(key)) throw new Error(`메모리 ${key}를 찾을 수 없습니다.`);
+      setSelectedNode(undefined);
+      setExplanation(undefined);
       setMessage(`${key}를 삭제했습니다.`);
       await refresh();
+    });
+  }
+
+  function editMemory(item: memory.Memory) {
+    setKind(item.kind);
+    setKey(item.key);
+    setValue(item.value ?? item.source ?? "");
+    document.getElementById("memory-key")?.focus();
+  }
+
+  function openMemory(key: string) {
+    setPage("graph");
+    setGraphScope(key);
+    const node = materialGraph?.nodes?.find(item => item.ref === key && item.owner === "durable");
+    if (node) {
+      void explainNode(node);
+      return;
+    }
+    void perform(async () => {
+      const found = await Graph(key, 200);
+      setMaterialGraph(found);
+      const match = found.nodes?.find(item => item.ref === key && item.owner === "durable");
+      if (match) {
+        setSelectedNode(match);
+        setExplanation(await Explain(match.id));
+      }
     });
   }
 
@@ -251,7 +336,7 @@ export default function App() {
     if (!name) return;
     await perform(async () => {
       await SelectModel(role, name);
-      setMessage(`${role} 모델을 ${name}(으)로 선택했습니다.`);
+      setMessage(`${role} 모델을 ${name}(으)로 선택했습니다. 모든 Project에 적용됩니다.`);
       await refresh();
     });
   }
@@ -264,7 +349,7 @@ export default function App() {
     if (!name) return;
     await perform(async () => {
       await InstallModel(name, role);
-      setMessage(`${name} 설치를 완료했습니다.`);
+      setMessage(role ? `${name} 설치 및 전역 ${role} 선택을 완료했습니다.` : `${name} 설치를 완료했습니다.`);
       await refresh();
     });
   }
@@ -293,8 +378,14 @@ export default function App() {
   const allSessions = [...sessions, ...(workspace?.unmappedSessions ?? [])];
   const model = modelState?.ollama;
   const currentPage = pages.find(item => item.id === page)!;
+  const globalPage = globalPages.some(item => item.id === page);
   const recentSessions = [...allSessions].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)).slice(0, 5);
   const activeReconciliations = reconciliations.filter(run => run.phase !== "completed" && run.phase !== "failed");
+  const openRequests = requests.filter(item => item.status === "open");
+  const resolvedRequests = requests.filter(item => item.status === "resolved");
+  const openReviews = reviews.filter(item => item.status === "open");
+  const resolvedReviews = reviews.filter(item => item.status === "resolved");
+  const selectedMemory = explanation?.memory ?? (selectedNode?.owner === "durable" ? memories.find(item => item.key === selectedNode.ref) : undefined);
   const latestReconciliation = reconciliations[0];
   const reconciliationBySession = new Map<string, reconcile.Run>();
   for (const run of reconciliations) if (!reconciliationBySession.has(run.sessionId)) reconciliationBySession.set(run.sessionId, run);
@@ -304,9 +395,12 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand"><span aria-hidden="true">P</span><div>Purpory<small>PROJECT MEMORY</small></div></div>
         <nav aria-label="주요 메뉴">
-          {pages.map(item => <button type="button" key={item.id} aria-current={page === item.id ? "page" : undefined} onClick={() => setPage(item.id)}>
-            <NavIcon page={item.id} /><span>{item.label}</span>{item.id === "inbox" && requests.length + reviews.length > 0 && <b>{requests.length + reviews.length}</b>}
+          <span className="navScope">CURRENT PROJECT</span>
+          {projectPages.map(item => <button type="button" key={item.id} disabled={!status?.project.id} aria-current={page === item.id ? "page" : undefined} onClick={() => setPage(item.id)}>
+            <NavIcon page={item.id} /><span>{item.label}</span>{item.id === "workspace" && openRequests.length + openReviews.length > 0 && <b>{openRequests.length + openReviews.length}</b>}{item.id === "reconcile" && activeReconciliations.length > 0 && <b>{activeReconciliations.length}</b>}
           </button>)}
+          <span className="navScope global">GLOBAL</span>
+          {globalPages.map(item => <button type="button" key={item.id} aria-current={page === item.id ? "page" : undefined} onClick={() => setPage(item.id)}><NavIcon page={item.id} /><span>{item.label}</span>{item.id === "projects" && <b>{projects.length}</b>}</button>)}
         </nav>
         <div className="engine">
           <span className={model?.available ? "dot online" : "dot"} />
@@ -317,30 +411,41 @@ export default function App() {
       <main className="appMain">
         <header className="topbar">
           <div><p className="eyebrow">{currentPage.label}</p><h1>{currentPage.label}</h1><p>{currentPage.description}</p></div>
-          <div className="projectControl"><ProjectPicker current={status?.project} projects={projects} busy={busy} onSelect={projectID => void switchProject(projectID)} /><button className="secondary" disabled={busy} onClick={() => void updateProject()}>{busy ? "처리 중…" : "↻ 업데이트"}</button></div>
+          <div className="projectControl">{globalPage ? <span className="globalScope">GLOBAL · 모든 Project</span> : <><ProjectPicker current={status?.project} projects={projects} busy={busy} onSelect={projectID => void switchProject(projectID)} onManage={() => setPage("projects")} /><button className="secondary" disabled={busy || !status?.project.id} onClick={() => void updateProject()}>{busy ? "처리 중…" : "↻ 업데이트"}</button></>}</div>
         </header>
 
         <div className="pageBody">
-        <p className="notice" aria-live="polite"><span className="dot online" />{message}</p>
+        {message && <p className="notice" aria-live="polite"><span className="dot online" />{message}</p>}
 
         {page === "overview" && <><section className="metrics" aria-label="프로젝트 요약">
           <article><span>MEMORIES</span><strong>{memories.length}</strong><p>프로젝트에 저장된 결정과 지식</p></article>
-          <article><span>RESOURCES</span><strong>{workspace?.resources.length ?? 0}</strong><p>프로젝트에 연결된 저장소</p></article>
+          <article><span>REPOSITORIES</span><strong>{workspace?.resources.length ?? 0}</strong><p>Project에 연결된 Repository</p></article>
           <article><span>VIEWS</span><strong>{views.length}</strong><p>발견된 worktree와 작업 폴더</p></article>
           <article><span>SESSIONS</span><strong>{allSessions.filter(session => session.status === "active").length}</strong><p>{allSessions.length}개 기록 · 현재 맥락을 사용하는 에이전트</p></article>
-          <article><span>ATTENTION</span><strong>{requests.length + reviews.length}</strong><p>{requests.length}개 요청 · {reviews.length}개 메모리 리뷰</p></article>
+          <article><span>ATTENTION</span><strong>{openRequests.length + openReviews.length}</strong><p>{openRequests.length}개 요청 · {openReviews.length}개 메모리 리뷰</p></article>
           <article><span>RECONCILE</span><strong>{activeReconciliations.length || "—"}</strong><p>{activeReconciliations[0] ? reconciliationLabel(activeReconciliations[0].phase) : latestReconciliation ? `최근 ${reconciliationLabel(latestReconciliation.phase)}` : "실행 기록 없음"}</p></article>
         </section>
         <section className="overviewGrid">
-          <article className="panel attentionCard"><div className="sectionTitle"><div><p className="eyebrow">ATTENTION</p><h2>확인이 필요한 항목</h2></div><button className="textButton" onClick={() => setPage("inbox")}>Inbox 열기 →</button></div>
-            <div className="attentionRows"><button onClick={() => setPage("inbox")}><span>Context 요청</span><strong>{requests.length}</strong><small>답을 기다리는 요청</small></button><button onClick={() => setPage("inbox")}><span>메모리 리뷰</span><strong>{reviews.length}</strong><small>유효성 확인 필요</small></button></div>
+          <article className="panel attentionCard"><div className="sectionTitle"><div><p className="eyebrow">ATTENTION</p><h2>확인이 필요한 항목</h2></div><button className="textButton" onClick={() => { setWorkspaceMode("current"); setPage("workspace"); }}>Workspace 열기 →</button></div>
+            <div className="attentionRows"><button onClick={() => { setWorkspaceMode("current"); setPage("workspace"); }}><span>Context 요청</span><strong>{openRequests.length}</strong><small>답을 기다리는 요청</small></button><button onClick={() => { setWorkspaceMode("current"); setPage("workspace"); }}><span>메모리 리뷰</span><strong>{openReviews.length}</strong><small>유효성 확인 필요</small></button></div>
           </article>
           <article className="panel recentCard"><div className="sectionTitle"><div><p className="eyebrow">RECENT SESSIONS</p><h2>최근 작업</h2></div><button className="textButton" onClick={() => setPage("workspace")}>Workspace 열기 →</button></div>
             {recentSessions.length === 0 ? <p className="empty">아직 기록된 Session이 없습니다.</p> : <div className="recentList">{recentSessions.map(session => { const run = reconciliationBySession.get(session.id); return <button key={session.id} onClick={() => setPage("workspace")}><span className={`sessionStatus ${session.status}`} /><div><strong>{session.agent}</strong><small>{session.id}{run ? ` · ${reconciliationLabel(run.phase)}` : ""}</small></div><time>{relativeTime(session.updatedAt)}</time></button>; })}</div>}
           </article>
         </section></>}
 
-        {page === "workspace" && workspace && <WorkspaceTopology workspace={workspace} reconciliations={reconciliations} selectedViewID={selectedViewID} onSelectView={setSelectedViewID} />}
+        {page === "workspace" && workspace && <section className="workspacePage">
+          <div className="workspaceTabs" role="tablist" aria-label="Workspace 보기"><button type="button" role="tab" aria-selected={workspaceMode === "current"} onClick={() => { setWorkspaceMode("current"); setSelectedViewID(""); }}>Current <b>{openRequests.length + openReviews.length}</b></button><button type="button" role="tab" aria-selected={workspaceMode === "history"} onClick={() => { setWorkspaceMode("history"); setSelectedViewID(""); }}>History</button></div>
+          {workspaceMode === "current" ? <>
+            <WorkspaceTopology workspace={workspace} selectedViewID={selectedViewID} onSelectView={setSelectedViewID} />
+            <WorkspaceAttention requests={openRequests} reviews={openReviews} memories={memories} busy={busy} onResolveRequest={(event, id) => void resolveRequest(event, id)} onResolveReview={id => void resolveReview(id)} onChangeReview={(event, review) => void changeReview(event, review)} onOpenMemory={openMemory} />
+          </> : <>
+            <WorkspaceTopology history workspace={workspace} selectedViewID={selectedViewID} onSelectView={setSelectedViewID} />
+            <WorkspaceHistory requests={resolvedRequests} reviews={resolvedReviews} decisions={decisions} busy={busy} onFeedback={(event, id) => void submitFeedback(event, id)} />
+          </>}
+        </section>}
+
+        {page === "reconcile" && <ReconciliationQueue runs={reconciliations} />}
 
         {page === "search" && <section className="panel">
           <div className="sectionTitle"><div><p className="eyebrow">RETRIEVE</p><h2>필요한 맥락 찾기</h2></div><span>프로젝트 범위</span></div>
@@ -375,93 +480,39 @@ export default function App() {
         </section>}
 
         {page === "graph" && <section className="panel">
-          <div className="sectionTitle"><div><p className="eyebrow">MATERIAL GRAPH</p><h2>실물과 지식의 구조</h2></div><span>{materialGraph?.totalNodes ?? 0} nodes · {materialGraph?.totalEdges ?? 0} edges</span></div>
+          <div className="sectionTitle"><div><p className="eyebrow">PROJECT GRAPH</p><h2>실물·지식·지속 메모리</h2></div><span>{materialGraph?.totalNodes ?? 0} nodes · {materialGraph?.totalEdges ?? 0} edges</span></div>
           <form className="search" onSubmit={event => void loadGraph(event)}>
             <label htmlFor="graphScope">선택 범위</label>
             <div><input id="graphScope" value={graphScope} onChange={event => setGraphScope(event.target.value)} placeholder="전체 또는 예: internal/app" /><button disabled={busy}>그래프 불러오기</button></div>
           </form>
+          <details className="memoryComposer" open={key.length > 0 || undefined}>
+            <summary>지속 메모리 추가 또는 편집</summary>
+            <form className="memoryForm" onSubmit={event => void remember(event)}>
+              <label htmlFor="memory-kind">종류</label><select id="memory-kind" value={kind} onChange={event => setKind(event.target.value)}><option value="note">지식</option><option value="decision">결정</option><option value="reference">참조</option></select>
+              <label htmlFor="memory-key">키</label><input id="memory-key" value={key} onChange={event => setKey(event.target.value)} placeholder="database.selection" />
+              <label htmlFor="memory-value">내용</label><textarea id="memory-value" value={value} onChange={event => setValue(event.target.value)} placeholder="왜 이 결정을 내렸는지 함께 기록하세요." />
+              <button disabled={busy}>저장</button>
+            </form>
+          </details>
           <div className="contextGraph graphExplorer">
             <GraphView nodes={materialGraph?.nodes ?? []} edges={materialGraph?.edges ?? []} selectedID={selectedNode?.id} onSelect={node => void explainNode(node)} />
-            <NodeDetails node={selectedNode} explanation={explanation} onSelect={node => void explainNode(node)} />
+            <NodeDetails node={selectedNode} explanation={explanation} durable={selectedMemory} busy={busy} onSelect={node => void explainNode(node)} onEdit={editMemory} onConfirm={key => void confirmMemory(key)} onDelete={key => void deleteMemory(key)} />
           </div>
         </section>}
 
-        {page === "inbox" && <section className="panel operationsPanel">
-          <div className="sectionTitle"><div><p className="eyebrow">OPERATIONS</p><h2>Context와 메모리 운영</h2></div><span>{requests.length + reviews.length} items need attention</span></div>
-          <div className="operationsGrid">
-            <section className="operationCard">
-              <div className="cardTitle"><div><p className="eyebrow">REQUESTS</p><h3>해결할 Context 요청</h3></div><strong>{requests.length}</strong></div>
-              {requests.length === 0 ? <p className="empty">열린 Context 요청이 없습니다.</p> : <div className="operationList">{requests.map(request => <article key={request.id}>
-                <div className="itemMeta"><span>#{request.id} · {relativeTime(request.createdAt)}</span><span>{request.sessionId}</span></div>
-                <p>{request.need}</p>
-                <form className="inlineForm" onSubmit={event => void resolveRequest(event, request.id)}>
-                  <label className="srOnly" htmlFor={`request-memory-${request.id}`}>연결할 메모리</label>
-                  <select id={`request-memory-${request.id}`} name="memory" defaultValue="" required><option value="" disabled>해결 근거 선택</option>{memories.map(item => <option key={item.key} value={item.key}>{item.key}</option>)}</select>
-                  <button disabled={busy || memories.length === 0}>해결</button>
-                </form>
-              </article>)}</div>}
-            </section>
-
-            <section className="operationCard">
-              <div className="cardTitle"><div><p className="eyebrow">NEEDS REVIEW</p><h3>확인이 필요한 메모리</h3></div><strong>{reviews.length}</strong></div>
-              {reviews.length === 0 ? <p className="empty">검토할 메모리가 없습니다.</p> : <div className="operationList">{reviews.map(review => <article key={review.id}>
-                <div className="itemMeta"><span>{review.sourceType} · {relativeTime(review.createdAt)}</span><span>#{review.id}</span></div>
-                <strong>{review.key}</strong><p>{review.reason}</p><small>{review.sourceId}</small>
-                <div className="itemActions"><button className="secondary" disabled={busy} onClick={() => void resolveReview(review.id)}>현재 내용 유지</button><button className="textButton" onClick={() => setPage("memory")}>내용 확인</button></div>
-                <details className="reviewChange"><summary>내용 수정 후 해결</summary><form onSubmit={event => void changeReview(event, review)}>
-                  <label htmlFor={`review-kind-${review.id}`}>종류</label><select id={`review-kind-${review.id}`} name="kind" defaultValue={memories.find(item => item.key === review.key)?.kind || "note"}><option value="note">지식</option><option value="decision">결정</option><option value="reference">참조</option></select>
-                  <label htmlFor={`review-value-${review.id}`}>새 내용</label><textarea id={`review-value-${review.id}`} name="value" defaultValue={memories.find(item => item.key === review.key)?.value || ""} required />
-                  <button disabled={busy}>수정 적용</button>
-                </form></details>
-              </article>)}</div>}
-            </section>
-
-            <section className="operationCard auditCard">
-              <div className="cardTitle"><div><p className="eyebrow">DECISION AUDIT</p><h3>최근 Prepare 판단</h3></div><strong>{decisions.length}</strong></div>
-              {decisions.length === 0 ? <p className="empty">기록된 Prepare 판단이 없습니다.</p> : <div className="auditList">{decisions.map(decision => <details key={decision.id}>
-                <summary><span className={`action ${decision.finalAction}`}>{decision.finalAction}</span><strong>{decision.inputText || `입력 해시 ${decision.inputHash.slice(0, 12)}`}</strong><small>{relativeTime(decision.createdAt)} · {decision.modelId || "deterministic"}</small></summary>
-                <div className="auditBody"><p>{decision.proposal.reasonCode} · {(decision.hints?.nodes ?? []).map(item => item.path || item.id).join(", ") || "힌트 없음"}</p>
-                  <form className="feedbackForm" onSubmit={event => void submitFeedback(event, decision.id)}>
-                    <label htmlFor={`verdict-${decision.id}`}>판단 평가</label><select id={`verdict-${decision.id}`} name="verdict" defaultValue={decision.feedback?.verdict || "correct"}><option value="correct">맞음</option><option value="incorrect">수정 필요</option></select>
-                    <label htmlFor={`expected-${decision.id}`}>기대한 동작</label><select id={`expected-${decision.id}`} name="expectedAction" defaultValue={decision.feedback?.expectedAction || ""}><option value="">해당 없음</option><option value="skip">skip</option><option value="retrieve">retrieve</option><option value="ask">ask</option></select>
-                    <label htmlFor={`keys-${decision.id}`}>기대한 메모리 키</label><input id={`keys-${decision.id}`} name="expectedKeys" defaultValue={decision.feedback?.expectedKeys?.join(", ") || ""} placeholder="쉼표로 구분" />
-                    <label htmlFor={`note-${decision.id}`}>메모</label><input id={`note-${decision.id}`} name="note" defaultValue={decision.feedback?.note || ""} placeholder="선택 사항" />
-                    <button disabled={busy}>피드백 저장</button>
-                  </form>
-                </div>
-              </details>)}</div>}
-            </section>
-
-          </div>
-        </section>}
-
-        {page === "memory" && <section className="columns">
-          <div className="panel">
-            <div className="sectionTitle"><div><p className="eyebrow">REMEMBER</p><h2>메모리 추가</h2></div></div>
-            <form className="memoryForm" onSubmit={event => void remember(event)}>
-              <label htmlFor="kind">종류</label><select id="kind" value={kind} onChange={event => setKind(event.target.value)}><option value="note">지식</option><option value="decision">결정</option><option value="reference">참조</option></select>
-              <label htmlFor="key">키</label><input id="key" value={key} onChange={event => setKey(event.target.value)} placeholder="decision.database" />
-              <label htmlFor="value">내용</label><textarea id="value" value={value} onChange={event => setValue(event.target.value)} placeholder="왜 이 결정을 내렸는지 함께 기록하세요." />
-              <button disabled={busy}>기억하기</button>
-            </form>
-          </div>
-          <div className="panel memoryList">
-            <div className="sectionTitle"><div><p className="eyebrow">DURABLE CONTEXT</p><h2>저장된 메모리</h2></div><span>{memories.length}</span></div>
-            {memories.length === 0 ? <p className="empty">아직 저장된 메모리가 없습니다.</p> : memories.map(item => <article key={item.key}><span>{item.kind}</span><strong>{item.key}</strong><p>{item.value ?? item.source}</p><small>{relativeTime(item.updatedAt)}</small><div className="itemActions"><button className="secondary" disabled={busy} onClick={() => void confirmMemory(item.key)}>유효함</button><button className="danger" disabled={busy} onClick={() => void deleteMemory(item.key)}>삭제</button></div></article>)}
-          </div>
-        </section>}
+        {page === "projects" && <ResourceAssignments observations={observations} projects={projects} currentID={status?.project.id} busy={busy} onCreate={event => void createProject(event)} onSelect={projectID => { setPage("overview"); void switchProject(projectID); }} onAssign={(projectID, resourceID) => void assignResource(projectID, resourceID)} onUnassign={(projectID, resourceID) => void unassignResource(projectID, resourceID)} />}
 
         {page === "settings" && <section className="settingsGrid">
           <section className="panel modelCard">
-            <div className="cardTitle"><div><p className="eyebrow">LOCAL MODELS</p><h2>Ollama와 Embedding</h2></div><span className={model?.available ? "status online" : "status"}>{model?.available ? "ONLINE" : "OPTIONAL"}</span></div>
-            <p className="settingsIntro">로컬 모델은 선택 사항입니다. 구조 분석과 기본 검색은 모델 없이도 동작합니다.</p>
-            <div className="modelSummary"><p><strong>{model?.version || "Ollama 미연결"}</strong><span>Embedding {embeddingStatus?.current ?? 0}개 최신 · {embeddingStatus?.pending ?? 0}개 대기</span></p><button className="secondary" disabled={busy} onClick={() => void startModels()}>Ollama 시작</button><button disabled={busy || !model?.available || (embeddingStatus?.pending ?? 0) === 0} onClick={() => void syncEmbeddings()}>Embedding 동기화</button></div>
+            <div className="cardTitle"><div><p className="eyebrow">GLOBAL SETTINGS</p><h2>Ollama와 Embedding</h2></div><span className="status globalStatus">GLOBAL</span></div>
+            <p className="settingsIntro">선택한 모델은 모든 Project에 적용됩니다. 구조 분석과 기본 검색은 모델 없이도 동작합니다.</p>
+            <div className="modelSummary"><p><strong>{model?.version || "Ollama 미연결"}</strong><span>현재 Project Embedding {embeddingStatus?.current ?? 0}개 최신 · {embeddingStatus?.pending ?? 0}개 대기</span></p><button className="secondary" disabled={busy} onClick={() => void startModels()}>Ollama 시작</button><button disabled={busy || !status?.project.id || !model?.available || (embeddingStatus?.pending ?? 0) === 0} onClick={() => void syncEmbeddings()}>현재 Project 동기화</button></div>
             <div className="modelRoles">{(modelState?.selected ?? []).map(selected => <form key={`${selected.role}-${selected.model}`} onSubmit={event => void selectModel(event)}>
-              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>{selected.source === "project" ? "project · fixed" : selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" disabled={selected.role === "embedding" && selected.source === "project"} /><button className="secondary" disabled={busy || (selected.role === "embedding" && selected.source === "project")}>선택</button></div>
+              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>global · {selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" /><button className="secondary" disabled={busy}>선택</button></div>
             </form>)}</div>
             <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><select name="installRole" aria-label="설치 후 사용할 역할"><option value="">설치만</option><option value="gate">gate</option><option value="reconcile">reconcile</option><option value="embedding">embedding</option></select><button disabled={busy}>설치</button></div></form>
           </section>
-          <aside className="panel settingsNote"><p className="eyebrow">DESIGN PRINCIPLE</p><h2>Private by default</h2><p>프로젝트의 구조와 메모리는 사용자 전역 SQLite 저장소에 보관되며, 선택한 로컬 모델만 보조적으로 사용합니다.</p></aside>
+          <aside className="panel settingsNote"><p className="eyebrow">GLOBAL SCOPE</p><h2>모든 Project에 적용</h2><p>모델 설치와 역할 선택은 전역입니다. Memory, Graph, Workspace, Reconcile 같은 작업 데이터는 선택한 Project에만 저장됩니다.</p></aside>
         </section>}
         </div>
       </main>
