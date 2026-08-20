@@ -79,9 +79,11 @@ func TestIntegrationDoesNotRequireRegisteredProject(t *testing.T) {
 func TestUnregisteredAgentHookIsNoOp(t *testing.T) {
 	root := t.TempDir()
 	database := filepath.Join(t.TempDir(), "purpory.db")
-	payload := `{"hook_event_name":"UserPromptSubmit","prompt":"hello","session_id":"one","cwd":"` + root + `"}`
+	payload, _ := json.Marshal(map[string]string{
+		"hook_event_name": "UserPromptSubmit", "prompt": "hello", "session_id": "one", "cwd": root,
+	})
 	var output, errorOutput bytes.Buffer
-	if code := Run([]string{"--root", root, "--db", database, "preflight", "codex"}, strings.NewReader(payload), &output, &errorOutput); code != 0 {
+	if code := Run([]string{"--root", root, "--db", database, "preflight", "codex"}, bytes.NewReader(payload), &output, &errorOutput); code != 0 {
 		t.Fatalf("unregistered hook failed: %s", errorOutput.String())
 	}
 	if output.Len() != 0 || errorOutput.Len() != 0 {
