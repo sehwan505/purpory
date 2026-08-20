@@ -20,8 +20,12 @@ const (
 		"- After modifying code, run `purpory update`.\n" + endMarker
 )
 
-func Install(root, agent string) (string, error) {
-	path, err := agentFile(root, agent)
+func Install(agent string) (string, error) {
+	directory, err := configDirectory(agent)
+	if err != nil {
+		return "", err
+	}
+	path, err := agentFile(directory, agent)
 	if err != nil {
 		return "", err
 	}
@@ -36,7 +40,7 @@ func Install(root, agent string) (string, error) {
 			return "", err
 		}
 	}
-	hooksChanged, err := configureHooks(root, agent, true)
+	hooksChanged, err := configureHooks(directory, agent, true)
 	if err != nil {
 		return "", err
 	}
@@ -46,8 +50,12 @@ func Install(root, agent string) (string, error) {
 	return "unchanged", nil
 }
 
-func Uninstall(root, agent string) (string, error) {
-	path, err := agentFile(root, agent)
+func Uninstall(agent string) (string, error) {
+	directory, err := configDirectory(agent)
+	if err != nil {
+		return "", err
+	}
+	path, err := agentFile(directory, agent)
 	if err != nil {
 		return "", err
 	}
@@ -68,7 +76,7 @@ func Uninstall(root, agent string) (string, error) {
 			return "", err
 		}
 	}
-	hooksChanged, err := configureHooks(root, agent, false)
+	hooksChanged, err := configureHooks(directory, agent, false)
 	if err != nil {
 		return "", err
 	}
@@ -78,19 +86,38 @@ func Uninstall(root, agent string) (string, error) {
 	return "unchanged", nil
 }
 
-func agentFile(root, agent string) (string, error) {
+func configDirectory(agent string) (string, error) {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent == "codex" {
+		if directory := strings.TrimSpace(os.Getenv("CODEX_HOME")); directory != "" {
+			return directory, nil
+		}
+	} else if agent != "claude" {
+		return "", errors.New("configure integration: agent must be codex or claude")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("configure integration: resolve home directory: %w", err)
+	}
+	if agent == "codex" {
+		return filepath.Join(home, ".codex"), nil
+	}
+	return filepath.Join(home, ".claude"), nil
+}
+
+func agentFile(directory, agent string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "codex":
-		return filepath.Join(root, "AGENTS.md"), nil
+		return filepath.Join(directory, "AGENTS.md"), nil
 	case "claude":
-		return filepath.Join(root, "CLAUDE.md"), nil
+		return filepath.Join(directory, "CLAUDE.md"), nil
 	default:
 		return "", errors.New("configure integration: agent must be codex or claude")
 	}
 }
 
-func configureHooks(root, agent string, install bool) (bool, error) {
-	path, err := hooksFile(root, agent)
+func configureHooks(directory, agent string, install bool) (bool, error) {
+	path, err := hooksFile(directory, agent)
 	if err != nil {
 		return false, err
 	}
@@ -142,12 +169,12 @@ func configureHooks(root, agent string, install bool) (bool, error) {
 	return true, nil
 }
 
-func hooksFile(root, agent string) (string, error) {
+func hooksFile(directory, agent string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "codex":
-		return filepath.Join(root, ".codex", "hooks.json"), nil
+		return filepath.Join(directory, "hooks.json"), nil
 	case "claude":
-		return filepath.Join(root, ".claude", "settings.json"), nil
+		return filepath.Join(directory, "settings.json"), nil
 	default:
 		return "", errors.New("configure integration: agent must be codex or claude")
 	}

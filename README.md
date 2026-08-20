@@ -109,12 +109,14 @@ outside a registered Project.
 `project remove` only unregisters a Project; its stored history is preserved and
 becomes available again if the same ID is registered later.
 
-The integration commands preserve existing agent configuration while installing
-prompt and session-end hooks. Session-end snapshots are reconciled in a detached
-worker; only explicit user statements may become durable project memory. Failed
-jobs remain queued and are retried by the next worker. Git repositories are observed as one Resource with
-all local worktrees represented as Views; non-Git folders use the same workspace
-model.
+The integration commands run without a registered Project and install once in
+the user's global Codex or Claude configuration. They preserve existing agent
+configuration while installing prompt and session-end hooks. Session-end
+snapshots are reconciled in a detached worker; only explicit user statements may
+become durable project memory. Failed jobs remain queued and are retried by the
+next worker. Git repositories are observed as one Resource with all local
+worktrees represented as Views; non-Git folders use the same workspace model.
+Codex requires reviewing the installed user hook once with `/hooks`.
 
 `purpory update` discovers all local Materials, fingerprints them, extracts only
 new or changed inputs, resolves project-wide relationships, and publishes the

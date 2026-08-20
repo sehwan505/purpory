@@ -365,25 +365,6 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		default:
 			return errors.New("model requires status, list, run, install, select, or start")
 		}
-	case "integration":
-		if len(arguments) != 3 {
-			return errors.New("integration requires agent and install or uninstall")
-		}
-		var result string
-		var err error
-		switch arguments[2] {
-		case "install":
-			result, err = service.InstallIntegration(arguments[1])
-		case "uninstall":
-			result, err = service.UninstallIntegration(arguments[1])
-		default:
-			return errors.New("integration requires install or uninstall")
-		}
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintln(output, result)
-		return err
 	case "preflight":
 		if len(arguments) != 2 {
 			return errors.New("preflight requires codex or claude")

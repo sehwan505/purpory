@@ -67,6 +67,9 @@ Directories are added only when their first behavior is implemented.
   Project; they can never establish a new Project.
 - Agent prompt/end hooks attach a Session to its observed View. Sessions without
   reliable historical View metadata remain preserved as unmapped sessions.
+- Agent instructions and hooks are installed once in user-global Codex or Claude
+  configuration; each invocation resolves its Project from the working directory
+  reported by the hook payload.
 - Session-end copies the transcript into a private queue and returns immediately.
   A detached worker treats the transcript as untrusted, accepts only memory
   grounded in explicit user statements, applies at most 20 memories per atomic
