@@ -138,12 +138,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	var hasDeliveryJSON int
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('context_decisions') WHERE name = 'delivery_json'").Scan(&hasDeliveryJSON); err == nil && hasDeliveryJSON > 0 {
-		if _, err := s.db.ExecContext(ctx, "ALTER TABLE context_decisions DROP COLUMN delivery_json"); err != nil {
-			return fmt.Errorf("migrate store: drop legacy delivery_json: %w", err)
-		}
-	}
 	return nil
 }
 
