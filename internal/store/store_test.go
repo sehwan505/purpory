@@ -112,6 +112,48 @@ func TestMigrationFollowsLegacyVersions(t *testing.T) {
 	}
 }
 
+func TestMigrateDropsLegacyDeliveryJSON(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy_delivery.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveProject(ctx, project.Project{ID: "legacy", Name: "Legacy", Root: "/legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		ALTER TABLE context_decisions ADD COLUMN delivery_json TEXT NOT NULL DEFAULT '{}';
+		INSERT INTO context_decisions(project_id, session_id, input_hash, proposal_json, final_action, prompt_version)
+		VALUES ('legacy', 'session', 'hash', '{}', 'retrieve', 'legacy');
+		INSERT INTO gate_feedback(decision_id, verdict) VALUES (last_insert_rowid(), 'correct');
+		DELETE FROM schema_migrations WHERE version = 20;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	if err := database.db.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('context_decisions') WHERE name = 'delivery_json'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected delivery_json column to be dropped, got count %d", count)
+	}
+	if err := database.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM context_decisions d
+		JOIN gate_feedback f ON f.decision_id = d.id
+	`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("expected decision feedback to be preserved, got %d: %v", count, err)
+	}
+}
+
 func TestProjectsOrdersMostRecentFirst(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
