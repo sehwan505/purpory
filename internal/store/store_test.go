@@ -453,7 +453,7 @@ func TestObservedResourceCanBelongToMultipleProjects(t *testing.T) {
 		t.Fatalf("resource was not unassigned: %v %v", removed, err)
 	}
 	one, err := database.Workspace(ctx, project.Project{ID: "one", Name: "One", Root: "/one"})
-	if err != nil || len(one.Resources) != 0 || len(one.UnmappedSessions) != 1 {
+	if err != nil || one.Resources == nil || len(one.Resources) != 0 || len(one.UnmappedSessions) != 1 {
 		t.Fatalf("unassign did not preserve the session: %#v %v", one, err)
 	}
 	observations, err = database.Observations(ctx)

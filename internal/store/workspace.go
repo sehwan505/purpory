@@ -254,7 +254,7 @@ func (s *Store) SaveSession(ctx context.Context, projectID, viewID, sessionID, a
 }
 
 func (s *Store) Workspace(ctx context.Context, current project.Project) (project.Workspace, error) {
-	result := project.Workspace{Project: current}
+	result := project.Workspace{Project: current, Resources: []project.Resource{}, UnmappedSessions: []project.Session{}}
 	rows, err := s.db.QueryContext(ctx, "SELECT id, provider, label, identity FROM resources WHERE project_id = ? ORDER BY label", current.ID)
 	if err != nil {
 		return result, fmt.Errorf("load workspace: resources: %w", err)

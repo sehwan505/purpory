@@ -49,10 +49,21 @@ type Status struct {
 }
 
 type QueryResult struct {
-	Seeds []graph.Node `json:"seeds"`
-	Nodes []graph.Node `json:"nodes"`
-	Edges []graph.Edge `json:"edges"`
-	Paths []string     `json:"paths,omitempty"`
+	Seeds   []graph.Node `json:"seeds"`
+	Matches []QueryMatch `json:"matches"`
+	Nodes   []graph.Node `json:"nodes"`
+	Edges   []graph.Edge `json:"edges"`
+	Paths   []string     `json:"paths,omitempty"`
+}
+
+type QueryMatch struct {
+	Node    graph.Node    `json:"node"`
+	Signals []QuerySignal `json:"signals"`
+}
+
+type QuerySignal struct {
+	Kind  string  `json:"kind"`
+	Score float64 `json:"score,omitempty"`
 }
 
 type GraphResult struct {
@@ -406,18 +417,53 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 	if err != nil {
 		return QueryResult{}, err
 	}
+	byID := make(map[string]graph.Node, len(contextGraph.nodes))
+	for _, node := range contextGraph.nodes {
+		byID[node.ID] = node
+	}
+	matches := []QueryMatch{}
+	matchIndexes := map[string]int{}
+	addMatch := func(node graph.Node, signal QuerySignal) {
+		index, found := matchIndexes[node.ID]
+		if !found {
+			matchIndexes[node.ID] = len(matches)
+			matches = append(matches, QueryMatch{Node: node})
+			index = len(matches) - 1
+		}
+		for _, existing := range matches[index].Signals {
+			if existing.Kind == signal.Kind {
+				return
+			}
+		}
+		matches[index].Signals = append(matches[index].Signals, signal)
+	}
 	ids := contextGraph.seeds(query)
+	for _, id := range ids {
+		addMatch(byID[id], QuerySignal{Kind: "text"})
+	}
 	seeds := make([]graph.Node, 0, len(semantic))
 	for _, match := range semantic {
 		ids = append(ids, match.node.ID)
 		seeds = append(seeds, match.node)
+		addMatch(match.node, QuerySignal{Kind: "semantic", Score: match.score})
 	}
 	lexical, _ := contextprepare.BM25(prepareCandidates(contextGraph.nodes), query, nil)
 	for _, candidate := range lexical {
 		ids = append(ids, candidate.NodeID)
+		addMatch(byID[candidate.NodeID], QuerySignal{Kind: "bm25", Score: candidate.Score})
 	}
 	nodes, edges := contextGraph.neighborhood(ids, 2, limit*4)
-	return QueryResult{Seeds: seeds, Nodes: nodes, Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
+	visible := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		visible[node.ID] = true
+	}
+	visibleMatches := matches[:0]
+	for _, match := range matches {
+		if visible[match.Node.ID] {
+			visibleMatches = append(visibleMatches, match)
+		}
+	}
+	return QueryResult{Seeds: seeds, Matches: visibleMatches, Nodes: nodes, Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
 }
 
 func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResult, error) {
