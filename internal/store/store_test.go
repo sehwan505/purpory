@@ -112,6 +112,33 @@ func TestMigrationFollowsLegacyVersions(t *testing.T) {
 	}
 }
 
+func TestMigrateDropsLegacyDeliveryJSON(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy_delivery.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `ALTER TABLE context_decisions ADD COLUMN delivery_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	if err := database.db.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('context_decisions') WHERE name = 'delivery_json'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected delivery_json column to be dropped, got count %d", count)
+	}
+}
+
 func TestProjectsOrdersMostRecentFirst(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
