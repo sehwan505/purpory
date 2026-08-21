@@ -2,19 +2,19 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   AssignResource, ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, CreateProject, DeleteMemory,
   EmbeddingStatus, Explain, Graph, InstallModel, Memories, ModelState, NeedsReviews,
-  Observations, Path, Prepare, Projects, Query, Reconciliations, Remember, ResolveContextRequest,
+  Observations, Projects, Query, Reconciliations, Remember, ResolveContextRequest,
   ResolveNeedsReview, SelectModel, SelectProject, StartModels, Status, SyncEmbeddings, UnassignResource,
   Update, Workspace,
 } from "../wailsjs/go/main/App";
 import type { app, graph, memory, prepare, project, reconcile } from "../wailsjs/go/models";
+import { Dropdown } from "./Dropdown";
 import { GraphView, NavIcon, NodeDetails, ProjectPicker, ReconciliationQueue, ResourceAssignments, WorkspaceAttention, WorkspaceHistory, WorkspaceTopology, reconciliationLabel, relativeTime, type Page } from "./ProjectViews";
 
 const projectPages: { id: Page; label: string; description: string }[] = [
   { id: "overview", label: "Overview", description: "프로젝트의 현재 상태를 한눈에 봅니다." },
   { id: "workspace", label: "Workspace", description: "Repository, View, Session의 연결을 살펴봅니다." },
   { id: "reconcile", label: "Reconcile", description: "등록된 Reconcile 작업과 진행 상태를 살펴봅니다." },
-  { id: "search", label: "Search", description: "프로젝트 안의 지식과 맥락을 찾습니다." },
-  { id: "graph", label: "Graph", description: "Intent와 실제 Material·Knowledge의 연결을 탐색합니다." },
+  { id: "graph", label: "Graph", description: "검색을 중심으로 Intent와 Material·Knowledge의 주변 관계를 탐색합니다." },
 ];
 const globalPages: { id: Page; label: string; description: string }[] = [
   { id: "projects", label: "Projects", description: "Project를 만들고 관찰된 Repository를 연결합니다." },
@@ -40,16 +40,10 @@ export default function App() {
   const [materialGraph, setMaterialGraph] = useState<app.GraphResult>();
   const [selectedNode, setSelectedNode] = useState<graph.Node>();
   const [explanation, setExplanation] = useState<app.ExplainResult>();
-  const [pathResult, setPathResult] = useState<graph.Path>();
-  const [prepared, setPrepared] = useState<prepare.Result>();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<"current" | "history">("current");
   const [query, setQuery] = useState("");
-  const [graphScope, setGraphScope] = useState("");
-  const [pathSource, setPathSource] = useState("");
-  const [pathTarget, setPathTarget] = useState("");
-  const [prepareMessage, setPrepareMessage] = useState("");
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [kind, setKind] = useState("note");
@@ -58,7 +52,7 @@ export default function App() {
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
     const [nextStatus, nextProjects, nextObservations, nextMemories, nextModel, nextEmbedding, nextWorkspace, nextReconciliations, nextGraph, nextRequests, nextReviews, nextDecisions] = await Promise.all([
-      Status(), Projects(), Observations(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Reconciliations(), Graph("", 200),
+      Status(), Projects(), Observations(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Reconciliations(), Graph("", 80),
       ContextRequests(""), NeedsReviews(""), ContextDecisions(30),
     ]);
     if (generation !== refreshGeneration.current) return;
@@ -154,59 +148,41 @@ export default function App() {
     setSelectedViewID("");
     setSelectedNode(undefined);
     setResults(undefined);
+    setQuery("");
     setExplanation(undefined);
-    setPathResult(undefined);
-    setPrepared(undefined);
+    setKey("");
+    setValue("");
   }
 
   async function search(event: FormEvent) {
     event.preventDefault();
     if (!query.trim()) return;
     await perform(async () => {
-      const found = await Query(query, 20);
+      const found = await Query(query, 12);
       setResults(found);
       const first = found.nodes?.[0];
       if (first) {
         setSelectedNode(first);
         setExplanation(await Explain(first.id));
+      } else {
+        setSelectedNode(undefined);
+        setExplanation(undefined);
       }
       setMessage(`${found.nodes?.length ?? 0}개 노드`);
     });
   }
 
-  async function loadGraph(event: FormEvent) {
-    event.preventDefault();
-    await perform(async () => {
-      const found = await Graph(graphScope, 200);
-      setMaterialGraph(found);
-      setMessage(`${found.totalNodes}개 노드 · ${found.totalEdges}개 관계`);
-    });
+  function clearGraphSearch() {
+    setQuery("");
+    setResults(undefined);
+    setSelectedNode(undefined);
+    setExplanation(undefined);
   }
 
   async function explainNode(node: graph.Node) {
     setSelectedNode(node);
     setExplanation(undefined);
     await perform(async () => setExplanation(await Explain(node.id)));
-  }
-
-  async function findPath(event: FormEvent) {
-    event.preventDefault();
-    if (!pathSource.trim() || !pathTarget.trim()) return;
-    await perform(async () => {
-      const found = await Path(pathSource, pathTarget);
-      setPathResult(found);
-      setMessage(`${found.nodes?.length ?? 0}개 노드를 잇는 경로`);
-    });
-  }
-
-  async function prepareContext(event: FormEvent) {
-    event.preventDefault();
-    if (!prepareMessage.trim()) return;
-    await perform(async () => {
-      const result = await Prepare(prepareMessage, 2000);
-      setPrepared(result);
-      setMessage(result.action === "retrieve" ? "전달할 Context를 준비했습니다." : result.action === "ask" ? "사용자 확인이 필요합니다." : "전달할 Context가 없습니다.");
-    });
   }
 
   async function remember(event: FormEvent) {
@@ -297,20 +273,15 @@ export default function App() {
     setKind(item.kind);
     setKey(item.key);
     setValue(item.value ?? item.source ?? "");
-    document.getElementById("memory-key")?.focus();
+    window.requestAnimationFrame(() => document.getElementById("memory-value")?.focus());
   }
 
   function openMemory(key: string) {
     setPage("graph");
-    setGraphScope(key);
-    const node = materialGraph?.nodes?.find(item => item.ref === key && item.owner === "durable");
-    if (node) {
-      void explainNode(node);
-      return;
-    }
+    setQuery(key);
     void perform(async () => {
-      const found = await Graph(key, 200);
-      setMaterialGraph(found);
+      const found = await Query(key, 12);
+      setResults(found);
       const match = found.nodes?.find(item => item.ref === key && item.owner === "durable");
       if (match) {
         setSelectedNode(match);
@@ -386,6 +357,8 @@ export default function App() {
   const openReviews = reviews.filter(item => item.status === "open");
   const resolvedReviews = reviews.filter(item => item.status === "resolved");
   const selectedMemory = explanation?.memory ?? (selectedNode?.owner === "durable" ? memories.find(item => item.key === selectedNode.ref) : undefined);
+  const graphNodes = results?.nodes ?? materialGraph?.nodes ?? [];
+  const graphEdges = results?.edges ?? materialGraph?.edges ?? [];
   const latestReconciliation = reconciliations[0];
   const reconciliationBySession = new Map<string, reconcile.Run>();
   for (const run of reconciliations) if (!reconciliationBySession.has(run.sessionId)) reconciliationBySession.set(run.sessionId, run);
@@ -447,57 +420,26 @@ export default function App() {
 
         {page === "reconcile" && <ReconciliationQueue runs={reconciliations} />}
 
-        {page === "search" && <section className="panel">
-          <div className="sectionTitle"><div><p className="eyebrow">RETRIEVE</p><h2>필요한 맥락 찾기</h2></div><span>프로젝트 범위</span></div>
-          <form className="search" onSubmit={event => void search(event)}>
-            <label htmlFor="query">질문 또는 Material 이름</label>
-            <div><input id="query" value={query} onChange={event => setQuery(event.target.value)} placeholder="예: 프로젝트 목표 또는 데이터베이스 결정" /><button disabled={busy}>검색</button></div>
+        {page === "graph" && <section className="panel graphPage">
+          <div className="sectionTitle"><div><p className="eyebrow">PROJECT GRAPH</p><h2>검색 중심 관계 탐색</h2></div><span>{materialGraph?.totalNodes ?? 0} nodes · {materialGraph?.totalEdges ?? 0} edges</span></div>
+          <form className="search graphSearch" onSubmit={event => void search(event)}>
+            <label htmlFor="query">질문, 지식 또는 Material</label>
+            <div><input id="query" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="예: 프로젝트 목표 또는 데이터베이스 결정" /><button disabled={busy}>주변 그래프 찾기</button>{results && <button type="button" className="secondary" onClick={clearGraphSearch}>전체 보기</button>}</div>
           </form>
-          {results && (results.nodes?.length ?? 0) > 0 && <div className="contextGraph">
-            <GraphView nodes={results.nodes ?? []} edges={results.edges ?? []} selectedID={selectedNode?.id} onSelect={node => void explainNode(node)} />
-            <NodeDetails node={selectedNode} explanation={explanation} onSelect={node => void explainNode(node)} />
-          </div>}
-          {results && <div className="results">
-            {(results.nodes ?? []).slice(0, 12).map(node => <button type="button" className="resultCard" key={node.id} onClick={() => void explainNode(node)}><span>{node.kind}</span><strong>{node.label}</strong><p>{node.content || `${node.materialUri}${node.locator ? `#${node.locator}` : ""}`}</p></button>)}
-            {(results.nodes?.length ?? 0) === 0 && <p className="empty">관련 맥락을 찾지 못했습니다.</p>}
-          </div>}
-
-          <div className="toolGrid">
-            <form className="contextTool" onSubmit={event => void findPath(event)}>
-              <div><p className="eyebrow">PATH</p><h2>두 실물 사이의 관계</h2></div>
-              <label htmlFor="pathSource">시작 노드</label><input id="pathSource" value={pathSource} onChange={event => setPathSource(event.target.value)} placeholder="예: AGENTS.md" />
-              <label htmlFor="pathTarget">도착 노드</label><input id="pathTarget" value={pathTarget} onChange={event => setPathTarget(event.target.value)} placeholder="예: Service.Update()" />
-              <button disabled={busy}>경로 찾기</button>
-              {pathResult && <ol className="pathResult">{(pathResult.nodes ?? []).map((node, index) => <li key={node.id}><strong>{node.label}</strong>{pathResult.edges?.[index] && <span>{pathResult.edges[index].relation}</span>}</li>)}</ol>}
-            </form>
-            <form className="contextTool" onSubmit={event => void prepareContext(event)}>
-              <div><p className="eyebrow">PREPARE</p><h2>Agent 전달 맥락 미리보기</h2></div>
-              <label htmlFor="prepareMessage">작업 의도</label><textarea id="prepareMessage" value={prepareMessage} onChange={event => setPrepareMessage(event.target.value)} placeholder="예: 업데이트가 의도와 Material의 연결을 보존하는지 확인해줘" />
-              <button disabled={busy}>Context 준비</button>
-              {prepared && <div className="prepared"><span>{prepared.action}</span><pre>{prepared.hints ? JSON.stringify(prepared.hints, null, 2) : prepared.clarification || "탐색할 경로가 없습니다."}</pre></div>}
-            </form>
+          {results && (results.matches?.length ?? 0) > 0 && <div className="graphMatches" aria-label="검색된 시작 노드">{results.matches.slice(0, 8).map(match => <button type="button" className={match.node.id === selectedNode?.id ? "selected" : ""} key={match.node.id} onClick={() => void explainNode(match.node)}><span>{match.signals.map(signal => signal.kind).join(" + ")}</span><strong>{match.node.label}</strong></button>)}</div>}
+          <div className="contextGraph graphExplorer">
+            <GraphView nodes={graphNodes} edges={graphEdges} matches={results?.matches} searchQuery={results ? query : undefined} selectedID={selectedNode?.id} emptyMessage={results ? "검색과 연결된 노드를 찾지 못했습니다." : undefined} onSelect={node => void explainNode(node)} />
+            <NodeDetails node={selectedNode} explanation={explanation} durable={selectedMemory} busy={busy} onSelect={node => void explainNode(node)} onEdit={editMemory} onConfirm={key => void confirmMemory(key)} onDelete={key => void deleteMemory(key)} />
           </div>
-        </section>}
-
-        {page === "graph" && <section className="panel">
-          <div className="sectionTitle"><div><p className="eyebrow">PROJECT GRAPH</p><h2>실물·지식·지속 메모리</h2></div><span>{materialGraph?.totalNodes ?? 0} nodes · {materialGraph?.totalEdges ?? 0} edges</span></div>
-          <form className="search" onSubmit={event => void loadGraph(event)}>
-            <label htmlFor="graphScope">선택 범위</label>
-            <div><input id="graphScope" value={graphScope} onChange={event => setGraphScope(event.target.value)} placeholder="전체 또는 예: internal/app" /><button disabled={busy}>그래프 불러오기</button></div>
-          </form>
-          <details className="memoryComposer" open={key.length > 0 || undefined}>
-            <summary>지속 메모리 추가 또는 편집</summary>
+          {key && <section className="memoryEditor">
+            <div><strong>지속 메모리 편집</strong><button type="button" className="textButton" onClick={() => { setKey(""); setValue(""); }}>닫기</button></div>
             <form className="memoryForm" onSubmit={event => void remember(event)}>
-              <label htmlFor="memory-kind">종류</label><select id="memory-kind" value={kind} onChange={event => setKind(event.target.value)}><option value="note">지식</option><option value="decision">결정</option><option value="reference">참조</option></select>
-              <label htmlFor="memory-key">키</label><input id="memory-key" value={key} onChange={event => setKey(event.target.value)} placeholder="database.selection" />
+              <label htmlFor="memory-kind">종류</label><Dropdown id="memory-kind" value={kind} onChange={setKind} options={[{ value: "note", label: "지식" }, { value: "decision", label: "결정" }, { value: "reference", label: "참조" }]} />
+              <label htmlFor="memory-key">키</label><input id="memory-key" value={key} readOnly />
               <label htmlFor="memory-value">내용</label><textarea id="memory-value" value={value} onChange={event => setValue(event.target.value)} placeholder="왜 이 결정을 내렸는지 함께 기록하세요." />
               <button disabled={busy}>저장</button>
             </form>
-          </details>
-          <div className="contextGraph graphExplorer">
-            <GraphView nodes={materialGraph?.nodes ?? []} edges={materialGraph?.edges ?? []} selectedID={selectedNode?.id} onSelect={node => void explainNode(node)} />
-            <NodeDetails node={selectedNode} explanation={explanation} durable={selectedMemory} busy={busy} onSelect={node => void explainNode(node)} onEdit={editMemory} onConfirm={key => void confirmMemory(key)} onDelete={key => void deleteMemory(key)} />
-          </div>
+          </section>}
         </section>}
 
         {page === "projects" && <ResourceAssignments observations={observations} projects={projects} currentID={status?.project.id} busy={busy} onCreate={event => void createProject(event)} onSelect={projectID => { setPage("overview"); void switchProject(projectID); }} onAssign={(projectID, resourceID) => void assignResource(projectID, resourceID)} onUnassign={(projectID, resourceID) => void unassignResource(projectID, resourceID)} />}
@@ -510,7 +452,7 @@ export default function App() {
             <div className="modelRoles">{(modelState?.selected ?? []).map(selected => <form key={`${selected.role}-${selected.model}`} onSubmit={event => void selectModel(event)}>
               <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>global · {selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" /><button className="secondary" disabled={busy}>선택</button></div>
             </form>)}</div>
-            <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><select name="installRole" aria-label="설치 후 사용할 역할"><option value="">설치만</option><option value="gate">gate</option><option value="reconcile">reconcile</option><option value="embedding">embedding</option></select><button disabled={busy}>설치</button></div></form>
+            <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><Dropdown name="installRole" ariaLabel="설치 후 사용할 역할" options={[{ value: "", label: "설치만" }, { value: "gate", label: "gate" }, { value: "reconcile", label: "reconcile" }, { value: "embedding", label: "embedding" }]} /><button disabled={busy}>설치</button></div></form>
           </section>
           <aside className="panel settingsNote"><p className="eyebrow">GLOBAL SCOPE</p><h2>모든 Project에 적용</h2><p>모델 설치와 역할 선택은 전역입니다. Memory, Graph, Workspace, Reconcile 같은 작업 데이터는 선택한 Project에만 저장됩니다.</p></aside>
         </section>}

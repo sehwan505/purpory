@@ -95,6 +95,9 @@ func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
 	if err != nil || len(found.Seeds) != 1 || found.Seeds[0].ID != "intent:decision.auth" {
 		t.Fatalf("semantic graph seed missing: %#v %v", found, err)
 	}
+	if len(found.Matches) != 1 || len(found.Matches[0].Signals) != 1 || found.Matches[0].Signals[0].Kind != "semantic" || found.Matches[0].Signals[0].Score == 0 {
+		t.Fatalf("semantic graph match was not explainable: %#v", found.Matches)
+	}
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
 	prepared, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "semantic", WorkingDirectory: root, TokenBudget: 512})
 	if err != nil || prepared.Hints == nil || len(prepared.Hints.Nodes) != 1 || prepared.Hints.Nodes[0].Path != "decision.auth" {
