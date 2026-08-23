@@ -162,3 +162,28 @@ func TestMemoryLifecycleCLI(t *testing.T) {
 		t.Fatalf("confirm CLI failed: %q %v", output.String(), err)
 	}
 }
+
+func TestKnowledgeCRUDCLI(t *testing.T) {
+	ctx := context.Background()
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	var output bytes.Buffer
+	for _, arguments := range [][]string{
+		{"knowledge", "set", "product.goal", "first"},
+		{"knowledge", "set", "product.goal", "second"},
+		{"knowledge", "get", "product.goal"},
+		{"knowledge", "list", "product"},
+	} {
+		output.Reset()
+		if err := runCLI(ctx, service, arguments, bytes.NewReader(nil), &output); err != nil {
+			t.Fatalf("%v: %v", arguments, err)
+		}
+	}
+	var values []memory.Memory
+	if err := json.Unmarshal(output.Bytes(), &values); err != nil || len(values) != 1 || values[0].Value == nil || *values[0].Value != "second" {
+		t.Fatalf("knowledge list = %#v, %v", values, err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"knowledge", "delete", "product.goal"}, bytes.NewReader(nil), &output); err != nil || output.String() != "true\n" {
+		t.Fatalf("knowledge delete = %q, %v", output.String(), err)
+	}
+}

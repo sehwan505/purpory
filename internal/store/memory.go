@@ -153,21 +153,9 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 			return nil, ErrMemoryConflict
 		}
 	}
-	type auditChange struct {
-		Key         string         `json:"key"`
-		Action      string         `json:"action"`
-		Before      *memory.Memory `json:"before,omitempty"`
-		After       memory.Memory  `json:"after"`
-		VersionID   int64          `json:"versionId,omitempty"`
-		EvidenceIDs []string       `json:"evidenceIds"`
-	}
-	type auditLink struct {
-		graph.Link
-		EvidenceIDs []string `json:"evidenceIds"`
-	}
 	results := make([]SaveResult, 0, len(proposals))
-	var changes []auditChange
-	var links []auditLink
+	var changes []memory.ReconcileChange
+	var links []memory.ReconcileLink
 	for _, proposal := range proposals {
 		var before memory.Memory
 		var value, source sql.NullString
@@ -192,7 +180,7 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		}
 		results = append(results, result)
 		if result.Action != "unchanged" {
-			changes = append(changes, auditChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs})
+			changes = append(changes, memory.ReconcileChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs})
 		}
 		for _, link := range proposal.Links {
 			created, err := saveGraphLink(ctx, connection, projectID, link, "reconcile:"+sessionID)
@@ -200,7 +188,7 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 				return nil, fmt.Errorf("reconcile memory: save link: %w", err)
 			}
 			if created {
-				links = append(links, auditLink{Link: link, EvidenceIDs: proposal.EvidenceIDs})
+				links = append(links, memory.ReconcileLink{SourceKind: link.SourceKind, SourceRef: link.SourceRef, Relation: link.Relation, TargetKind: link.TargetKind, TargetRef: link.TargetRef, EvidenceIDs: proposal.EvidenceIDs})
 			}
 		}
 	}
@@ -218,6 +206,35 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 	}
 	committed = true
 	return results, nil
+}
+
+func (s *Store) ReconciliationEvents(ctx context.Context, projectID string) ([]memory.ReconcileEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT session_id, changes_json, created_at
+		FROM reconciliation_events WHERE project_id = ? ORDER BY created_at DESC, id DESC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list reconciliation events: %w", err)
+	}
+	defer rows.Close()
+	var events []memory.ReconcileEvent
+	for rows.Next() {
+		var event memory.ReconcileEvent
+		var encoded string
+		var timestamp int64
+		if err := rows.Scan(&event.SessionID, &encoded, &timestamp); err != nil {
+			return nil, fmt.Errorf("list reconciliation events: scan: %w", err)
+		}
+		if err := json.Unmarshal([]byte(encoded), &event); err != nil {
+			return nil, fmt.Errorf("list reconciliation events: decode: %w", err)
+		}
+		event.OccurredAt = time.Unix(timestamp, 0).UTC().Format(time.RFC3339)
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list reconciliation events: %w", err)
+	}
+	return events, nil
 }
 
 func (s *Store) Memory(ctx context.Context, projectID, key string) (memory.Memory, error) {

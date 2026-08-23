@@ -181,6 +181,13 @@ func (s *Service) Reconciliations(_ context.Context) ([]reconcile.Run, error) {
 	return reconcile.Runs(s.project.ID, 100)
 }
 
+func (s *Service) ReconciliationEvents(ctx context.Context) ([]memory.ReconcileEvent, error) {
+	if s.project.ID == "" {
+		return []memory.ReconcileEvent{}, nil
+	}
+	return s.store.ReconciliationEvents(ctx, s.project.ID)
+}
+
 func (s *Service) reconcileModel(ctx context.Context) (ollamaReconcileModel, error) {
 	selected, err := s.modelName(ctx, "reconcile")
 	if err != nil {

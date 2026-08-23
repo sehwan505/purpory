@@ -1,8 +1,8 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
-  AssignResource, ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, CreateProject, DeleteMemory,
+  AssignResource, ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, CreateProject, DeleteMemory, DeleteProject,
   EmbeddingStatus, Explain, Graph, InstallModel, Memories, ModelState, NeedsReviews,
-  Observations, Projects, Query, Reconciliations, Remember, ResolveContextRequest,
+  Observations, Projects, Query, ReconciliationEvents, Reconciliations, Remember, ResolveContextRequest,
   ResolveNeedsReview, SelectModel, SelectProject, StartModels, Status, SyncEmbeddings, UnassignResource,
   Update, Workspace,
 } from "../wailsjs/go/main/App";
@@ -36,6 +36,7 @@ export default function App() {
   const [decisions, setDecisions] = useState<prepare.Decision[]>([]);
   const [workspace, setWorkspace] = useState<project.Workspace>();
   const [reconciliations, setReconciliations] = useState<reconcile.Run[]>([]);
+  const [reconciliationEvents, setReconciliationEvents] = useState<memory.ReconcileEvent[]>([]);
   const [results, setResults] = useState<app.QueryResult>();
   const [materialGraph, setMaterialGraph] = useState<app.GraphResult>();
   const [selectedNode, setSelectedNode] = useState<graph.Node>();
@@ -51,8 +52,8 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
-    const [nextStatus, nextProjects, nextObservations, nextMemories, nextModel, nextEmbedding, nextWorkspace, nextReconciliations, nextGraph, nextRequests, nextReviews, nextDecisions] = await Promise.all([
-      Status(), Projects(), Observations(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Reconciliations(), Graph("", 80),
+    const [nextStatus, nextProjects, nextObservations, nextMemories, nextModel, nextEmbedding, nextWorkspace, nextReconciliations, nextReconciliationEvents, nextGraph, nextRequests, nextReviews, nextDecisions] = await Promise.all([
+      Status(), Projects(), Observations(), Memories(""), ModelState(), EmbeddingStatus(), Workspace(), Reconciliations(), ReconciliationEvents(), Graph("", 80),
       ContextRequests(""), NeedsReviews(""), ContextDecisions(30),
     ]);
     if (generation !== refreshGeneration.current) return;
@@ -64,6 +65,7 @@ export default function App() {
     setEmbeddingStatus(nextEmbedding);
     setWorkspace(nextWorkspace);
     setReconciliations(nextReconciliations ?? []);
+    setReconciliationEvents(nextReconciliationEvents ?? []);
     setMaterialGraph(nextGraph);
     setRequests(nextRequests ?? []);
     setReviews(nextReviews ?? []);
@@ -133,6 +135,17 @@ export default function App() {
       clearProjectView();
       await refresh();
       setMessage(`${name} Project를 만들었습니다. 이제 Repository를 연결하세요.`);
+    });
+  }
+
+  async function deleteProject(projectID: string) {
+    const target = projects.find(item => item.id === projectID);
+    if (!target) return;
+    await perform(async () => {
+      setStatus(await DeleteProject(projectID));
+      clearProjectView();
+      await refresh();
+      setMessage(`${target.name} Project 등록을 삭제했습니다.`);
     });
   }
 
@@ -418,7 +431,7 @@ export default function App() {
           </>}
         </section>}
 
-        {page === "reconcile" && <ReconciliationQueue runs={reconciliations} />}
+        {page === "reconcile" && <ReconciliationQueue runs={reconciliations} events={reconciliationEvents} />}
 
         {page === "graph" && <section className="panel graphPage">
           <div className="sectionTitle"><div><p className="eyebrow">PROJECT GRAPH</p><h2>검색 중심 관계 탐색</h2></div><span>{materialGraph?.totalNodes ?? 0} nodes · {materialGraph?.totalEdges ?? 0} edges</span></div>
@@ -442,7 +455,7 @@ export default function App() {
           </section>}
         </section>}
 
-        {page === "projects" && <ResourceAssignments observations={observations} projects={projects} currentID={status?.project.id} busy={busy} onCreate={event => void createProject(event)} onSelect={projectID => { setPage("overview"); void switchProject(projectID); }} onAssign={(projectID, resourceID) => void assignResource(projectID, resourceID)} onUnassign={(projectID, resourceID) => void unassignResource(projectID, resourceID)} />}
+        {page === "projects" && <ResourceAssignments observations={observations} projects={projects} currentID={status?.project.id} busy={busy} onCreate={event => void createProject(event)} onDelete={projectID => void deleteProject(projectID)} onSelect={projectID => { setPage("overview"); void switchProject(projectID); }} onAssign={(projectID, resourceID) => void assignResource(projectID, resourceID)} onUnassign={(projectID, resourceID) => void unassignResource(projectID, resourceID)} />}
 
         {page === "settings" && <section className="settingsGrid">
           <section className="panel modelCard">
