@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/sehwan505/purpory/internal/graph"
@@ -418,9 +417,9 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 	if err != nil || len(graphNodes) != 2 || len(graphEdges) != 1 || graphEdges[0].Owner != graph.OwnerDurable || graphEdges[0].Provenance != "reconcile:codex:one" {
 		t.Fatalf("reconciliation graph link missing: %#v %#v %v", graphNodes, graphEdges, err)
 	}
-	var audit string
-	if err := database.db.QueryRowContext(ctx, "SELECT changes_json FROM reconciliation_events WHERE project_id = ? AND session_id = ?", current.ID, "codex:one").Scan(&audit); err != nil || !strings.Contains(audit, `"relation":"realized_by"`) || !strings.Contains(audit, `"evidenceIds":["U000001"]`) {
-		t.Fatalf("reconciliation provenance missing: %q %v", audit, err)
+	events, err := database.ReconciliationEvents(ctx, current.ID)
+	if err != nil || len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].After.Value == nil || *events[0].Changes[0].After.Value != value || len(events[0].Links) != 1 || events[0].Links[0].Relation != graph.RelationRealizedBy || events[0].Links[0].EvidenceIDs[0] != "U000001" {
+		t.Fatalf("reconciliation provenance missing: %#v %v", events, err)
 	}
 }
 

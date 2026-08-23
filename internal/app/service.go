@@ -267,6 +267,30 @@ func (s *Service) CreateProject(ctx context.Context, name string) (Status, error
 	return s.Status(), nil
 }
 
+func (s *Service) RemoveProject(ctx context.Context, projectID string) (Status, error) {
+	projectID = strings.TrimSpace(projectID)
+	removed, err := s.store.RemoveProject(ctx, projectID)
+	if err != nil {
+		return Status{}, err
+	}
+	if !removed {
+		return Status{}, fmt.Errorf("remove project: project %q does not exist", projectID)
+	}
+	if projectID != s.project.ID {
+		return s.Status(), nil
+	}
+	projects, err := s.store.Projects(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	s.project = project.Project{}
+	s.activeRoot = ""
+	if len(projects) == 0 {
+		return s.Status(), nil
+	}
+	return s.SelectProject(ctx, projects[0].ID)
+}
+
 func (s *Service) Observations(ctx context.Context) ([]project.Observation, error) {
 	return s.store.Observations(ctx)
 }
@@ -337,6 +361,10 @@ func (s *Service) Remember(ctx context.Context, key string, kind memory.Kind, va
 
 func (s *Service) Memories(ctx context.Context, prefix string) ([]memory.Memory, error) {
 	return s.store.Memories(ctx, s.project.ID, strings.TrimSpace(prefix))
+}
+
+func (s *Service) Memory(ctx context.Context, key string) (memory.Memory, error) {
+	return s.store.Memory(ctx, s.project.ID, strings.TrimSpace(key))
 }
 
 func (s *Service) MemoryVersions(ctx context.Context, key string) ([]memory.Version, error) {
@@ -640,13 +668,17 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 }
 
 func resourceRoot(resource project.Resource, activeRoot string) string {
+	available := func(view project.View) bool {
+		info, err := os.Stat(view.Root)
+		return view.Available && err == nil && info.IsDir()
+	}
 	for _, view := range resource.Views {
-		if view.Available && activeRoot != "" && sameRoot(view.Root, activeRoot) {
+		if available(view) && activeRoot != "" && sameRoot(view.Root, activeRoot) {
 			return view.Root
 		}
 	}
 	for _, view := range resource.Views {
-		if view.Available {
+		if available(view) {
 			return view.Root
 		}
 	}

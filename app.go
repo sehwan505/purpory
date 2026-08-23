@@ -47,6 +47,12 @@ func (a *App) CreateProject(name string) (product.Status, error) {
 	return a.service.CreateProject(a.ctx, name)
 }
 
+func (a *App) DeleteProject(projectID string) (product.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.service.RemoveProject(a.ctx, projectID)
+}
+
 func (a *App) SelectProject(projectID string) (product.Status, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -213,4 +219,10 @@ func (a *App) Reconciliations() ([]reconcile.Run, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.service.Reconciliations(a.ctx)
+}
+
+func (a *App) ReconciliationEvents() ([]memory.ReconcileEvent, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.service.ReconciliationEvents(a.ctx)
 }

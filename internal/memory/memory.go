@@ -54,9 +54,28 @@ type Version struct {
 }
 
 type ReconcileEvent struct {
-	SessionID   string `json:"sessionId"`
-	ChangesJSON string `json:"changes"`
-	OccurredAt  string `json:"occurredAt"`
+	SessionID  string            `json:"sessionId"`
+	Changes    []ReconcileChange `json:"changes"`
+	Links      []ReconcileLink   `json:"links"`
+	OccurredAt string            `json:"occurredAt"`
+}
+
+type ReconcileChange struct {
+	Key         string   `json:"key"`
+	Action      string   `json:"action"`
+	Before      *Memory  `json:"before,omitempty"`
+	After       Memory   `json:"after"`
+	VersionID   int64    `json:"versionId,omitempty"`
+	EvidenceIDs []string `json:"evidenceIds"`
+}
+
+type ReconcileLink struct {
+	SourceKind  string   `json:"sourceKind"`
+	SourceRef   string   `json:"sourceRef"`
+	Relation    string   `json:"relation"`
+	TargetKind  string   `json:"targetKind"`
+	TargetRef   string   `json:"targetRef"`
+	EvidenceIDs []string `json:"evidenceIds"`
 }
 
 type Review struct {

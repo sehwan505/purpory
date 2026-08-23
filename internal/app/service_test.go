@@ -158,6 +158,44 @@ func TestSelectProjectDoesNotRequireAvailableWorkspace(t *testing.T) {
 	}
 }
 
+func TestRemoveSelectedProjectSelectsAnother(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	service, err := OpenDesktop(ctx, database, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	first, err := service.CreateProject(ctx, "First")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.CreateProject(ctx, "Second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.RemoveProject(ctx, second.Project.ID)
+	if err != nil || status.Project.ID != first.Project.ID {
+		t.Fatalf("remove selected project = %#v, %v", status, err)
+	}
+	status, err = service.RemoveProject(ctx, first.Project.ID)
+	if err != nil || status.Project.ID != "" {
+		t.Fatalf("remove last project = %#v, %v", status, err)
+	}
+}
+
+func TestResourceRootSkipsMissingView(t *testing.T) {
+	live := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	resource := project.Resource{Views: []project.View{
+		{Root: missing, Available: true},
+		{Root: live, Available: true},
+	}}
+	if got := resourceRoot(resource, missing); got != live {
+		t.Fatalf("resource root = %q, want %q", got, live)
+	}
+}
+
 func TestRootlessProjectUpdatesAssignedResourcesAndResolvesCWD(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "purpory.db")
