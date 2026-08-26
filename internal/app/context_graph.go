@@ -48,6 +48,19 @@ func newContextGraph(memories []memory.Memory, nodes []graph.Node, edges []graph
 	return result
 }
 
+func nodeReference(node graph.Node) graph.Node {
+	node.Content = ""
+	return node
+}
+
+func nodeReferences(nodes []graph.Node) []graph.Node {
+	result := make([]graph.Node, len(nodes))
+	for index, node := range nodes {
+		result[index] = nodeReference(node)
+	}
+	return result
+}
+
 func (g contextGraph) find(query string) (graph.Node, bool) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -154,11 +167,11 @@ func (g contextGraph) explanation(node graph.Node) graph.Explanation {
 		switch node.ID {
 		case edge.SourceID:
 			if target, found := byID[edge.TargetID]; found {
-				result.Connections = append(result.Connections, graph.Connection{Direction: "out", Relation: edge.Relation, Node: target})
+				result.Connections = append(result.Connections, graph.Connection{Direction: "out", Relation: edge.Relation, Node: nodeReference(target)})
 			}
 		case edge.TargetID:
 			if source, found := byID[edge.SourceID]; found {
-				result.Connections = append(result.Connections, graph.Connection{Direction: "in", Relation: edge.Relation, Node: source})
+				result.Connections = append(result.Connections, graph.Connection{Direction: "in", Relation: edge.Relation, Node: nodeReference(source)})
 			}
 		}
 	}

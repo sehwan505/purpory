@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
@@ -105,6 +106,39 @@ func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
 	}
 	if _, err := service.Explain(ctx, "decision.auth"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestQueryFallsBackWhenSemanticSearchTimesOut(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(semanticQueryTimeout + time.Second):
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
+	ctx := context.Background()
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	value := "Searchable fallback evidence."
+	if _, err := service.Remember(ctx, "knowledge.fallback", memory.Note, &value, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "slow-embed"); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _, err := service.store.Graph(ctx, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := embeddingCandidates(nodes)[0]
+	if err := service.store.SaveEmbedding(ctx, "demo", candidate.node.ID, candidate.hash, "slow-embed", make([]float64, embeddingDimensions)); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	result, err := service.Query(ctx, "Searchable fallback", 5)
+	if err != nil || len(result.Matches) == 0 || time.Since(started) > semanticQueryTimeout+time.Second {
+		t.Fatalf("query did not fall back after semantic timeout: %#v %v (%s)", result, err, time.Since(started))
 	}
 }
 

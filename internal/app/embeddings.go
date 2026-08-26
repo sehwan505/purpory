@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
@@ -14,6 +15,8 @@ import (
 )
 
 const embeddingDimensions = 512
+
+const semanticQueryTimeout = 2 * time.Second
 
 type EmbeddingSyncResult struct {
 	Model    string `json:"model"`
@@ -167,7 +170,9 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	if len(valid) == 0 {
 		return nil, nil
 	}
-	vectors, err := s.ollama.Embed(ctx, selected.Model, []string{query}, embeddingDimensions)
+	queryContext, cancel := context.WithTimeout(ctx, semanticQueryTimeout)
+	defer cancel()
+	vectors, err := s.ollama.Embed(queryContext, selected.Model, []string{query}, embeddingDimensions)
 	if err != nil {
 		return nil, nil // ponytail: dense retrieval is optional; lexical and graph retrieval remain available.
 	}

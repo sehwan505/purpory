@@ -124,18 +124,21 @@ Directories are added only when their first behavior is implemented.
 - Durable memory keys are topic-first dot paths. Kind remains independent, and
   old redundant kind prefixes are removed only in the query-time projection.
   This derived hierarchy adds no Topic rows or edges to the canonical graph.
-- Prepare returns at most three content-free start paths: a semantic anchor, a
-  distinct BM25 anchor when one exists, and an alternate branch when one exists.
+- Prepare returns at most three content-free start paths. An unseen,
+  content-bearing neighbor of the Session's most recently opened nodes is
+  preferred, then semantic, distinct BM25, and alternate-branch anchors fill the
+  remaining slots.
   Typed edges are included only between selected signposts. `query` browses path
   branches, `explain` opens one or more nodes and records the nodes actually
   explored, and `path` exposes both topic hierarchy and physical edges. Each
   HintMap remains audited with its prepare decision.
 - Embeddings rank relative top-k candidates without an absolute similarity
-  cutoff. Prepare starts from one semantic candidate, then uses BM25 to fill
-  distinct evidence. It suggests only content-bearing nodes; workspace Resources
-  and empty graph nodes are traversal structure, not direct evidence. Repeated
-  calls skip nodes actually opened in that Session without mutating the canonical
-  graph.
+  cutoff. Prepare starts from the current graph frontier when available, then
+  uses semantic and BM25 lanes to fill distinct evidence. It suggests only
+  content-bearing nodes; workspace Resources and empty graph nodes are traversal
+  structure, not direct evidence. Repeated calls skip nodes actually opened in
+  that Session and use their physical edges
+  as the next exploration frontier without mutating the canonical graph.
 
 ## Product direction
 
@@ -146,6 +149,16 @@ the evidence current without taking ownership of intent or its durable edges.
 Workspace, View, and Session remain operational topology. Reconciliation may use
 them as input and audit provenance, but never projects them as canonical graph
 nodes or edges.
+
+The first-value product path is one command and one progressive retrieval loop:
+`setup` registers and indexes the current Project and installs one Agent
+integration; preflight offers at most three signposts; `query` discovers at most
+five content-free candidates; `explain` loads only selected evidence; and `path`
+connects candidates without loading their content. Default CLI exploration output
+is character-bounded and semantic lookup is time-bounded. JSON is a
+machine-readable form of the same progressive contract, not a content bypass.
+The graph UI exposes each match signal, address, source, and provenance before or
+alongside its content so retrieval remains inspectable by a person.
 
 ## Extension examples
 

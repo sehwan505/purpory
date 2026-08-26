@@ -14,21 +14,22 @@ import (
 	"github.com/sehwan505/purpory/internal/prepare"
 )
 
-func (s *Store) SessionItemKeys(ctx context.Context, projectID, sessionID string) (map[string]bool, error) {
+func (s *Store) SessionItemKeys(ctx context.Context, projectID, sessionID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT key FROM session_items WHERE project_id = ? AND session_id = ?
+		SELECT key FROM session_items WHERE project_id = ? AND session_id = ?
+		GROUP BY key ORDER BY max(delivered_at) DESC, key
 	`, projectID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load session items: %w", err)
 	}
 	defer rows.Close()
-	result := map[string]bool{}
+	var result []string
 	for rows.Next() {
 		var key string
 		if err := rows.Scan(&key); err != nil {
 			return nil, fmt.Errorf("load session items: scan: %w", err)
 		}
-		result[key] = true
+		result = append(result, key)
 	}
 	return result, rows.Err()
 }

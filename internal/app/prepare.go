@@ -74,7 +74,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		return PrepareResult{}, err
 	}
 	catalog := prepareCatalog(s.project.ID, memories, nodes, workspace, len(opened), openRequests)
-	request.OpenedNodes = mapKeys(opened)
+	request.OpenedNodes = opened
 	request.Catalog = catalog
 
 	proposal := contextprepare.Fallback(request.Message)
@@ -148,7 +148,7 @@ func (s *Service) prepareHints(
 	ctx context.Context,
 	request contextprepare.Request,
 	physicalGraph contextGraph,
-	opened map[string]bool,
+	opened []string,
 	result *PrepareResult,
 ) error {
 	query := request.Message
@@ -232,7 +232,11 @@ func prepareNodeCandidate(node graph.Node) contextprepare.Candidate {
 	}
 }
 
-func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, opened map[string]bool, budget int) *contextprepare.HintMap {
+func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, opened []string, budget int) *contextprepare.HintMap {
+	openedSet := make(map[string]bool, len(opened))
+	for _, id := range opened {
+		openedSet[id] = true
+	}
 	byID := make(map[string]graph.Node, len(nodes))
 	for _, node := range nodes {
 		if node.Path == "" {
@@ -244,7 +248,7 @@ func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.
 	selected := map[string]bool{}
 	branches := map[string]bool{}
 	addAnchor := func(candidate contextprepare.Candidate, match string) bool {
-		if len(hints.Nodes) == 3 || selected[candidate.NodeID] || opened[candidate.NodeID] || opened[candidate.Key] {
+		if len(hints.Nodes) == 3 || selected[candidate.NodeID] || openedSet[candidate.NodeID] || openedSet[candidate.Key] {
 			return false
 		}
 		node, found := byID[candidate.NodeID]
@@ -260,6 +264,28 @@ func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.
 		selected[node.ID] = true
 		branches[topicBranch(node.Path)] = true
 		return true
+	}
+	adjacent := map[string][]graph.Edge{}
+	for _, edge := range edges {
+		adjacent[edge.SourceID] = append(adjacent[edge.SourceID], edge)
+		adjacent[edge.TargetID] = append(adjacent[edge.TargetID], edge)
+	}
+	neighborAdded := false
+	for _, openedID := range opened {
+		for _, edge := range adjacent[openedID] {
+			neighborID := edge.SourceID
+			if neighborID == openedID {
+				neighborID = edge.TargetID
+			}
+			node, found := byID[neighborID]
+			if found && node.State == graph.StateActive && strings.TrimSpace(node.Content) != "" && addAnchor(contextprepare.Candidate{NodeID: neighborID, Key: neighborID}, "neighbor:"+edge.Relation) {
+				neighborAdded = true
+				break
+			}
+		}
+		if neighborAdded {
+			break
+		}
 	}
 	if len(semantic) > 0 {
 		addAnchor(semantic[0], "semantic")
@@ -378,15 +404,6 @@ func canonicalPath(path string) string {
 		resolved = filepath.Join(resolved, missing[index])
 	}
 	return resolved
-}
-
-func mapKeys[V any](values map[string]V) []string {
-	result := make([]string, 0, len(values))
-	for key := range values {
-		result = append(result, key)
-	}
-	sort.Strings(result)
-	return result
 }
 
 func previewText(value string) string {

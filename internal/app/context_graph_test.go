@@ -60,6 +60,22 @@ func TestPrepareNodeCandidateUsesKnowledgeSubkind(t *testing.T) {
 	}
 }
 
+func TestExplanationLoadsOnlySelectedNodeContent(t *testing.T) {
+	nodes := []graph.Node{
+		{ID: "knowledge:selected", Label: "selected", Kind: graph.KindKnowledge, Content: "selected evidence"},
+		{ID: "knowledge:connected", Label: "connected", Kind: graph.KindKnowledge, Content: "connected evidence"},
+	}
+	current := newContextGraph(nil, nodes, []graph.Edge{{SourceID: nodes[0].ID, TargetID: nodes[1].ID, Relation: "related_to"}})
+	selected, found := current.find("knowledge:selected")
+	if !found {
+		t.Fatal("selected node missing")
+	}
+	explanation := current.explanation(selected)
+	if explanation.Node.Content != "selected evidence" || len(explanation.Connections) != 1 || explanation.Connections[0].Node.Content != "" {
+		t.Fatalf("explanation leaked connected content: %#v", explanation)
+	}
+}
+
 func TestTopicPathsExposeBranchesAndConnectRelatedLeaves(t *testing.T) {
 	nodes := []graph.Node{
 		{ID: "intent:rule", Label: "game.lol.play-rule", Kind: graph.KindIntent, Ref: "game.lol.play-rule", Owner: graph.OwnerDurable, State: graph.StateActive},

@@ -72,15 +72,16 @@ confidence. BM25 supplies distinct lexical evidence. Dot-separated durable keys
 form a topic-first hierarchy projected at query time; physical edges retain the
 cross-topic and Intent-to-evidence relationships.
 
-Preflight renders at most three content-free signposts: the leading semantic
-path, a distinct BM25 path when available, and an alternate topic branch when
-available. The agent chooses one or more nodes to load with `explain`, browses a
-branch with `query`, or connects paths with `path`. Only nodes actually opened
-by the Session suppress later suggestions; merely receiving a HintMap does not.
+Preflight renders at most three content-free signposts. An unseen, content-bearing
+neighbor of the Session's most recently opened nodes gets the first slot when one
+exists; semantic, distinct BM25, and alternate-topic candidates fill the remaining
+slots. The agent chooses one or more nodes to load with `explain`, browses a branch
+with `query`, or connects paths with `path`. Only nodes actually opened by the
+Session suppress later suggestions; merely receiving a HintMap does not.
 
-There is no forced minimum result count: no valid embedding or lexical candidate
-means no hint. Workspace Resources remain outside the physical knowledge graph.
-Exact per-session content suppression and token budgeting still apply.
+There is no forced minimum result count: no graph frontier, embedding, or lexical
+candidate means no hint. Workspace Resources remain outside the physical knowledge
+graph. Exact per-session content suppression and token budgeting still apply.
 Personalized PageRank becomes
 justified only when a multi-hop evaluation shows that this bounded traversal
 loses relevant evidence.
@@ -117,7 +118,9 @@ The engine must keep these checks runnable without a model or network:
 6. prepare keeps semantic top-k and BM25 evidence distinct within the token
    budget, while preflight never includes node content;
 7. an unresolved durable target is visible rather than silently discarded;
-8. Workspace Sessions never project into the canonical graph.
+8. Workspace Sessions never project into the canonical graph;
+9. default `query`, `explain`, and `path` output stays within its character and
+   item budgets, omits unopened content, and preserves that boundary in JSON.
 
 Future retrieval changes should be evaluated against LongMemEval's five ability
 classes plus project-specific intent-to-evidence recall, false-link rate, stale

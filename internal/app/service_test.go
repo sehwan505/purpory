@@ -336,6 +336,22 @@ func TestPrepareHintMapBudgetsSemanticBM25AndPaths(t *testing.T) {
 	}
 }
 
+func TestPrepareHintMapPrioritizesRecentGraphNeighbor(t *testing.T) {
+	nodes := []graph.Node{
+		{ID: "knowledge:recent", Label: "recent", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "opened"},
+		{ID: "knowledge:neighbor", Label: "neighbor", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "next"},
+		{ID: "knowledge:semantic", Label: "semantic", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "match"},
+	}
+	edges := []graph.Edge{{SourceID: "knowledge:recent", TargetID: "knowledge:neighbor", Relation: "calls"}}
+	hints := prepareHintMap(
+		[]contextprepare.Candidate{{NodeID: "knowledge:semantic"}}, nil,
+		nodes, edges, []string{"knowledge:recent"}, 512,
+	)
+	if hints == nil || len(hints.Nodes) != 2 || hints.Nodes[0].ID != "knowledge:neighbor" || hints.Nodes[0].Match != "neighbor:calls" {
+		t.Fatalf("recent graph neighbor was not prioritized: %#v", hints)
+	}
+}
+
 func TestPrepareDoesNotForceActivePathEvidence(t *testing.T) {
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
@@ -379,13 +395,23 @@ func TestIntentGraphLinksMaterialEvidence(t *testing.T) {
 	if err != nil || len(contextGraph.Nodes) < 2 || len(contextGraph.Edges) == 0 || contextGraph.Nodes[0].Kind != "intent" {
 		t.Fatalf("intent graph missing: %#v %v", contextGraph, err)
 	}
+	for _, node := range contextGraph.Nodes {
+		if node.Content != "" {
+			t.Fatalf("graph loaded node content: %#v", node)
+		}
+	}
 	explanation, err := service.Explain(context.Background(), "intent.release")
-	if err != nil || explanation.Memory == nil || explanation.Graph == nil || len(explanation.Graph.Connections) != 1 {
+	if err != nil || explanation.Memory == nil || explanation.Graph == nil || explanation.Graph.Node.Content != value || len(explanation.Graph.Connections) != 1 || explanation.Graph.Connections[0].Node.Content != "" {
 		t.Fatalf("intent explanation missing evidence: %#v %v", explanation, err)
 	}
 	path, err := service.Path(context.Background(), "intent.release", "file:release.md")
 	if err != nil || len(path.Nodes) != 2 || len(path.Edges) != 1 {
 		t.Fatalf("intent path missing: %#v %v", path, err)
+	}
+	for _, node := range path.Nodes {
+		if node.Content != "" {
+			t.Fatalf("path loaded node content: %#v", node)
+		}
 	}
 
 }
@@ -417,12 +443,18 @@ func TestUpdateDiscoversMaterialsIncrementally(t *testing.T) {
 		t.Fatalf("unexpected unchanged update: %#v", second)
 	}
 	query, err := service.Query(context.Background(), "Project context for everyone", 10)
-	foundSection := false
+	foundSection := ""
 	for _, node := range query.Nodes {
-		foundSection = foundSection || node.Kind == graph.KindKnowledge && node.Subkind == "section" && node.Label == "Purpose" && strings.Contains(node.Content, "Project context for everyone")
+		if node.Kind == graph.KindKnowledge && node.Subkind == "section" && node.Label == "Purpose" && node.Content == "" {
+			foundSection = node.ID
+		}
 	}
-	if err != nil || !foundSection {
+	if err != nil || foundSection == "" {
 		t.Fatalf("document context missing: %#v, %v", query, err)
+	}
+	explained, err := service.Explain(context.Background(), foundSection)
+	if err != nil || explained.Graph == nil || !strings.Contains(explained.Graph.Node.Content, "Project context for everyone") {
+		t.Fatalf("selected document evidence missing: %#v, %v", explained, err)
 	}
 	contextGraph, err := service.Graph(context.Background(), "", 20)
 	if err != nil || len(contextGraph.Nodes) == 0 || len(contextGraph.Edges) == 0 {

@@ -488,10 +488,11 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 	visibleMatches := matches[:0]
 	for _, match := range matches {
 		if visible[match.Node.ID] {
+			match.Node = nodeReference(match.Node)
 			visibleMatches = append(visibleMatches, match)
 		}
 	}
-	return QueryResult{Seeds: seeds, Matches: visibleMatches, Nodes: nodes, Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
+	return QueryResult{Seeds: nodeReferences(seeds), Matches: visibleMatches, Nodes: nodeReferences(nodes), Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
 }
 
 func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResult, error) {
@@ -507,7 +508,7 @@ func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResu
 		return GraphResult{}, nil
 	}
 	nodes, edges := contextGraph.neighborhood(seeds, 2, limit)
-	return GraphResult{Nodes: nodes, Edges: edges, TotalNodes: len(contextGraph.nodes), TotalEdges: len(contextGraph.edges), Truncated: len(contextGraph.nodes) > len(nodes)}, nil
+	return GraphResult{Nodes: nodeReferences(nodes), Edges: edges, TotalNodes: len(contextGraph.nodes), TotalEdges: len(contextGraph.edges), Truncated: len(contextGraph.nodes) > len(nodes)}, nil
 }
 
 func (s *Service) Explain(ctx context.Context, query string) (ExplainResult, error) {
@@ -560,7 +561,9 @@ func (s *Service) Path(ctx context.Context, source, target string) (graph.Path, 
 	if err != nil {
 		return graph.Path{}, err
 	}
-	return contextGraph.path(source, target)
+	result, err := contextGraph.path(source, target)
+	result.Nodes = nodeReferences(result.Nodes)
+	return result, err
 }
 
 func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
