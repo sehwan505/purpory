@@ -118,27 +118,18 @@ Directories are added only when their first behavior is implemented.
   nodes pending until its next explicit embedding sync, and later durable writes
   and reconciliation refresh vectors for the selected model immediately.
 - `prepare` owns the complete context gateway: bounded input validation,
-  optional gate classification, embedding-first retrieval, BM25 fallback,
-  graph-aware signposting, token budgeting, and decision audit. CLI, Wails, and
-  agent hooks call this same path.
+  optional gate classification, Typed PPR retrieval, token budgeting, and
+  decision audit. CLI and agent hooks call this same path.
 - Durable memory keys are topic-first dot paths. Kind remains independent, and
   old redundant kind prefixes are removed only in the query-time projection.
   This derived hierarchy adds no Topic rows or edges to the canonical graph.
-- Prepare returns at most three content-free start paths. An unseen,
-  content-bearing neighbor of the Session's most recently opened nodes is
-  preferred, then semantic, distinct BM25, and alternate-branch anchors fill the
-  remaining slots.
-  Typed edges are included only between selected signposts. `query` browses path
-  branches, `explain` opens one or more nodes and records the nodes actually
-  explored, and `path` exposes both topic hierarchy and physical edges. Each
-  HintMap remains audited with its prepare decision.
-- Embeddings rank relative top-k candidates without an absolute similarity
-  cutoff. Prepare starts from the current graph frontier when available, then
-  uses semantic and BM25 lanes to fill distinct evidence. It suggests only
-  content-bearing nodes; workspace Resources and empty graph nodes are traversal
-  structure, not direct evidence. Repeated calls skip nodes actually opened in
-  that Session and use their physical edges
-  as the next exploration frontier without mutating the canonical graph.
+- Query and prepare use one direction-aware Typed PPR path. Semantic top-k,
+  exact matches, and recently opened nodes personalize the walk. Prepare returns
+  at most three active, content-bearing, unopened signposts; opened nodes remain
+  lower-weight seeds so later calls move outward. `query` browses branches,
+  `explain` records opened evidence, and `path` exposes relationships. Each
+  HintMap remains audited. See [Intent Graph](INTENT_GRAPH.md#retrieval) for the
+  ranking and budgeting contract.
 
 ## Product direction
 

@@ -54,17 +54,6 @@ type Model struct {
 	LatencyMS *int    `json:"latencyMs"`
 }
 
-type Candidate struct {
-	NodeID  string
-	Key     string
-	Label   string
-	Kind    string
-	Source  string
-	Content string
-	Score   float64
-	Signals []string
-}
-
 type HintMap struct {
 	Nodes []HintNode `json:"nodes"`
 	Edges []HintEdge `json:"edges"`

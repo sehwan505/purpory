@@ -53,10 +53,11 @@ func TestContextGraphDoesNotProjectWorkspaceSessions(t *testing.T) {
 	}
 }
 
-func TestPrepareNodeCandidateUsesKnowledgeSubkind(t *testing.T) {
-	candidate := prepareNodeCandidate(graph.Node{ID: "knowledge:item", Kind: graph.KindKnowledge, Subkind: "function"})
-	if candidate.Kind != "function" {
-		t.Fatalf("candidate kind = %q", candidate.Kind)
+func TestPPRSeedsKeepSemanticPrimaryAndRecentContextActive(t *testing.T) {
+	semantic := []semanticMatch{{node: graph.Node{ID: "semantic"}, score: 0.8}}
+	seeds := pprSeeds(semantic, nil, []string{"opened"})
+	if seeds["semantic"] != 1 || seeds["opened"] != 0.5 {
+		t.Fatalf("unexpected personalized seeds: %#v", seeds)
 	}
 }
 

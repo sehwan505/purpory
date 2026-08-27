@@ -318,20 +318,19 @@ func TestPrepareDeduplicatesAsk(t *testing.T) {
 	}
 }
 
-func TestPrepareHintMapBudgetsSemanticBM25AndPaths(t *testing.T) {
+func TestPrepareHintMapUsesTypedPPRRankingAndBudget(t *testing.T) {
 	nodes := []graph.Node{
-		{ID: "intent:semantic", Label: "game.lol.play-rule", Kind: graph.KindIntent, Subkind: "decision", Ref: "game.lol.play-rule", Owner: graph.OwnerDurable, State: graph.StateActive},
-		{ID: "knowledge:lexical", Label: "game.lol.items", Kind: graph.KindKnowledge, Subkind: "note", Ref: "game.lol.items", Owner: graph.OwnerDurable, State: graph.StateActive},
-		{ID: "knowledge:alternate", Label: "product.discovery", Kind: graph.KindKnowledge, Subkind: "note", Ref: "product.discovery", Owner: graph.OwnerDurable, State: graph.StateActive},
+		{ID: "intent:semantic", Label: "game.lol.play-rule", Kind: graph.KindIntent, Subkind: "decision", Ref: "game.lol.play-rule", Owner: graph.OwnerDurable, State: graph.StateActive, Content: "semantic"},
+		{ID: "knowledge:exact", Label: "game.lol.items", Kind: graph.KindKnowledge, Subkind: "note", Ref: "game.lol.items", Owner: graph.OwnerDurable, State: graph.StateActive, Content: "exact"},
+		{ID: "knowledge:related", Label: "product.discovery", Kind: graph.KindKnowledge, Subkind: "note", Ref: "product.discovery", Owner: graph.OwnerDurable, State: graph.StateActive, Content: "related"},
 		{ID: "material:file:guide.md", Label: "guide.md", Kind: graph.KindMaterial, State: graph.StateActive, MaterialURI: "file:guide.md"},
 	}
-	edges := []graph.Edge{{SourceID: "intent:semantic", TargetID: "knowledge:lexical", Relation: graph.RelationRealizedBy}}
+	edges := []graph.Edge{{SourceID: "intent:semantic", TargetID: "knowledge:exact", Relation: graph.RelationRealizedBy}}
 	hints := prepareHintMap(
-		[]contextprepare.Candidate{{NodeID: "intent:semantic"}, {NodeID: "knowledge:alternate"}},
-		[]contextprepare.Candidate{{NodeID: "knowledge:lexical"}},
-		nodes, edges, nil, 512,
+		[]graph.Rank{{NodeID: "intent:semantic", Score: 0.4}, {NodeID: "knowledge:exact", Score: 0.3}, {NodeID: "knowledge:related", Score: 0.2}},
+		nodes, edges, []semanticMatch{{node: nodes[0], score: 0.9}}, []string{"knowledge:exact"}, nil, 512,
 	)
-	if hints == nil || len(hints.Nodes) != 3 || hints.Nodes[0].Match != "semantic" || hints.Nodes[1].Match != "bm25" || hints.Nodes[2].Match != "semantic:alternate-branch" || hints.Nodes[0].Path != "game.lol.play-rule" || len(hints.Edges) != 1 || contextprepare.EstimateTokens(contextprepare.RenderHintMap(hints)) > 512 {
+	if hints == nil || len(hints.Nodes) != 3 || hints.Nodes[0].Match != "semantic-seed" || hints.Nodes[1].Match != "exact-seed" || hints.Nodes[2].Match != "typed-ppr" || hints.Nodes[0].Path != "game.lol.play-rule" || len(hints.Edges) != 1 || contextprepare.EstimateTokens(contextprepare.RenderHintMap(hints)) > 512 {
 		t.Fatalf("unexpected hint map: %#v", hints)
 	}
 }
@@ -340,14 +339,13 @@ func TestPrepareHintMapPrioritizesRecentGraphNeighbor(t *testing.T) {
 	nodes := []graph.Node{
 		{ID: "knowledge:recent", Label: "recent", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "opened"},
 		{ID: "knowledge:neighbor", Label: "neighbor", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "next"},
-		{ID: "knowledge:semantic", Label: "semantic", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "match"},
 	}
 	edges := []graph.Edge{{SourceID: "knowledge:recent", TargetID: "knowledge:neighbor", Relation: "calls"}}
+	ranked := graph.TypedPPR(nodes, edges, pprSeeds(nil, nil, []string{"knowledge:recent"}))
 	hints := prepareHintMap(
-		[]contextprepare.Candidate{{NodeID: "knowledge:semantic"}}, nil,
-		nodes, edges, []string{"knowledge:recent"}, 512,
+		ranked, nodes, edges, nil, nil, []string{"knowledge:recent"}, 512,
 	)
-	if hints == nil || len(hints.Nodes) != 2 || hints.Nodes[0].ID != "knowledge:neighbor" || hints.Nodes[0].Match != "neighbor:calls" {
+	if hints == nil || len(hints.Nodes) != 1 || hints.Nodes[0].ID != "knowledge:neighbor" || hints.Nodes[0].Match != "typed-ppr" {
 		t.Fatalf("recent graph neighbor was not prioritized: %#v", hints)
 	}
 }

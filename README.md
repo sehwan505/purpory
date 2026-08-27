@@ -145,21 +145,12 @@ Reconciliation uses `qwen3.5:9b` by default; override it with
 `PURPORY_RECONCILE_CONTEXT_TOKENS`. The first embedding model selected or used
 is fixed for that Project. `purpory embed` backfills every missing or stale
 intent/knowledge node; later memory and reconciliation writes refresh their
-vectors immediately. Embeddings are a relative top-k candidate generator, not
-an absolute-confidence gate. Prepare starts with one semantic result and lets
-BM25 fill distinct lexical evidence; later calls advance past content already
-opened in the Session.
-Agent preflight does not inject content. It returns at most three topic-first
-paths, preferring an unseen neighbor of the most recently opened node before
-semantic, BM25, and alternate-branch anchors. Typed edges are included only when
-they connect selected signposts. CLI `query` returns at most five content-free
-navigation candidates by default; `explain` opens selected evidence and records
-that actual exploration, while `path` renders relationships without loading node
-content. Query, Graph, Path, and Explain connections are content-free across CLI
-and Desktop; only the selected Explain node carries content. Each default CLI
-exploration response has a hard character budget, and `--json` keeps the same
-progressive contract in machine-readable form. `purpory prepare` returns the same
-content-free HintMap as agent preflight.
+vectors immediately. Query and prepare rank semantic, exact, and recently opened
+seeds with direction-aware Typed PPR. Agent preflight returns at most three
+content-free signposts; CLI `query` returns five by default. `explain` loads
+selected evidence and `path` renders relationships without loading content.
+Default CLI responses remain character-budgeted, including `--json`. See the
+[retrieval contract](docs/INTENT_GRAPH.md#retrieval) for weights and progression.
 
 Run the model-free first-value and retrieval-budget checks with:
 

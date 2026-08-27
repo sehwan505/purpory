@@ -129,9 +129,10 @@ export function GraphView({ nodes, edges, matches = [], searchQuery, selectedID,
       points.set(node.id, { ...point, vx: 0, vy: 0 });
     }
     positionsRef.current = points;
-    const semanticDistance = new Map(visibleMatches.map(match => {
-      const score = match.signals.find(signal => signal.kind === "semantic")?.score ?? 0;
-      return [match.node.id, 102 - Math.max(0, score) * 46] as const;
+    const maximumRank = Math.max(...visibleMatches.map(match => match.signals.find(signal => signal.kind === "typed-ppr")?.score ?? 0), 1e-9);
+    const rankDistance = new Map(visibleMatches.map(match => {
+      const score = match.signals.find(signal => signal.kind === "typed-ppr")?.score ?? 0;
+      return [match.node.id, 102 - Math.max(0, score / maximumRank) * 46] as const;
     }));
     let frame = 0;
     let tick = 0;
@@ -165,7 +166,7 @@ export function GraphView({ nodes, edges, matches = [], searchQuery, selectedID,
         target.vy -= dy / length * force;
       }
       for (const [id, point] of points) {
-        const targetDistance = queryMode ? semanticDistance.get(id) : id === centerID ? 0 : undefined;
+        const targetDistance = queryMode ? rankDistance.get(id) : id === centerID ? 0 : undefined;
         if (targetDistance !== undefined) {
           const dx = 240 - point.x;
           const dy = 175 - point.y;

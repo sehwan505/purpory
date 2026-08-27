@@ -6,7 +6,6 @@ import (
 	"time"
 
 	product "github.com/sehwan505/purpory/internal/app"
-	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 	"github.com/sehwan505/purpory/internal/ollama"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
@@ -149,22 +148,10 @@ func (a *App) Graph(scope string, limit int) (product.GraphResult, error) {
 	return a.service.Graph(a.ctx, scope, limit)
 }
 
-func (a *App) Prepare(message string, tokenBudget int) (product.PrepareResult, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.Prepare(a.ctx, message, tokenBudget)
-}
-
 func (a *App) Explain(query string) (product.ExplainResult, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.service.Explain(a.ctx, query)
-}
-
-func (a *App) Path(source, target string) (graph.Path, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.Path(a.ctx, source, target)
 }
 
 func (a *App) Update() (product.UpdateResult, error) {

@@ -174,7 +174,7 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	defer cancel()
 	vectors, err := s.ollama.Embed(queryContext, selected.Model, []string{query}, embeddingDimensions)
 	if err != nil {
-		return nil, nil // ponytail: dense retrieval is optional; lexical and graph retrieval remain available.
+		return nil, nil // ponytail: dense retrieval is optional; exact and graph retrieval remain available.
 	}
 	var result []semanticMatch
 	for id, vector := range valid {
@@ -193,20 +193,35 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	return result, nil
 }
 
-func semanticCandidates(all []contextprepare.Candidate, matches []semanticMatch) []contextprepare.Candidate {
-	byID := map[string]contextprepare.Candidate{}
-	for _, candidate := range all {
-		byID[candidate.NodeID] = candidate
-	}
-	result := make([]contextprepare.Candidate, 0, len(matches))
-	for _, match := range matches {
-		candidate, available := byID[match.node.ID]
-		if !available {
-			continue
+func pprSeeds(semantic []semanticMatch, exact, opened []string) map[string]float64 {
+	result := map[string]float64{}
+	if len(semantic) > 0 {
+		maximum := semantic[0].score
+		weights := make([]float64, len(semantic))
+		var total float64
+		for index, match := range semantic {
+			weights[index] = math.Exp((match.score - maximum) * 8)
+			total += weights[index]
 		}
-		candidate.Score = math.Round(match.score*1_000_000) / 1_000_000
-		candidate.Signals = []string{fmt.Sprintf("semantic:%.3f", match.score)}
-		result = append(result, candidate)
+		for index, match := range semantic {
+			result[match.node.ID] += weights[index] / total
+		}
+	}
+	if len(exact) > 16 {
+		exact = exact[:16]
+	}
+	for _, id := range exact {
+		result[id] += 1 / float64(len(exact))
+	}
+	if len(opened) > 8 {
+		opened = opened[:8]
+	}
+	var recentTotal float64
+	for index := range opened {
+		recentTotal += 1 / float64(index+1)
+	}
+	for index, id := range opened {
+		result[id] += 0.5 / float64(index+1) / recentTotal
 	}
 	return result
 }
