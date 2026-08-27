@@ -62,6 +62,17 @@ You can also choose an individual artifact from the latest GitHub release:
 
 Both are independent front ends over the same `~/.purpory/purpory.db` data.
 
+Set up the current project and connect Codex in one command:
+
+```sh
+purpory setup --agent codex .
+```
+
+Use `--agent claude` for Claude Code. Setup registers and indexes the project,
+then installs the selected Agent's preflight and session-end hooks. No model is
+required for the first run. Codex asks you to review the installed hooks once
+with `/hooks`.
+
 Source installation requires Go 1.25+, Node 22+, and Wails v2.13.0:
 
 ```sh
@@ -82,9 +93,10 @@ purpory remember --kind decision --value "Use SQLite" decision.database
 purpory remember --confirm decision.database
 purpory remember --batch changes.json          # preview
 purpory remember --batch changes.json --apply  # optimistic, atomic apply
-purpory query "database decision"
-purpory explain game.lol.play-rule game.lol.items
-purpory path "game.lol.play-rule" "file:docs/rules.md"
+purpory query "database decision"                       # up to five navigation hints
+purpory explain game.lol.play-rule game.lol.items       # load selected evidence
+purpory path "game.lol.play-rule" "file:docs/rules.md" # inspect relationships
+purpory query --json "database decision"                # machine-readable navigation result
 purpory prepare "How does project update work?"
 purpory prepare --session agent-1 --path internal/app --budget 2000 --json "How does project update work?"
 purpory request list open
@@ -133,14 +145,15 @@ Reconciliation uses `qwen3.5:9b` by default; override it with
 `PURPORY_RECONCILE_CONTEXT_TOKENS`. The first embedding model selected or used
 is fixed for that Project. `purpory embed` backfills every missing or stale
 intent/knowledge node; later memory and reconciliation writes refresh their
-vectors immediately. Embeddings are a relative top-k candidate generator, not
-an absolute-confidence gate. Prepare starts with one semantic result and lets
-BM25 fill distinct lexical evidence; later calls advance past content already
-opened in the Session.
-Agent preflight does not inject content. It returns at most three topic-first
-paths: the leading semantic anchor, a distinct BM25 anchor when available, and
-an alternate branch when available. Typed edges are included only when they
-connect selected signposts. `query` browses path branches, `explain` opens one or
-more nodes and records that actual exploration, and `path` combines the derived
-dot hierarchy with physical graph edges. Explicit `purpory prepare` returns the
-same content-free HintMap as agent preflight.
+vectors immediately. Query and prepare rank semantic, exact, and recently opened
+seeds with direction-aware Typed PPR. Agent preflight returns at most three
+content-free signposts; CLI `query` returns five by default. `explain` loads
+selected evidence and `path` renders relationships without loading content.
+Default CLI responses remain character-budgeted, including `--json`. See the
+[retrieval contract](docs/INTENT_GRAPH.md#retrieval) for weights and progression.
+
+Run the model-free first-value and retrieval-budget checks with:
+
+```sh
+make product-eval
+```

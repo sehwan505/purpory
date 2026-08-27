@@ -171,17 +171,11 @@ export default function App() {
     event.preventDefault();
     if (!query.trim()) return;
     await perform(async () => {
-      const found = await Query(query, 12);
+      const found = await Query(query, 5);
       setResults(found);
-      const first = found.nodes?.[0];
-      if (first) {
-        setSelectedNode(first);
-        setExplanation(await Explain(first.id));
-      } else {
-        setSelectedNode(undefined);
-        setExplanation(undefined);
-      }
-      setMessage(`${found.nodes?.length ?? 0}개 노드`);
+      setSelectedNode(undefined);
+      setExplanation(undefined);
+      setMessage(`${found.matches?.length ?? 0}개 후보 · 근거를 선택해 여세요`);
     });
   }
 
@@ -293,7 +287,7 @@ export default function App() {
     setPage("graph");
     setQuery(key);
     void perform(async () => {
-      const found = await Query(key, 12);
+      const found = await Query(key, 5);
       setResults(found);
       const match = found.nodes?.find(item => item.ref === key && item.owner === "durable");
       if (match) {
@@ -439,7 +433,7 @@ export default function App() {
             <label htmlFor="query">질문, 지식 또는 Material</label>
             <div><input id="query" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="예: 프로젝트 목표 또는 데이터베이스 결정" /><button disabled={busy}>주변 그래프 찾기</button>{results && <button type="button" className="secondary" onClick={clearGraphSearch}>전체 보기</button>}</div>
           </form>
-          {results && (results.matches?.length ?? 0) > 0 && <div className="graphMatches" aria-label="검색된 시작 노드">{results.matches.slice(0, 8).map(match => <button type="button" className={match.node.id === selectedNode?.id ? "selected" : ""} key={match.node.id} onClick={() => void explainNode(match.node)}><span>{match.signals.map(signal => signal.kind).join(" + ")}</span><strong>{match.node.label}</strong></button>)}</div>}
+          {results && (results.matches?.length ?? 0) > 0 && <div className="graphMatches" aria-label="검색된 시작 노드">{results.matches.slice(0, 5).map(match => <button type="button" className={match.node.id === selectedNode?.id ? "selected" : ""} key={match.node.id} onClick={() => void explainNode(match.node)}><span>{match.signals.map(signal => `${signal.kind}${signal.score ? ` ${signal.score.toFixed(3)}` : ""}`).join(" + ")}</span><strong>{match.node.label}</strong><small title={match.node.path || match.node.materialUri}>{match.node.path || match.node.materialUri || match.node.id}</small></button>)}</div>}
           <div className="contextGraph graphExplorer">
             <GraphView nodes={graphNodes} edges={graphEdges} matches={results?.matches} searchQuery={results ? query : undefined} selectedID={selectedNode?.id} emptyMessage={results ? "검색과 연결된 노드를 찾지 못했습니다." : undefined} onSelect={node => void explainNode(node)} />
             <NodeDetails node={selectedNode} explanation={explanation} durable={selectedMemory} busy={busy} onSelect={node => void explainNode(node)} onEdit={editMemory} onConfirm={key => void confirmMemory(key)} onDelete={key => void deleteMemory(key)} />

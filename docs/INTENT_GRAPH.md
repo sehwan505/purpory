@@ -66,24 +66,25 @@ reconciliation audit as provenance rather than becoming graph nodes.
 
 ## Retrieval
 
-Retrieval keeps semantic and lexical anchors in separate lanes. Embeddings rank
-a small relative top-k without pretending that cosine similarity is calibrated
-confidence. BM25 supplies distinct lexical evidence. Dot-separated durable keys
-form a topic-first hierarchy projected at query time; physical edges retain the
-cross-topic and Intent-to-evidence relationships.
+Retrieval uses Typed Personalized PageRank over the physical project graph.
+Embedding top-k, exact address/content matches, and the Session's most recently
+opened nodes form one weighted personalization distribution. Cosine scores are
+softmaxed only relative to that top-k; they are not treated as calibrated
+confidence. Durable Intent-to-evidence relations carry the strongest forward
+weight, reverse containment is stronger than forward containment, and other
+typed relations use a neutral default. Dot-separated durable keys remain a
+query-time navigation hierarchy rather than synthetic graph edges.
 
-Preflight renders at most three content-free signposts: the leading semantic
-path, a distinct BM25 path when available, and an alternate topic branch when
-available. The agent chooses one or more nodes to load with `explain`, browses a
-branch with `query`, or connects paths with `path`. Only nodes actually opened
-by the Session suppress later suggestions; merely receiving a HintMap does not.
+Preflight renders at most three active, content-bearing, unopened nodes in Typed
+PPR order. Opened nodes remain in the personalization distribution so their
+neighbors inherit relevance, but they are not suggested again. The agent loads
+one or more nodes with `explain`, browses a branch with `query`, or connects paths
+with `path`. Typed edges are rendered only when both selected signposts share the
+physical edge.
 
-There is no forced minimum result count: no valid embedding or lexical candidate
-means no hint. Workspace Resources remain outside the physical knowledge graph.
-Exact per-session content suppression and token budgeting still apply.
-Personalized PageRank becomes
-justified only when a multi-hop evaluation shows that this bounded traversal
-loses relevant evidence.
+There is no forced minimum result count: no semantic, exact, or recent-session
+seed means no hint. Workspace Resources remain outside the physical knowledge
+graph. Exact per-session content suppression and token budgeting still apply.
 
 ## Research basis
 
@@ -114,10 +115,12 @@ The engine must keep these checks runnable without a model or network:
 4. `update` preserves durable edges while targets disappear and reconnects them when
    targets return;
 5. Graph, Explain, and Path traverse Intent and observed evidence together;
-6. prepare keeps semantic top-k and BM25 evidence distinct within the token
-   budget, while preflight never includes node content;
+6. query and prepare use the same Typed PPR ranking, keep results within the
+   token budget, and never include unopened node content;
 7. an unresolved durable target is visible rather than silently discarded;
-8. Workspace Sessions never project into the canonical graph.
+8. Workspace Sessions never project into the canonical graph;
+9. default `query`, `explain`, and `path` output stays within its character and
+   item budgets, omits unopened content, and preserves that boundary in JSON.
 
 Future retrieval changes should be evaluated against LongMemEval's five ability
 classes plus project-specific intent-to-evidence recall, false-link rate, stale

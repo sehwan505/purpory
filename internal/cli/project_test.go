@@ -76,6 +76,30 @@ func TestIntegrationDoesNotRequireRegisteredProject(t *testing.T) {
 	}
 }
 
+func TestSetupMakesProjectAndAgentReady(t *testing.T) {
+	root := t.TempDir()
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# Demo\nProject evidence.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", t.TempDir())
+	var output, errorOutput bytes.Buffer
+	code := Run([]string{"--db", database, "setup", "--agent", "codex", root}, strings.NewReader(""), &output, &errorOutput)
+	if code != 0 || !strings.Contains(output.String(), "Purpory is ready.") || !strings.Contains(output.String(), "Indexed: 1 materials") {
+		t.Fatalf("setup failed: stdout=%q stderr=%q", output.String(), errorOutput.String())
+	}
+	service, err := product.Open(context.Background(), root, database, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	result, err := service.Query(context.Background(), "Project evidence", 5)
+	if err != nil || len(result.Matches) == 0 {
+		t.Fatalf("setup did not make project searchable: %#v %v", result, err)
+	}
+	t.Log("onboarding delivery: 1 setup command replaces project add + update + integration install")
+}
+
 func TestUnregisteredAgentHookIsNoOp(t *testing.T) {
 	root := t.TempDir()
 	database := filepath.Join(t.TempDir(), "purpory.db")

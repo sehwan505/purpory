@@ -15,8 +15,8 @@ const (
 	endMarker   = "<!-- purpory:end -->"
 	section     = startMarker + "\n## Purpory\n\n" +
 		"- Preflight provides graph hints, not source content. Inspect only relevant node IDs.\n" +
-		"- Before answering codebase questions, run `purpory query \"<question>\"`.\n" +
-		"- Use `purpory explain \"<concept>\"` or `purpory path \"<A>\" \"<B>\"` for focused relationships.\n" +
+		"- Before answering codebase questions, run `purpory query \"<question>\"`; it returns at most five content-free candidates.\n" +
+		"- Load only selected evidence with `purpory explain \"<path or node ID>\"`; use `purpory path \"<A>\" \"<B>\"` for relationships.\n" +
 		"- After modifying code, run `purpory update`.\n" + endMarker
 )
 

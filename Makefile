@@ -1,4 +1,4 @@
-.PHONY: install install-cli install-app uninstall
+.PHONY: install install-cli install-app product-eval uninstall
 
 install:
 	./install.sh all --local
@@ -8,6 +8,9 @@ install-cli:
 
 install-app:
 	./install.sh app --local
+
+product-eval:
+	go test ./internal/cli -run 'Test(SetupMakesProjectAndAgentReady|ExplorationCLIIsBoundedAndProgressive|ProgressiveRenderersDoNotLoadConnectedContent)' -v
 
 uninstall:
 	./install.sh all --uninstall

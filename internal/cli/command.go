@@ -17,7 +17,7 @@ import (
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
 
-const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] <project|knowledge|remember|request|decision|review|prepare|query|embed|explain|path|update|model|integration|preflight|session-end|session|version>"
+const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] <setup|project|knowledge|remember|request|decision|review|prepare|query|embed|explain|path|update|model|integration|preflight|session-end|session|version>"
 
 func runCLI(ctx context.Context, service *product.Service, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) == 0 {
@@ -199,11 +199,28 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 		return errors.New("review requires list, create KEY, or resolve ID OUTCOME")
 	case "query":
-		if len(arguments) != 2 {
+		flags := flag.NewFlagSet(command, flag.ContinueOnError)
+		flags.SetOutput(output)
+		limit := flags.Int("limit", defaultQueryLimit, "maximum navigation candidates")
+		jsonOutput := flags.Bool("json", false, "write the navigation result as JSON")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 1 {
 			return errors.New("query requires one question")
 		}
-		result, err := service.Query(ctx, arguments[1], 20)
-		return writeJSON(output, result, err)
+		if *limit < 1 || *limit > maximumQueryLimit {
+			return fmt.Errorf("query limit must be between 1 and %d", maximumQueryLimit)
+		}
+		result, err := service.Query(ctx, flags.Arg(0), *limit)
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(output, result, nil)
+		}
+		_, err = fmt.Fprintln(output, renderQuery(result, *limit))
+		return err
 	case "embed":
 		if len(arguments) == 2 && arguments[1] == "status" {
 			result, err := service.EmbeddingStatus(ctx)
@@ -265,17 +282,46 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			return nil
 		}
 	case "explain":
-		if len(arguments) < 2 {
+		flags := flag.NewFlagSet(command, flag.ContinueOnError)
+		flags.SetOutput(output)
+		jsonOutput := flags.Bool("json", false, "write the full result as JSON")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() < 1 {
 			return errors.New("explain requires at least one key or node")
 		}
-		result, err := service.ExplainMany(ctx, arguments[1:])
-		return writeJSON(output, result, err)
+		if !*jsonOutput && flags.NArg() > defaultQueryLimit {
+			return fmt.Errorf("explain accepts at most %d nodes; use --json for an explicit full export", defaultQueryLimit)
+		}
+		result, err := service.ExplainMany(ctx, flags.Args())
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(output, result, nil)
+		}
+		_, err = fmt.Fprintln(output, renderExplanations(result))
+		return err
 	case "path":
-		if len(arguments) != 3 {
+		flags := flag.NewFlagSet(command, flag.ContinueOnError)
+		flags.SetOutput(output)
+		jsonOutput := flags.Bool("json", false, "write the full result as JSON")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 2 {
 			return errors.New("path requires source and target")
 		}
-		result, err := service.Path(ctx, arguments[1], arguments[2])
-		return writeJSON(output, result, err)
+		result, err := service.Path(ctx, flags.Arg(0), flags.Arg(1))
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(output, result, nil)
+		}
+		_, err = fmt.Fprintln(output, renderPath(result))
+		return err
 	case "update":
 		flags := flag.NewFlagSet(command, flag.ContinueOnError)
 		flags.SetOutput(output)

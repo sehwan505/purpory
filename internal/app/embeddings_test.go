@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
@@ -90,12 +91,12 @@ func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
 	if status, err := service.EmbeddingStatus(ctx); err != nil || status.Current != 1 || status.Pending != 0 {
 		t.Fatalf("embedding status failed: %#v %v", status, err)
 	}
-	query := "completely unrelated lexical text"
+	query := "completely unrelated wording"
 	found, err := service.Query(ctx, query, 10)
-	if err != nil || len(found.Seeds) != 1 || found.Seeds[0].ID != "intent:decision.auth" {
-		t.Fatalf("semantic graph seed missing: %#v %v", found, err)
+	if err != nil || len(found.Matches) != 1 || found.Matches[0].Node.ID != "intent:decision.auth" {
+		t.Fatalf("semantic graph match missing: %#v %v", found, err)
 	}
-	if len(found.Matches) != 1 || len(found.Matches[0].Signals) != 1 || found.Matches[0].Signals[0].Kind != "semantic" || found.Matches[0].Signals[0].Score == 0 {
+	if len(found.Matches) != 1 || len(found.Matches[0].Signals) != 2 || found.Matches[0].Signals[0].Kind != "typed-ppr" || found.Matches[0].Signals[0].Score == 0 || found.Matches[0].Signals[1].Kind != "semantic-seed" {
 		t.Fatalf("semantic graph match was not explainable: %#v", found.Matches)
 	}
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
@@ -108,14 +109,47 @@ func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
 	}
 }
 
-func TestPrepareFillsRemainingEmbeddingBudgetWithBM25(t *testing.T) {
+func TestQueryFallsBackWhenSemanticSearchTimesOut(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(semanticQueryTimeout + time.Second):
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
+	ctx := context.Background()
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	value := "Searchable fallback evidence."
+	if _, err := service.Remember(ctx, "knowledge.fallback", memory.Note, &value, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SelectModel(ctx, "embedding", "slow-embed"); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _, err := service.store.Graph(ctx, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := embeddingCandidates(nodes)[0]
+	if err := service.store.SaveEmbedding(ctx, "demo", candidate.node.ID, candidate.hash, "slow-embed", make([]float64, embeddingDimensions)); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	result, err := service.Query(ctx, "Searchable fallback", 5)
+	if err != nil || len(result.Matches) == 0 || time.Since(started) > semanticQueryTimeout+time.Second {
+		t.Fatalf("query did not fall back after semantic timeout: %#v %v (%s)", result, err, time.Since(started))
+	}
+}
+
+func TestPrepareCombinesSemanticAndExactSeeds(t *testing.T) {
 	useSelectiveEmbeddingServer(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
 	for key, value := range map[string]string{
-		"knowledge.dense":   "Dense-only project context.",
-		"knowledge.lexical": "fallback-marker is the exact operational keyword.",
+		"knowledge.dense": "Dense-only project context.",
+		"knowledge.exact": "fallback-marker is the exact operational keyword.",
 	} {
 		value := value
 		if _, err := service.Remember(ctx, key, memory.Note, &value, nil); err != nil {
@@ -131,8 +165,8 @@ func TestPrepareFillsRemainingEmbeddingBudgetWithBM25(t *testing.T) {
 	query := "fallback-marker"
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	result, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "hybrid", WorkingDirectory: root, TokenBudget: 512})
-	if err != nil || result.Hints == nil || len(result.Hints.Nodes) != 2 || result.Hints.Nodes[0].ID != "knowledge:knowledge.dense" || result.Hints.Nodes[0].Match != "semantic" || result.Hints.Nodes[1].ID != "knowledge:knowledge.lexical" || result.Hints.Nodes[1].Match != "bm25" {
-		t.Fatalf("embedding-first BM25 fill failed: %#v %v", result, err)
+	if err != nil || result.Hints == nil || len(result.Hints.Nodes) != 2 || result.Hints.Nodes[0].ID != "knowledge:knowledge.exact" || result.Hints.Nodes[0].Match != "exact-seed" || result.Hints.Nodes[1].ID != "knowledge:knowledge.dense" || result.Hints.Nodes[1].Match != "semantic-seed" {
+		t.Fatalf("semantic and exact seeds were not combined: %#v %v", result, err)
 	}
 }
 
@@ -204,14 +238,19 @@ func TestSemanticMapProgressesAcrossSessionCalls(t *testing.T) {
 		t.Fatalf("full graph backfill failed: %#v %v", synced, err)
 	}
 
-	query := "lexically unrelated request"
+	query := "unrelated request wording"
 	found, err := service.Query(ctx, query, 100)
-	observedSeed := false
-	for _, seed := range found.Seeds {
-		observedSeed = observedSeed || seed.Kind == graph.KindKnowledge && seed.Owner == graph.OwnerObserved
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err != nil || !observedSeed {
-		t.Fatalf("observed knowledge was not a semantic map seed: %#v %v", found.Seeds, err)
+	observedSeed := false
+	for _, match := range found.Matches {
+		for _, signal := range match.Signals {
+			observedSeed = observedSeed || signal.Kind == "semantic-seed" && match.Node.Kind == graph.KindKnowledge && match.Node.Owner == graph.OwnerObserved
+		}
+	}
+	if !observedSeed {
+		t.Fatalf("observed knowledge was not a semantic map seed: %#v", found.Matches)
 	}
 
 }

@@ -75,7 +75,7 @@ export function GraphView({ nodes, edges, matches = [], searchQuery, selectedID,
     return result;
   }, [edges, selectedID]);
   const normalizedQuery = filterQuery.trim().toLowerCase();
-  const visibleNodes = nodes.filter(node => (!kind || node.kind === kind) && (!normalizedQuery || `${node.label} ${node.content}`.toLowerCase().includes(normalizedQuery)) && (!focused || !selectedID || neighborIDs.has(node.id))).slice(0, 36);
+  const visibleNodes = nodes.filter(node => (!kind || node.kind === kind) && (!normalizedQuery || `${node.label} ${node.path} ${node.materialUri} ${node.subkind}`.toLowerCase().includes(normalizedQuery)) && (!focused || !selectedID || neighborIDs.has(node.id))).slice(0, 36);
   const visibleIDs = new Set(visibleNodes.map(node => node.id));
   const visibleMatches = matches.filter(match => visibleIDs.has(match.node.id)).slice(0, 10);
   const queryMode = Boolean(searchQuery?.trim() && visibleMatches.length > 0);
@@ -129,9 +129,10 @@ export function GraphView({ nodes, edges, matches = [], searchQuery, selectedID,
       points.set(node.id, { ...point, vx: 0, vy: 0 });
     }
     positionsRef.current = points;
-    const semanticDistance = new Map(visibleMatches.map(match => {
-      const score = match.signals.find(signal => signal.kind === "semantic")?.score ?? 0;
-      return [match.node.id, 102 - Math.max(0, score) * 46] as const;
+    const maximumRank = Math.max(...visibleMatches.map(match => match.signals.find(signal => signal.kind === "typed-ppr")?.score ?? 0), 1e-9);
+    const rankDistance = new Map(visibleMatches.map(match => {
+      const score = match.signals.find(signal => signal.kind === "typed-ppr")?.score ?? 0;
+      return [match.node.id, 102 - Math.max(0, score / maximumRank) * 46] as const;
     }));
     let frame = 0;
     let tick = 0;
@@ -165,7 +166,7 @@ export function GraphView({ nodes, edges, matches = [], searchQuery, selectedID,
         target.vy -= dy / length * force;
       }
       for (const [id, point] of points) {
-        const targetDistance = queryMode ? semanticDistance.get(id) : id === centerID ? 0 : undefined;
+        const targetDistance = queryMode ? rankDistance.get(id) : id === centerID ? 0 : undefined;
         if (targetDistance !== undefined) {
           const dx = 240 - point.x;
           const dy = 175 - point.y;
@@ -268,9 +269,9 @@ export function GraphView({ nodes, edges, matches = [], searchQuery, selectedID,
         const color = nodeColor(node.kind, node.state);
         return <g className={`graphNode${dragRef.current === node.id ? " dragging" : ""}`} key={node.id} role="button" tabIndex={0} aria-label={`${node.kind} ${node.label}`} onPointerDown={event => { dragRef.current = node.id; event.currentTarget.setPointerCapture(event.pointerId); setSimulationVersion(value => value + 1); }} onPointerMove={event => dragNode(node.id, event)} onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); dragRef.current = undefined; setSimulationVersion(value => value + 1); }} onPointerCancel={() => { dragRef.current = undefined; setSimulationVersion(value => value + 1); }} onClick={() => onSelect(node)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") onSelect(node); }}>
           <circle cx={position.x} cy={position.y} r={selected ? 7 : 5} fill={color} stroke={selected ? "#1a2019" : "#fff"} strokeWidth={selected ? 2 : 1.5} />
-          <circle cx={position.x} cy={position.y} r={node.content ? 10 : 8} fill="none" stroke={color} strokeOpacity={node.content ? ".28" : ".14"} />
+          <circle cx={position.x} cy={position.y} r={8} fill="none" stroke={color} strokeOpacity={.14} />
           <text x={position.x + 10} y={position.y + 3} fill="#4e584b" fontSize="7">{node.label.slice(0, 26)}</text>
-          <title>{node.label} · {node.kind}{node.subkind ? `/${node.subkind}` : ""}{node.content ? " · 내용 있음" : ""}{node.state === "missing" ? " · missing" : ""}</title>
+          <title>{node.label} · {node.kind}{node.subkind ? `/${node.subkind}` : ""}{node.state === "missing" ? " · missing" : ""}</title>
         </g>;
       })}
     </svg>
@@ -299,10 +300,10 @@ export function NodeDetails({ node, explanation, durable, busy, onSelect, onEdit
       {current.provenance && <><dt>Provenance</dt><dd>{current.provenance}</dd></>}
       {current.materialUri && <><dt>Source</dt><dd>{current.materialUri}{current.locator ? `#${current.locator}` : ""}</dd></>}
     </dl>
-    <section className="nodeContent"><strong>실제 데이터</strong>{current.content ? <pre>{current.content}</pre> : <p>{current.kind === "material" ? "Material은 원문을 복제하지 않습니다. 아래에 연결된 Knowledge를 선택하면 추출된 내용을 확인할 수 있습니다." : "이 노드에는 저장된 본문이 없습니다."}</p>}</section>
+    <section className="nodeContent"><strong>실제 데이터</strong>{busy && !explanation ? <p>선택한 근거를 불러오는 중입니다.</p> : current.content ? <pre>{current.content}</pre> : <p>{current.kind === "material" ? "Material은 원문을 복제하지 않습니다. 아래에 연결된 Knowledge를 선택하면 추출된 내용을 확인할 수 있습니다." : "이 노드에는 저장된 본문이 없습니다."}</p>}</section>
     {durable && <div className="memoryActions"><button type="button" disabled={busy} onClick={() => onEdit?.(durable)}>편집</button><button type="button" className="secondary" disabled={busy} onClick={() => onConfirm?.(durable.key)}>유효함</button><button type="button" className="danger" disabled={busy} onClick={() => onDelete?.(durable.key)}>삭제</button></div>}
     <strong className="connectionTitle">연결 {connections.length}</strong>
-    <div className="connections">{connections.length === 0 ? <p className="empty">직접 연결된 노드가 없습니다.</p> : connections.map(connection => <button type="button" key={`${connection.direction}-${connection.relation}-${connection.node.id}`} onClick={() => onSelect(connection.node)}><span>{connection.direction === "out" ? "→" : "←"} {connection.relation}</span><strong>{connection.node.label}</strong><small>{connection.node.content || [connection.node.materialUri, connection.node.locator].filter(Boolean).join("#") || `${connection.node.kind}${connection.node.subkind ? `/${connection.node.subkind}` : ""}`}</small></button>)}</div>
+    <div className="connections">{connections.length === 0 ? <p className="empty">직접 연결된 노드가 없습니다.</p> : connections.map(connection => <button type="button" key={`${connection.direction}-${connection.relation}-${connection.node.id}`} onClick={() => onSelect(connection.node)}><span>{connection.direction === "out" ? "→" : "←"} {connection.relation}</span><strong>{connection.node.label}</strong><small>{[connection.node.materialUri, connection.node.locator].filter(Boolean).join("#") || connection.node.path || `${connection.node.kind}${connection.node.subkind ? `/${connection.node.subkind}` : ""}`}</small></button>)}</div>
   </div>;
 }
 
@@ -495,7 +496,7 @@ function QueueRun({ run, position, onSelect }: { run: reconcile.Run; position?: 
       <div className="queueRunHead"><span>{run.agent} · {run.reason || "session end"}</span><b>{reconciliationLabel(run.phase)}</b></div>
       <strong title={run.cwd}>{compactPath(run.cwd)}</strong>
       <p>{run.detail || "진행 정보 대기 중"}</p>
-      <span className="queueRunMeta">Session · 등록 {relativeTime(run.queuedAt)} · 갱신 {relativeTime(run.updatedAt)}<code>{run.sessionId}</code></span>
+      <span className="queueRunMeta"><span>Session · 등록 {relativeTime(run.queuedAt)} · 갱신 {relativeTime(run.updatedAt)}</span><code>{run.sessionId}</code></span>
       {phase >= 0 && <div className="queueProgress" aria-label={`현재 단계 ${reconciliationLabel(run.phase)}`}>{reconciliationPhases.map((value, index) => <i key={value} className={index <= phase ? "reached" : ""} />)}</div>}
     </div>
   </button>;

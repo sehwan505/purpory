@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	product "github.com/sehwan505/purpory/internal/app"
+	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 )
 
@@ -45,8 +47,12 @@ func TestUpdateJSON(t *testing.T) {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 	found, err := service.Query(context.Background(), "project for everyone", 10)
-	if err != nil || len(found.Nodes) != 1 || found.Nodes[0].Content != "A project for everyone." {
-		t.Fatalf("updated content missing: %#v, %v", found, err)
+	if err != nil || len(found.Nodes) != 1 || found.Nodes[0].Content != "" {
+		t.Fatalf("query did not return a content-free reference: %#v, %v", found, err)
+	}
+	explained, err := service.Explain(context.Background(), found.Nodes[0].ID)
+	if err != nil || explained.Graph == nil || explained.Graph.Node.Content != "A project for everyone." {
+		t.Fatalf("selected evidence missing: %#v, %v", explained, err)
 	}
 }
 
@@ -122,7 +128,7 @@ func TestExplainCLIAcceptsMultipleNodes(t *testing.T) {
 		}
 	}
 	var output bytes.Buffer
-	if err := runCLI(ctx, service, []string{"explain", "intent.one", "knowledge.two"}, bytes.NewReader(nil), &output); err != nil {
+	if err := runCLI(ctx, service, []string{"explain", "--json", "intent.one", "knowledge.two"}, bytes.NewReader(nil), &output); err != nil {
 		t.Fatal(err)
 	}
 	var results []product.ExplainResult
@@ -131,6 +137,55 @@ func TestExplainCLIAcceptsMultipleNodes(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Memory == nil || results[0].Memory.Key != "intent.one" || results[1].Memory == nil || results[1].Memory.Key != "knowledge.two" {
 		t.Fatalf("unexpected explanations: %#v", results)
+	}
+}
+
+func TestExplorationCLIIsBoundedAndProgressive(t *testing.T) {
+	ctx := context.Background()
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	secret := strings.Repeat("selected evidence ", 2_000)
+	other := "neighbor content must stay unloaded"
+	for key, value := range map[string]string{"knowledge.selected": secret, "knowledge.other": other} {
+		value := value
+		if _, err := service.Remember(ctx, key, memory.Note, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var output bytes.Buffer
+	if err := runCLI(ctx, service, []string{"query", "knowledge"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() > queryCharacterBudget+1 || strings.Contains(output.String(), secret) || strings.Contains(output.String(), other) || !strings.Contains(output.String(), "CONTENT NOT LOADED") {
+		t.Fatalf("query leaked or exceeded its budget: %d bytes\n%s", output.Len(), output.String())
+	}
+	compactBytes := output.Len()
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"query", "--json", "knowledge"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() <= compactBytes || strings.Contains(output.String(), secret) || strings.Contains(output.String(), other) {
+		t.Fatalf("machine-readable query leaked content or was unexpectedly small: compact=%d json=%d", compactBytes, output.Len())
+	}
+	t.Logf("query delivery: %d bytes (~%d tokens), navigation JSON: %d bytes (~%d tokens)", compactBytes, (compactBytes+3)/4, output.Len(), (output.Len()+3)/4)
+
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explain", "knowledge.selected"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(output.String())) > evidenceCharBudget+1 || !strings.Contains(output.String(), "selected evidence") || !strings.Contains(output.String(), "[truncated;") {
+		t.Fatalf("explain did not return bounded selected evidence: %d runes", len([]rune(output.String())))
+	}
+}
+
+func TestProgressiveRenderersDoNotLoadConnectedContent(t *testing.T) {
+	selected := graph.Node{ID: "knowledge:selected", Path: "knowledge.selected", Label: "Selected", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "selected evidence"}
+	connected := graph.Node{ID: "knowledge:connected", Path: "knowledge.connected", Label: "Connected", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "connected content must stay unloaded"}
+	edge := graph.Edge{SourceID: selected.ID, TargetID: connected.ID, Relation: "related_to"}
+	explanation := renderExplanations([]product.ExplainResult{{Graph: &graph.Explanation{Node: selected, Connections: []graph.Connection{{Direction: "out", Relation: edge.Relation, Node: connected}}}}})
+	path := renderPath(graph.Path{Nodes: []graph.Node{selected, connected}, Edges: []graph.Edge{edge}})
+	if !strings.Contains(explanation, selected.Content) || strings.Contains(explanation, connected.Content) || strings.Contains(path, selected.Content) || strings.Contains(path, connected.Content) {
+		t.Fatalf("progressive renderers loaded unopened content:\n%s\n%s", explanation, path)
 	}
 }
 

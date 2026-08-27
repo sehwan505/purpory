@@ -35,7 +35,7 @@ Reference implementation: `../purpory-python` at upstream `main`.
    relationships, and atomically publish project knowledge.
 5. Add optional Ollama features and model management.
 6. Port context request resolution, gate feedback, memory review,
-   embedding/BM25 HintMaps, and explicit fail-closed submit hooks.
+   embedding/Typed PPR HintMaps, and explicit fail-closed submit hooks.
 7. Complete the separate dashboard and CLI, hooks, installers, and cross-OS
    release checks.
 

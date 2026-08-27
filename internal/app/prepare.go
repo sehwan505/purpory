@@ -14,16 +14,6 @@ import (
 	"github.com/sehwan505/purpory/internal/project"
 )
 
-func (s *Service) Prepare(ctx context.Context, message string, tokenBudget int) (PrepareResult, error) {
-	if tokenBudget <= 0 {
-		tokenBudget = 2_000
-	}
-	return s.PrepareContext(ctx, contextprepare.Request{
-		Message: message, SessionID: currentSessionID(""), ProjectID: s.project.ID,
-		WorkingDirectory: s.currentRoot(ctx), TokenBudget: tokenBudget,
-	})
-}
-
 func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Request) (PrepareResult, error) {
 	if strings.TrimSpace(request.SessionID) == "" {
 		request.SessionID = currentSessionID("")
@@ -74,7 +64,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		return PrepareResult{}, err
 	}
 	catalog := prepareCatalog(s.project.ID, memories, nodes, workspace, len(opened), openRequests)
-	request.OpenedNodes = mapKeys(opened)
+	request.OpenedNodes = opened
 	request.Catalog = catalog
 
 	proposal := contextprepare.Fallback(request.Message)
@@ -148,21 +138,24 @@ func (s *Service) prepareHints(
 	ctx context.Context,
 	request contextprepare.Request,
 	physicalGraph contextGraph,
-	opened map[string]bool,
+	opened []string,
 	result *PrepareResult,
 ) error {
 	query := request.Message
 	if result.Proposal.Query != nil {
 		query = *result.Proposal.Query
 	}
-	allCandidates := prepareCandidates(physicalGraph.nodes)
 	semantic, err := s.semanticMatches(ctx, query, physicalGraph.nodes, 8)
 	if err != nil {
 		return err
 	}
-	semanticSeeds := semanticCandidates(allCandidates, semantic)
-	bm25, _ := contextprepare.BM25(allCandidates, query, result.Proposal.Keywords)
-	result.Hints = prepareHintMap(semanticSeeds, bm25, physicalGraph.nodes, physicalGraph.edges, opened, request.TokenBudget)
+	exact := physicalGraph.seeds(query)
+	for _, keyword := range result.Proposal.Keywords {
+		exact = append(exact, physicalGraph.seeds(keyword)...)
+	}
+	exact = uniqueNodeIDs(exact)
+	ranked := graph.TypedPPR(physicalGraph.nodes, physicalGraph.edges, pprSeeds(semantic, exact, opened))
+	result.Hints = prepareHintMap(ranked, physicalGraph.nodes, physicalGraph.edges, semantic, exact, opened, request.TokenBudget)
 	if result.Hints != nil {
 		agent := sessionAgent(request.SessionID)
 		if err := s.SaveSessionAt(ctx, request.WorkingDirectory, request.SessionID, agent, "active"); err != nil {
@@ -208,31 +201,11 @@ func sortedCounts(values map[string]int, limit int) []contextprepare.NamespaceCo
 	return result[:min(len(result), limit)]
 }
 
-func prepareCandidates(nodes []graph.Node) []contextprepare.Candidate {
-	result := make([]contextprepare.Candidate, 0, len(nodes))
-	for _, node := range nodes {
-		if node.State == graph.StateActive && strings.TrimSpace(node.Content) != "" {
-			result = append(result, prepareNodeCandidate(node))
-		}
+func prepareHintMap(ranked []graph.Rank, nodes []graph.Node, edges []graph.Edge, semantic []semanticMatch, exact, opened []string, budget int) *contextprepare.HintMap {
+	openedSet := make(map[string]bool, len(opened))
+	for _, id := range opened {
+		openedSet[id] = true
 	}
-	return result
-}
-
-func prepareNodeCandidate(node graph.Node) contextprepare.Candidate {
-	source := node.MaterialURI
-	if node.Locator != "" {
-		source += "#" + node.Locator
-	}
-	kind := node.Kind
-	if node.Subkind != "" {
-		kind = node.Subkind
-	}
-	return contextprepare.Candidate{
-		NodeID: node.ID, Key: node.ID, Label: node.Label, Kind: kind, Source: source, Content: node.Content,
-	}
-}
-
-func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.Node, edges []graph.Edge, opened map[string]bool, budget int) *contextprepare.HintMap {
 	byID := make(map[string]graph.Node, len(nodes))
 	for _, node := range nodes {
 		if node.Path == "" {
@@ -242,60 +215,33 @@ func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.
 	}
 	hints := &contextprepare.HintMap{}
 	selected := map[string]bool{}
-	branches := map[string]bool{}
-	addAnchor := func(candidate contextprepare.Candidate, match string) bool {
-		if len(hints.Nodes) == 3 || selected[candidate.NodeID] || opened[candidate.NodeID] || opened[candidate.Key] {
-			return false
+	semanticSet := map[string]bool{}
+	for _, match := range semantic {
+		semanticSet[match.node.ID] = true
+	}
+	exactSet := map[string]bool{}
+	for _, id := range exact {
+		exactSet[id] = true
+	}
+	for _, rank := range ranked {
+		if len(hints.Nodes) == 3 || openedSet[rank.NodeID] {
+			continue
 		}
-		node, found := byID[candidate.NodeID]
-		if !found {
-			return false
+		node, found := byID[rank.NodeID]
+		if !found || node.State != graph.StateActive || strings.TrimSpace(node.Content) == "" {
+			continue
+		}
+		match := "typed-ppr"
+		if exactSet[node.ID] {
+			match = "exact-seed"
+		} else if semanticSet[node.ID] {
+			match = "semantic-seed"
 		}
 		trial := *hints
 		trial.Nodes = append(append([]contextprepare.HintNode(nil), hints.Nodes...), prepareHintNode(node, match))
-		if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) > budget {
-			return false
-		}
-		hints.Nodes = trial.Nodes
-		selected[node.ID] = true
-		branches[topicBranch(node.Path)] = true
-		return true
-	}
-	if len(semantic) > 0 {
-		addAnchor(semantic[0], "semantic")
-	}
-	for _, candidate := range lexical {
-		if addAnchor(candidate, "bm25") {
-			break
-		}
-	}
-	alternateAdded := false
-	for _, durableOnly := range []bool{true, false} {
-		for _, lane := range []struct {
-			items []contextprepare.Candidate
-			match string
-		}{{semantic, "semantic"}, {lexical, "bm25"}} {
-			for _, candidate := range lane.items {
-				node, found := byID[candidate.NodeID]
-				if found && (!durableOnly || node.Owner == graph.OwnerDurable) && !branches[topicBranch(node.Path)] && addAnchor(candidate, lane.match+":alternate-branch") {
-					alternateAdded = true
-					break
-				}
-			}
-			if alternateAdded {
-				break
-			}
-		}
-		if alternateAdded {
-			break
-		}
-	}
-	for _, lane := range []struct {
-		items []contextprepare.Candidate
-		match string
-	}{{semantic, "semantic"}, {lexical, "bm25"}} {
-		for _, candidate := range lane.items {
-			addAnchor(candidate, lane.match)
+		if contextprepare.EstimateTokens(contextprepare.RenderHintMap(&trial)) <= budget {
+			hints.Nodes = trial.Nodes
+			selected[node.ID] = true
 		}
 	}
 	if len(hints.Nodes) == 0 {
@@ -313,9 +259,16 @@ func prepareHintMap(semantic, lexical []contextprepare.Candidate, nodes []graph.
 	return hints
 }
 
-func topicBranch(path string) string {
-	branch, _, _ := strings.Cut(path, ".")
-	return branch
+func uniqueNodeIDs(ids []string) []string {
+	seen := map[string]bool{}
+	result := ids[:0]
+	for _, id := range ids {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			result = append(result, id)
+		}
+	}
+	return result
 }
 
 func prepareHintNode(node graph.Node, match string) contextprepare.HintNode {
@@ -378,15 +331,6 @@ func canonicalPath(path string) string {
 		resolved = filepath.Join(resolved, missing[index])
 	}
 	return resolved
-}
-
-func mapKeys[V any](values map[string]V) []string {
-	result := make([]string, 0, len(values))
-	for key := range values {
-		result = append(result, key)
-	}
-	sort.Strings(result)
-	return result
 }
 
 func previewText(value string) string {

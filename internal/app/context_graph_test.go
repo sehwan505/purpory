@@ -53,10 +53,27 @@ func TestContextGraphDoesNotProjectWorkspaceSessions(t *testing.T) {
 	}
 }
 
-func TestPrepareNodeCandidateUsesKnowledgeSubkind(t *testing.T) {
-	candidate := prepareNodeCandidate(graph.Node{ID: "knowledge:item", Kind: graph.KindKnowledge, Subkind: "function"})
-	if candidate.Kind != "function" {
-		t.Fatalf("candidate kind = %q", candidate.Kind)
+func TestPPRSeedsKeepSemanticPrimaryAndRecentContextActive(t *testing.T) {
+	semantic := []semanticMatch{{node: graph.Node{ID: "semantic"}, score: 0.8}}
+	seeds := pprSeeds(semantic, nil, []string{"opened"})
+	if seeds["semantic"] != 1 || seeds["opened"] != 0.5 {
+		t.Fatalf("unexpected personalized seeds: %#v", seeds)
+	}
+}
+
+func TestExplanationLoadsOnlySelectedNodeContent(t *testing.T) {
+	nodes := []graph.Node{
+		{ID: "knowledge:selected", Label: "selected", Kind: graph.KindKnowledge, Content: "selected evidence"},
+		{ID: "knowledge:connected", Label: "connected", Kind: graph.KindKnowledge, Content: "connected evidence"},
+	}
+	current := newContextGraph(nil, nodes, []graph.Edge{{SourceID: nodes[0].ID, TargetID: nodes[1].ID, Relation: "related_to"}})
+	selected, found := current.find("knowledge:selected")
+	if !found {
+		t.Fatal("selected node missing")
+	}
+	explanation := current.explanation(selected)
+	if explanation.Node.Content != "selected evidence" || len(explanation.Connections) != 1 || explanation.Connections[0].Node.Content != "" {
+		t.Fatalf("explanation leaked connected content: %#v", explanation)
 	}
 }
 

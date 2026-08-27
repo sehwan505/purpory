@@ -318,21 +318,35 @@ func TestPrepareDeduplicatesAsk(t *testing.T) {
 	}
 }
 
-func TestPrepareHintMapBudgetsSemanticBM25AndPaths(t *testing.T) {
+func TestPrepareHintMapUsesTypedPPRRankingAndBudget(t *testing.T) {
 	nodes := []graph.Node{
-		{ID: "intent:semantic", Label: "game.lol.play-rule", Kind: graph.KindIntent, Subkind: "decision", Ref: "game.lol.play-rule", Owner: graph.OwnerDurable, State: graph.StateActive},
-		{ID: "knowledge:lexical", Label: "game.lol.items", Kind: graph.KindKnowledge, Subkind: "note", Ref: "game.lol.items", Owner: graph.OwnerDurable, State: graph.StateActive},
-		{ID: "knowledge:alternate", Label: "product.discovery", Kind: graph.KindKnowledge, Subkind: "note", Ref: "product.discovery", Owner: graph.OwnerDurable, State: graph.StateActive},
+		{ID: "intent:semantic", Label: "game.lol.play-rule", Kind: graph.KindIntent, Subkind: "decision", Ref: "game.lol.play-rule", Owner: graph.OwnerDurable, State: graph.StateActive, Content: "semantic"},
+		{ID: "knowledge:exact", Label: "game.lol.items", Kind: graph.KindKnowledge, Subkind: "note", Ref: "game.lol.items", Owner: graph.OwnerDurable, State: graph.StateActive, Content: "exact"},
+		{ID: "knowledge:related", Label: "product.discovery", Kind: graph.KindKnowledge, Subkind: "note", Ref: "product.discovery", Owner: graph.OwnerDurable, State: graph.StateActive, Content: "related"},
 		{ID: "material:file:guide.md", Label: "guide.md", Kind: graph.KindMaterial, State: graph.StateActive, MaterialURI: "file:guide.md"},
 	}
-	edges := []graph.Edge{{SourceID: "intent:semantic", TargetID: "knowledge:lexical", Relation: graph.RelationRealizedBy}}
+	edges := []graph.Edge{{SourceID: "intent:semantic", TargetID: "knowledge:exact", Relation: graph.RelationRealizedBy}}
 	hints := prepareHintMap(
-		[]contextprepare.Candidate{{NodeID: "intent:semantic"}, {NodeID: "knowledge:alternate"}},
-		[]contextprepare.Candidate{{NodeID: "knowledge:lexical"}},
-		nodes, edges, nil, 512,
+		[]graph.Rank{{NodeID: "intent:semantic", Score: 0.4}, {NodeID: "knowledge:exact", Score: 0.3}, {NodeID: "knowledge:related", Score: 0.2}},
+		nodes, edges, []semanticMatch{{node: nodes[0], score: 0.9}}, []string{"knowledge:exact"}, nil, 512,
 	)
-	if hints == nil || len(hints.Nodes) != 3 || hints.Nodes[0].Match != "semantic" || hints.Nodes[1].Match != "bm25" || hints.Nodes[2].Match != "semantic:alternate-branch" || hints.Nodes[0].Path != "game.lol.play-rule" || len(hints.Edges) != 1 || contextprepare.EstimateTokens(contextprepare.RenderHintMap(hints)) > 512 {
+	if hints == nil || len(hints.Nodes) != 3 || hints.Nodes[0].Match != "semantic-seed" || hints.Nodes[1].Match != "exact-seed" || hints.Nodes[2].Match != "typed-ppr" || hints.Nodes[0].Path != "game.lol.play-rule" || len(hints.Edges) != 1 || contextprepare.EstimateTokens(contextprepare.RenderHintMap(hints)) > 512 {
 		t.Fatalf("unexpected hint map: %#v", hints)
+	}
+}
+
+func TestPrepareHintMapPrioritizesRecentGraphNeighbor(t *testing.T) {
+	nodes := []graph.Node{
+		{ID: "knowledge:recent", Label: "recent", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "opened"},
+		{ID: "knowledge:neighbor", Label: "neighbor", Kind: graph.KindKnowledge, Owner: graph.OwnerDurable, State: graph.StateActive, Content: "next"},
+	}
+	edges := []graph.Edge{{SourceID: "knowledge:recent", TargetID: "knowledge:neighbor", Relation: "calls"}}
+	ranked := graph.TypedPPR(nodes, edges, pprSeeds(nil, nil, []string{"knowledge:recent"}))
+	hints := prepareHintMap(
+		ranked, nodes, edges, nil, nil, []string{"knowledge:recent"}, 512,
+	)
+	if hints == nil || len(hints.Nodes) != 1 || hints.Nodes[0].ID != "knowledge:neighbor" || hints.Nodes[0].Match != "typed-ppr" {
+		t.Fatalf("recent graph neighbor was not prioritized: %#v", hints)
 	}
 }
 
@@ -379,13 +393,23 @@ func TestIntentGraphLinksMaterialEvidence(t *testing.T) {
 	if err != nil || len(contextGraph.Nodes) < 2 || len(contextGraph.Edges) == 0 || contextGraph.Nodes[0].Kind != "intent" {
 		t.Fatalf("intent graph missing: %#v %v", contextGraph, err)
 	}
+	for _, node := range contextGraph.Nodes {
+		if node.Content != "" {
+			t.Fatalf("graph loaded node content: %#v", node)
+		}
+	}
 	explanation, err := service.Explain(context.Background(), "intent.release")
-	if err != nil || explanation.Memory == nil || explanation.Graph == nil || len(explanation.Graph.Connections) != 1 {
+	if err != nil || explanation.Memory == nil || explanation.Graph == nil || explanation.Graph.Node.Content != value || len(explanation.Graph.Connections) != 1 || explanation.Graph.Connections[0].Node.Content != "" {
 		t.Fatalf("intent explanation missing evidence: %#v %v", explanation, err)
 	}
 	path, err := service.Path(context.Background(), "intent.release", "file:release.md")
 	if err != nil || len(path.Nodes) != 2 || len(path.Edges) != 1 {
 		t.Fatalf("intent path missing: %#v %v", path, err)
+	}
+	for _, node := range path.Nodes {
+		if node.Content != "" {
+			t.Fatalf("path loaded node content: %#v", node)
+		}
 	}
 
 }
@@ -417,12 +441,18 @@ func TestUpdateDiscoversMaterialsIncrementally(t *testing.T) {
 		t.Fatalf("unexpected unchanged update: %#v", second)
 	}
 	query, err := service.Query(context.Background(), "Project context for everyone", 10)
-	foundSection := false
+	foundSection := ""
 	for _, node := range query.Nodes {
-		foundSection = foundSection || node.Kind == graph.KindKnowledge && node.Subkind == "section" && node.Label == "Purpose" && strings.Contains(node.Content, "Project context for everyone")
+		if node.Kind == graph.KindKnowledge && node.Subkind == "section" && node.Label == "Purpose" && node.Content == "" {
+			foundSection = node.ID
+		}
 	}
-	if err != nil || !foundSection {
+	if err != nil || foundSection == "" {
 		t.Fatalf("document context missing: %#v, %v", query, err)
+	}
+	explained, err := service.Explain(context.Background(), foundSection)
+	if err != nil || explained.Graph == nil || !strings.Contains(explained.Graph.Node.Content, "Project context for everyone") {
+		t.Fatalf("selected document evidence missing: %#v, %v", explained, err)
 	}
 	contextGraph, err := service.Graph(context.Background(), "", 20)
 	if err != nil || len(contextGraph.Nodes) == 0 || len(contextGraph.Edges) == 0 {
