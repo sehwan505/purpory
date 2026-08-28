@@ -496,7 +496,7 @@ function QueueRun({ run, position, onSelect }: { run: reconcile.Run; position?: 
       <div className="queueRunHead"><span>{run.agent} · {run.reason || "session end"}</span><b>{reconciliationLabel(run.phase)}</b></div>
       <strong title={run.cwd}>{compactPath(run.cwd)}</strong>
       <p>{run.detail || "진행 정보 대기 중"}</p>
-      <span className="queueRunMeta"><span>Session · 등록 {relativeTime(run.queuedAt)} · 갱신 {relativeTime(run.updatedAt)}</span><code>{run.sessionId}</code></span>
+      <span className="queueRunMeta"><span>Session · 등록 {relativeTime(run.queuedAt)} · 갱신 {relativeTime(run.updatedAt)}</span><code title={run.sessionId}>{run.sessionId}</code></span>
       {phase >= 0 && <div className="queueProgress" aria-label={`현재 단계 ${reconciliationLabel(run.phase)}`}>{reconciliationPhases.map((value, index) => <i key={value} className={index <= phase ? "reached" : ""} />)}</div>}
     </div>
   </button>;
