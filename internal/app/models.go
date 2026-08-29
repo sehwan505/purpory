@@ -11,11 +11,17 @@ import (
 	"time"
 
 	"github.com/sehwan505/purpory/internal/ollama"
+	"github.com/sehwan505/purpory/internal/openai"
 )
 
 const (
-	providerOllama = "ollama"
-	providerOpenAI = "openai"
+	providerOllama              = "ollama"
+	providerOpenAI              = "openai"
+	defaultOpenAIURL            = "https://api.openai.com/v1"
+	openAIEndpointSetting       = "provider.openai.url"
+	openAICredentialAccount     = "provider.openai.api-key"
+	openAIEndpointEnvironment   = "PURPORY_OPENAI_BASE_URL"
+	openAICredentialEnvironment = "PURPORY_OPENAI_API_KEY"
 )
 
 var modelRoles = map[string]struct {
@@ -48,6 +54,12 @@ type embedder interface {
 	Embed(context.Context, string, []string, int) ([][]float64, error)
 }
 
+type credentialStore interface {
+	Get(string) (string, bool, error)
+	Set(string, string) error
+	Delete(string) error
+}
+
 type ModelSelection struct {
 	Role          string `json:"role"`
 	Provider      string `json:"provider"`
@@ -58,12 +70,14 @@ type ModelSelection struct {
 }
 
 type ProviderState struct {
-	ID         string `json:"id"`
-	Label      string `json:"label"`
-	Configured bool   `json:"configured"`
-	Available  bool   `json:"available"`
-	Endpoint   string `json:"endpoint"`
-	Error      string `json:"error,omitempty"`
+	ID               string `json:"id"`
+	Label            string `json:"label"`
+	Configured       bool   `json:"configured"`
+	Available        bool   `json:"available"`
+	Endpoint         string `json:"endpoint"`
+	EndpointSource   string `json:"endpointSource"`
+	CredentialSource string `json:"credentialSource"`
+	Error            string `json:"error,omitempty"`
 }
 
 type ModelState struct {
@@ -159,15 +173,17 @@ func validateModelSelection(selected ModelSelection, requireModel bool) error {
 
 func (s *Service) ModelState(ctx context.Context) (ModelState, error) {
 	ollamaStatus := s.ollama.Status(ctx)
+	openAIState := s.openAIState(ctx)
+	ollamaEndpointSource := "default"
+	if strings.TrimSpace(os.Getenv("PURPORY_OLLAMA_URL")) != "" {
+		ollamaEndpointSource = "environment"
+	}
 	result := ModelState{
 		Ollama: ollamaStatus,
 		Providers: []ProviderState{
-			{ID: providerOllama, Label: "Ollama", Configured: true, Available: ollamaStatus.Available, Endpoint: s.ollamaURL, Error: ollamaStatus.Error},
-			{ID: providerOpenAI, Label: "OpenAI-compatible", Configured: s.openAI.Configured(), Endpoint: s.openAIURL},
+			{ID: providerOllama, Label: "Ollama", Configured: true, Available: ollamaStatus.Available, Endpoint: s.ollamaURL, EndpointSource: ollamaEndpointSource, CredentialSource: "none", Error: ollamaStatus.Error},
+			openAIState,
 		},
-	}
-	if !s.openAI.Configured() {
-		result.Providers[1].Error = "PURPORY_OPENAI_API_KEY is not configured"
 	}
 	for _, role := range []string{"gate", "reconcile", "embedding"} {
 		selected, err := s.modelName(ctx, role)
@@ -212,30 +228,174 @@ func (s *Service) SelectModelProvider(ctx context.Context, role, provider, model
 		return ModelSelection{}, err
 	}
 	if role == "gate" {
-		s.gate = s.newGateProvider(selected)
+		s.gate = s.newGateProvider(ctx, selected)
 	}
 	return selected, nil
 }
 
-func (s *Service) generator(provider string) (structuredGenerator, error) {
+func (s *Service) generator(ctx context.Context, provider string) (structuredGenerator, error) {
 	switch provider {
 	case providerOllama:
 		return s.ollama, nil
 	case providerOpenAI:
-		return s.openAI, nil
+		return s.openAIClient(ctx)
 	default:
 		return nil, fmt.Errorf("configure model: unknown provider %q", provider)
 	}
 }
 
-func (s *Service) embeddingProvider(provider string) (embedder, error) {
+func (s *Service) embeddingProvider(ctx context.Context, provider string) (embedder, error) {
 	switch provider {
 	case providerOllama:
 		return s.ollama, nil
 	case providerOpenAI:
-		return s.openAI, nil
+		return s.openAIClient(ctx)
 	default:
 		return nil, fmt.Errorf("configure embedding: unknown provider %q", provider)
+	}
+}
+
+func (s *Service) ConfigureProvider(ctx context.Context, provider, endpoint, apiKey string) (ProviderState, error) {
+	provider, endpoint, apiKey = strings.ToLower(strings.TrimSpace(provider)), strings.TrimSpace(endpoint), strings.TrimSpace(apiKey)
+	if provider != providerOpenAI {
+		return ProviderState{}, errors.New("configure provider: provider must be openai")
+	}
+	if endpoint == "" {
+		current, _, err := s.openAIEndpoint(ctx)
+		if err != nil {
+			return ProviderState{}, err
+		}
+		endpoint = current
+	}
+	if len(endpoint) > 1_024 {
+		return ProviderState{}, errors.New("configure provider: endpoint must be at most 1024 characters")
+	}
+	if _, err := openai.New(endpoint, "validation", 30*time.Second); err != nil {
+		return ProviderState{}, err
+	}
+	if apiKey != "" && len(apiKey) > 2_048 {
+		return ProviderState{}, errors.New("configure provider: API key must be at most 2048 characters")
+	}
+	if value := strings.TrimSpace(os.Getenv(openAIEndpointEnvironment)); value != "" && endpoint != value {
+		return ProviderState{}, fmt.Errorf("configure provider: endpoint is controlled by %s", openAIEndpointEnvironment)
+	}
+	if apiKey != "" && strings.TrimSpace(os.Getenv(openAICredentialEnvironment)) != "" {
+		return ProviderState{}, fmt.Errorf("configure provider: credential is controlled by %s", openAICredentialEnvironment)
+	}
+	var previous string
+	var hadPrevious bool
+	if apiKey != "" {
+		var err error
+		previous, hadPrevious, err = s.credentials.Get(openAICredentialAccount)
+		if err != nil {
+			return ProviderState{}, err
+		}
+		if err := s.credentials.Set(openAICredentialAccount, apiKey); err != nil {
+			return ProviderState{}, err
+		}
+	}
+	if strings.TrimSpace(os.Getenv(openAIEndpointEnvironment)) == "" {
+		if err := s.store.SaveSetting(ctx, openAIEndpointSetting, endpoint); err != nil {
+			var rollbackErr error
+			if apiKey != "" {
+				if hadPrevious {
+					rollbackErr = s.credentials.Set(openAICredentialAccount, previous)
+				} else {
+					rollbackErr = s.credentials.Delete(openAICredentialAccount)
+				}
+			}
+			if rollbackErr != nil {
+				return ProviderState{}, errors.Join(err, fmt.Errorf("restore provider credential: %w", rollbackErr))
+			}
+			return ProviderState{}, err
+		}
+	}
+	s.refreshGate(ctx)
+	return s.openAIState(ctx), nil
+}
+
+func (s *Service) ClearProviderCredential(ctx context.Context, provider string) (ProviderState, error) {
+	if strings.ToLower(strings.TrimSpace(provider)) != providerOpenAI {
+		return ProviderState{}, errors.New("clear provider credential: provider must be openai")
+	}
+	if strings.TrimSpace(os.Getenv(openAICredentialEnvironment)) != "" {
+		return ProviderState{}, fmt.Errorf("clear provider credential: credential is controlled by %s", openAICredentialEnvironment)
+	}
+	if err := s.credentials.Delete(openAICredentialAccount); err != nil {
+		return ProviderState{}, err
+	}
+	s.refreshGate(ctx)
+	return s.openAIState(ctx), nil
+}
+
+func (s *Service) openAIClient(ctx context.Context) (*openai.Client, error) {
+	endpoint, _, err := s.openAIEndpoint(ctx)
+	if err != nil {
+		return nil, err
+	}
+	apiKey, _, err := s.openAICredential()
+	if err != nil {
+		return nil, err
+	}
+	return openai.New(endpoint, apiKey, 30*time.Second)
+}
+
+func (s *Service) openAIState(ctx context.Context) ProviderState {
+	state := ProviderState{ID: providerOpenAI, Label: "OpenAI-compatible", CredentialSource: "none"}
+	endpoint, source, err := s.openAIEndpoint(ctx)
+	state.Endpoint, state.EndpointSource = endpoint, source
+	if err != nil {
+		state.Error = err.Error()
+		return state
+	}
+	apiKey, credentialSource, err := s.openAICredential()
+	state.CredentialSource = credentialSource
+	if err != nil {
+		state.Error = err.Error()
+		return state
+	}
+	client, err := openai.New(endpoint, apiKey, 30*time.Second)
+	if err != nil {
+		state.Error = err.Error()
+		return state
+	}
+	state.Configured = client.Configured()
+	if !state.Configured {
+		state.Error = "OpenAI-compatible API credential is not configured"
+	}
+	return state
+}
+
+func (s *Service) openAIEndpoint(ctx context.Context) (string, string, error) {
+	if value := strings.TrimSpace(os.Getenv(openAIEndpointEnvironment)); value != "" {
+		return value, "environment", nil
+	}
+	if value, found, err := s.store.Setting(ctx, openAIEndpointSetting); err != nil {
+		return "", "", err
+	} else if found {
+		return value, "setting", nil
+	}
+	return defaultOpenAIURL, "default", nil
+}
+
+func (s *Service) openAICredential() (string, string, error) {
+	if value := strings.TrimSpace(os.Getenv(openAICredentialEnvironment)); value != "" {
+		return value, "environment", nil
+	}
+	value, found, err := s.credentials.Get(openAICredentialAccount)
+	if err != nil {
+		return "", "", err
+	}
+	if found {
+		return value, "keychain", nil
+	}
+	return "", "none", nil
+}
+
+func (s *Service) refreshGate(ctx context.Context) {
+	selected, err := s.modelName(ctx, "gate")
+	if err == nil {
+		s.gate = s.newGateProvider(ctx, selected)
 	}
 }
 

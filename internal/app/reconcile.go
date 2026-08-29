@@ -190,7 +190,7 @@ func (s *Service) reconcileModel(ctx context.Context) (providerReconcileModel, e
 	if err != nil {
 		return providerReconcileModel{}, err
 	}
-	generator, err := s.generator(selected.Provider)
+	generator, err := s.generator(ctx, selected.Provider)
 	if err != nil {
 		return providerReconcileModel{}, err
 	}

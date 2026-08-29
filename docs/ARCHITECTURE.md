@@ -118,6 +118,9 @@ Directories are added only when their first behavior is implemented.
   binding names a provider and model plus its relevant context or dimension
   limit. Provider adapters satisfy small interfaces owned by `app`; local model
   lifecycle operations remain Ollama-only and are not part of those interfaces.
+- Provider endpoints are global SQLite settings. Provider credentials live in
+  the OS keychain and are accepted by the CLI only through standard input;
+  environment variables override both without persisting secrets.
 - Each Project retains independent vectors keyed by provider, model, and
   dimensions. Changing the embedding binding makes that Project's nodes pending
   until its next explicit embedding sync, and later durable writes and

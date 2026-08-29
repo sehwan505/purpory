@@ -116,7 +116,7 @@ func (s *Service) syncEmbeddingCandidates(ctx context.Context, selected ModelSel
 	if err != nil {
 		return 0, 0, err
 	}
-	provider, err := s.embeddingProvider(selected.Provider)
+	provider, err := s.embeddingProvider(ctx, selected.Provider)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -179,7 +179,7 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	}
 	queryContext, cancel := context.WithTimeout(ctx, semanticQueryTimeout)
 	defer cancel()
-	provider, err := s.embeddingProvider(selected.Provider)
+	provider, err := s.embeddingProvider(ctx, selected.Provider)
 	if err != nil {
 		return nil, err
 	}

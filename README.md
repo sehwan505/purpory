@@ -146,13 +146,23 @@ model to use an OpenAI-compatible API. The same choice can be made with
 `PURPORY_GATE_PROVIDER`, `PURPORY_RECONCILE_PROVIDER`, and
 `PURPORY_EMBEDDING_PROVIDER` alongside the existing role model variables.
 
-External APIs use `PURPORY_OPENAI_API_KEY` and default to
-`https://api.openai.com/v1`. Set `PURPORY_OPENAI_BASE_URL` for another compatible
-endpoint; remote endpoints must use HTTPS. API keys are read from the process
-environment and are never stored in Purpory's database. Selecting an external
-provider sends that role's input to the configured service: gate sends the
-request catalog, reconciliation sends transcript evidence, and embedding sends
-knowledge or query text. Purpory never silently falls back between providers.
+Configure an OpenAI-compatible API in Global Settings, or from the CLI without
+putting its secret in shell history:
+
+```sh
+printf '%s\n' "$OPENAI_API_KEY" | purpory model provider configure openai \
+  --url https://api.openai.com/v1 --api-key-stdin
+purpory model provider status
+purpory model provider clear-key openai
+```
+
+The endpoint is stored in Purpory's global settings and the API key in the OS
+keychain, never in Purpory's database or command output. Environment variables
+`PURPORY_OPENAI_API_KEY` and `PURPORY_OPENAI_BASE_URL` override saved values;
+remote endpoints must use HTTPS. Selecting an external provider sends that
+role's input to the configured service: gate sends the request catalog,
+reconciliation sends transcript evidence, and embedding sends knowledge or
+query text. Purpory never silently falls back between providers.
 
 Reconciliation defaults to 32,768 context tokens and embedding defaults to 512
 dimensions. Configure them in Global Settings or with

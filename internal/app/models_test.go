@@ -7,11 +7,42 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
+
+type memoryCredentials struct {
+	mu     sync.Mutex
+	values map[string]string
+}
+
+func newMemoryCredentials() *memoryCredentials {
+	return &memoryCredentials{values: map[string]string{}}
+}
+
+func (m *memoryCredentials) Get(account string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	value, found := m.values[account]
+	return value, found, nil
+}
+
+func (m *memoryCredentials) Set(account, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.values[account] = value
+	return nil
+}
+
+func (m *memoryCredentials) Delete(account string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.values, account)
+	return nil
+}
 
 func TestOpenAIProviderDrivesEveryModelRole(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -53,12 +84,13 @@ func TestOpenAIProviderDrivesEveryModelRole(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	t.Setenv("PURPORY_OPENAI_BASE_URL", server.URL+"/v1")
-	t.Setenv("PURPORY_OPENAI_API_KEY", "test-key")
-
 	ctx := context.Background()
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	provider, err := service.ConfigureProvider(ctx, providerOpenAI, server.URL+"/v1", "test-key")
+	if err != nil || !provider.Configured || provider.EndpointSource != "setting" || provider.CredentialSource != "keychain" {
+		t.Fatalf("provider configuration = %#v, %v", provider, err)
+	}
 
 	if _, err := service.SelectModelProvider(ctx, "gate", providerOpenAI, "small-chat", 8192, 0); err != nil {
 		t.Fatal(err)
@@ -103,6 +135,10 @@ func TestOpenAIProviderDrivesEveryModelRole(t *testing.T) {
 	if err != nil || loaded.Provider != providerOpenAI || loaded.Model != "text-embedding" || loaded.Dimensions != 2 {
 		t.Fatalf("provider binding did not reload: %#v, %v", loaded, err)
 	}
+	cleared, err := service.ClearProviderCredential(ctx, providerOpenAI)
+	if err != nil || cleared.CredentialSource != "none" {
+		t.Fatalf("provider credential was not cleared: %#v, %v", cleared, err)
+	}
 }
 
 func TestLegacyModelSettingRemainsAnOllamaBinding(t *testing.T) {
@@ -114,5 +150,22 @@ func TestLegacyModelSettingRemainsAnOllamaBinding(t *testing.T) {
 	selected, err := service.modelName(ctx, "reconcile")
 	if err != nil || selected.Provider != providerOllama || selected.Model != "legacy-local" || selected.ContextTokens != 32_768 {
 		t.Fatalf("legacy selection = %#v, %v", selected, err)
+	}
+}
+
+func TestProviderEnvironmentOverridesStoredConfiguration(t *testing.T) {
+	t.Setenv(openAIEndpointEnvironment, "https://environment.example/v1")
+	t.Setenv(openAICredentialEnvironment, "environment-secret")
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+
+	state, err := service.ConfigureProvider(context.Background(), providerOpenAI, "", "")
+	if err != nil || state.EndpointSource != "environment" || state.CredentialSource != "environment" || !state.Configured {
+		t.Fatalf("environment provider state = %#v, %v", state, err)
+	}
+	if _, err := service.ConfigureProvider(context.Background(), providerOpenAI, "https://stored.example/v1", ""); err == nil {
+		t.Fatal("environment-controlled endpoint was overwritten")
+	}
+	if _, err := service.ClearProviderCredential(context.Background(), providerOpenAI); err == nil {
+		t.Fatal("environment-controlled credential was cleared")
 	}
 }

@@ -133,7 +133,7 @@ func (c *Client) Embed(ctx context.Context, model string, texts []string, dimens
 
 func (c *Client) post(ctx context.Context, path string, value, target any, timeout time.Duration) error {
 	if !c.Configured() {
-		return fmt.Errorf("configure openai: PURPORY_OPENAI_API_KEY is required for remote endpoints")
+		return fmt.Errorf("configure openai: an API key is required for remote endpoints")
 	}
 	payload, err := json.Marshal(value)
 	if err != nil {

@@ -36,6 +36,7 @@ func openTestService(t *testing.T, root, database, id string) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.credentials = newMemoryCredentials()
 	t.Cleanup(func() { _ = service.Close() })
 	return service
 }

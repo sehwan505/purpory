@@ -184,6 +184,18 @@ func (a *App) SelectModelProvider(role, provider, model string, contextTokens, d
 	return a.service.SelectModelProvider(a.ctx, role, provider, model, contextTokens, dimensions)
 }
 
+func (a *App) ConfigureProvider(provider, endpoint, apiKey string) (product.ProviderState, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.service.ConfigureProvider(a.ctx, provider, endpoint, apiKey)
+}
+
+func (a *App) ClearProviderCredential(provider string) (product.ProviderState, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.service.ClearProviderCredential(a.ctx, provider)
+}
+
 func (a *App) InstallModel(model, role string) (product.ModelSelection, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

@@ -61,7 +61,7 @@ func TestClientRejectsInsecureRemoteEndpointAndMissingKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.GenerateJSON(context.Background(), "small", "", "prompt", map[string]any{"type": "object"}, &struct{}{}, 8192, time.Second); err == nil || !strings.Contains(err.Error(), "API_KEY") {
+	if err := client.GenerateJSON(context.Background(), "small", "", "prompt", map[string]any{"type": "object"}, &struct{}{}, 8192, time.Second); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("missing key error = %v", err)
 	}
 }

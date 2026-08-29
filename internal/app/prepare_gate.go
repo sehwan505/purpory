@@ -42,14 +42,14 @@ type modelGate struct {
 	selection ModelSelection
 }
 
-func (s *Service) newGateProvider(selected ModelSelection) contextprepare.Provider {
+func (s *Service) newGateProvider(ctx context.Context, selected ModelSelection) contextprepare.Provider {
 	if selected.Model == "" {
 		return nil
 	}
 	if selected.Provider == providerOllama && !localEndpoint(s.ollamaURL) && !environmentTrue("PURPORY_ALLOW_REMOTE_GATE") {
 		return failingGate("remote gate URLs require PURPORY_ALLOW_REMOTE_GATE=true")
 	}
-	generator, err := s.generator(selected.Provider)
+	generator, err := s.generator(ctx, selected.Provider)
 	if err != nil {
 		return failingGate(err.Error())
 	}
