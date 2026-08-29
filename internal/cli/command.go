@@ -395,11 +395,15 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			}
 			return writeJSON(output, status, nil)
 		case "select":
-			if len(arguments) != 4 {
-				return errors.New("model select requires a role and model")
+			if len(arguments) == 4 {
+				result, err := service.SelectModel(ctx, arguments[2], arguments[3])
+				return writeJSON(output, result, err)
 			}
-			result, err := service.SelectModel(ctx, arguments[2], arguments[3])
-			return writeJSON(output, result, err)
+			if len(arguments) == 5 {
+				result, err := service.SelectModelProvider(ctx, arguments[2], arguments[3], arguments[4], 0, 0)
+				return writeJSON(output, result, err)
+			}
+			return errors.New("model select requires a role, optional provider, and model")
 		case "install":
 			if len(arguments) < 3 || len(arguments) > 4 {
 				return errors.New("model install requires a model and optional role")

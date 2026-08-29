@@ -8,11 +8,9 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/sehwan505/purpory/internal/ollama"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
 
@@ -39,29 +37,23 @@ func sessionAgent(sessionID string) string {
 	return "unknown"
 }
 
-type ollamaGate struct {
-	client *ollama.Client
-	model  string
-	tokens int
+type modelGate struct {
+	generator structuredGenerator
+	selection ModelSelection
 }
 
-func newGateProvider(client *ollama.Client, selected string) contextprepare.Provider {
-	model := strings.TrimSpace(os.Getenv("PURPORY_GATE_MODEL"))
-	if model == "" {
-		model = strings.TrimSpace(selected)
-	}
-	if model == "" {
+func (s *Service) newGateProvider(selected ModelSelection) contextprepare.Provider {
+	if selected.Model == "" {
 		return nil
 	}
-	endpoint := strings.TrimSpace(os.Getenv("PURPORY_OLLAMA_URL"))
-	if endpoint != "" && !localEndpoint(endpoint) && !environmentTrue("PURPORY_ALLOW_REMOTE_GATE") {
+	if selected.Provider == providerOllama && !localEndpoint(s.ollamaURL) && !environmentTrue("PURPORY_ALLOW_REMOTE_GATE") {
 		return failingGate("remote gate URLs require PURPORY_ALLOW_REMOTE_GATE=true")
 	}
-	tokens := 8_192
-	if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("PURPORY_GATE_CONTEXT_TOKENS"))); err == nil && configured >= 1_024 {
-		tokens = configured
+	generator, err := s.generator(selected.Provider)
+	if err != nil {
+		return failingGate(err.Error())
 	}
-	return ollamaGate{client: client, model: model, tokens: tokens}
+	return modelGate{generator: generator, selection: selected}
 }
 
 type failingGate string
@@ -87,7 +79,7 @@ func environmentTrue(name string) bool {
 	return false
 }
 
-func (g ollamaGate) Propose(ctx context.Context, request contextprepare.Request) (contextprepare.ProviderResult, error) {
+func (g modelGate) Propose(ctx context.Context, request contextprepare.Request) (contextprepare.ProviderResult, error) {
 	payload, err := json.Marshal(map[string]any{
 		"request":          request.Message,
 		"sessionId":        request.SessionID,
@@ -101,7 +93,7 @@ func (g ollamaGate) Propose(ctx context.Context, request contextprepare.Request)
 	if err != nil {
 		return contextprepare.ProviderResult{}, fmt.Errorf("prepare gate: encode request: %w", err)
 	}
-	if len(payload) > g.tokens*3 {
+	if len(payload) > g.selection.ContextTokens*3 {
 		return contextprepare.ProviderResult{}, errors.New("gate request exceeds model context limit; model invocation skipped")
 	}
 	proposal := contextprepare.Proposal{}
@@ -118,8 +110,12 @@ func (g ollamaGate) Propose(ctx context.Context, request contextprepare.Request)
 	}
 	started := time.Now()
 	system := "Classify whether the request needs project context. Return only the strict JSON schema. Never answer the request. Use skip for self-contained work, search for project evidence, and ask only when user input is required."
-	if err := g.client.ChatJSON(ctx, g.model, system, string(payload), schema, &proposal, g.tokens, 2*time.Second); err != nil {
+	timeout := 2 * time.Second
+	if g.selection.Provider == providerOpenAI {
+		timeout = 10 * time.Second
+	}
+	if err := g.generator.GenerateJSON(ctx, g.selection.Model, system, string(payload), schema, &proposal, g.selection.ContextTokens, timeout); err != nil {
 		return contextprepare.ProviderResult{}, fmt.Errorf("prepare gate: %w", err)
 	}
-	return contextprepare.ProviderResult{Proposal: proposal, ModelID: g.model, LatencyMS: int(time.Since(started).Milliseconds())}, nil
+	return contextprepare.ProviderResult{Proposal: proposal, ModelID: g.selection.Provider + "/" + g.selection.Model, LatencyMS: int(time.Since(started).Milliseconds())}, nil
 }

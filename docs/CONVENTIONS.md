@@ -68,8 +68,8 @@ formatting and basic correctness; reviewers should focus on behavior and names.
 - SQLite is the source of truth. Every multi-write operation uses a transaction.
 - Migrations are ordered, embedded, forward-only, and tested from an empty
   database. Back up before destructive schema changes.
-- Ollama is the first local model adapter. Provider-specific request and response
-  types stay inside its package.
+- Ollama and OpenAI-compatible APIs are model adapters. Provider-specific request
+  and response types stay inside their packages; role interfaces stay in `app`.
 - Network clients set timeouts, honor context cancellation, bound response sizes,
   and return actionable errors.
 

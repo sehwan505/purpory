@@ -168,6 +168,10 @@ func (c *Client) ChatJSON(ctx context.Context, model, system, prompt string, sch
 	return nil
 }
 
+func (c *Client) GenerateJSON(ctx context.Context, model, system, prompt string, schema, target any, contextTokens int, timeout time.Duration) error {
+	return c.ChatJSON(ctx, model, system, prompt, schema, target, contextTokens, timeout)
+}
+
 func (c *Client) get(ctx context.Context, path string, target any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {

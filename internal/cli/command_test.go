@@ -97,6 +97,18 @@ func TestEmbedCLIBackfillsAllMissingNodes(t *testing.T) {
 	}
 }
 
+func TestModelSelectCLIAcceptsProvider(t *testing.T) {
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	var output bytes.Buffer
+	if err := runCLI(context.Background(), service, []string{"model", "select", "embedding", "openai", "text-embedding-3-small"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var selected product.ModelSelection
+	if err := json.Unmarshal(output.Bytes(), &selected); err != nil || selected.Provider != "openai" || selected.Model != "text-embedding-3-small" || selected.Dimensions != 512 {
+		t.Fatalf("provider selection = %#v, %v", selected, err)
+	}
+}
+
 func TestPrepareCLIOptions(t *testing.T) {
 	root := t.TempDir()
 	service := openCLIService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")

@@ -20,6 +20,7 @@ import (
 	"github.com/sehwan505/purpory/internal/material"
 	"github.com/sehwan505/purpory/internal/memory"
 	"github.com/sehwan505/purpory/internal/ollama"
+	"github.com/sehwan505/purpory/internal/openai"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/project"
 	"github.com/sehwan505/purpory/internal/resolve"
@@ -34,6 +35,9 @@ type Service struct {
 	store        *store.Store
 	databasePath string
 	ollama       *ollama.Client
+	ollamaURL    string
+	openAI       *openai.Client
+	openAIURL    string
 	workspace    WorkspaceObserver
 	gate         contextprepare.Provider
 	update       sync.Mutex
@@ -215,12 +219,23 @@ func newService(ctx context.Context, databasePath string, database *store.Store,
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{store: database, databasePath: databasePath, ollama: client, workspace: observer}
+	openAIURL := strings.TrimSpace(os.Getenv("PURPORY_OPENAI_BASE_URL"))
+	if openAIURL == "" {
+		openAIURL = "https://api.openai.com/v1"
+	}
+	openAIClient, err := openai.New(openAIURL, os.Getenv("PURPORY_OPENAI_API_KEY"), 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	service := &Service{
+		store: database, databasePath: databasePath, workspace: observer,
+		ollama: client, ollamaURL: ollamaURL, openAI: openAIClient, openAIURL: openAIURL,
+	}
 	gate, err := service.modelName(ctx, "gate")
 	if err != nil {
 		return nil, err
 	}
-	service.gate = newGateProvider(client, gate.Model)
+	service.gate = service.newGateProvider(gate)
 	return service, nil
 }
 

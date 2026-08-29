@@ -11,7 +11,7 @@ Reference implementation: `../purpory-python` at upstream `main`.
   model, with Projects created only through explicit registration
 - SQLite persistence, audit history, domain-neutral Material ingestion,
   structural knowledge extraction, Codex and Claude hook installation, and
-  optional Ollama integration
+  optional Ollama and OpenAI-compatible model integration
 - the existing React dashboard's useful workflows, redesigned as a native-feeling
   Wails application
 
@@ -20,8 +20,8 @@ Reference implementation: `../purpory-python` at upstream `main`.
 - legacy MCP graph server and graph-database exporters
 - `affected`, benchmark, PR, clustering-only, label-only, report, wiki, and HTML
   analysis commands
-- provider-specific model adapters beyond Ollama and one OpenAI-compatible HTTP
-  boundary when a real user needs it
+- provider plugin registries and speculative adapters beyond the implemented
+  Ollama and OpenAI-compatible HTTP boundaries
 - video/transcription, broad office/database/config ingestion, long-tail language
   parsers, advanced NetworkX analytics, and duplicate watcher/hook paths
 - compatibility for generated `graph.json`, legacy code-node IDs, and old caches

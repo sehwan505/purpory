@@ -9,7 +9,7 @@ Wails is a delivery boundary, not the center of the program.
 ```text
 Wails UI ─┐
           ├─ application services ─ project knowledge ─ SQLite
-CLI ──────┘                       └ model boundary ──── Ollama
+CLI ──────┘                       └ model boundary ──── Ollama / OpenAI-compatible
 
 update: discover Materials → extract facts → resolve relations → atomic publish
 
@@ -32,6 +32,7 @@ internal/memory/   remembered-value validation and version model
 internal/graph/    structural node, edge, explanation, and path model
 internal/store/    SQLite persistence and migrations
 internal/ollama/   Ollama HTTP adapter
+internal/openai/   OpenAI-compatible HTTP adapter
 internal/prepare/  prepare request contract, ranking, budgeting, and rendering rules
 internal/integration/ Codex and Claude instructions and lifecycle hooks
 frontend/          React/TypeScript Wails UI
@@ -43,7 +44,7 @@ Directories are added only when their first behavior is implemented.
 
 - Dependencies point inward toward product behavior.
 - `material`, `extract`, `resolve`, `memory`, and `project` never import Wails,
-  frontend code, SQLite drivers, or Ollama types.
+  frontend code, SQLite drivers, or model-provider types.
 - `app` coordinates capabilities but does not contain persistence or parsing.
 - Wails bindings expose explicit methods and DTOs; domain structs are not UI APIs.
 - Interfaces live beside the code that calls them. Go's implicit satisfaction is
@@ -112,11 +113,15 @@ Directories are added only when their first behavior is implemented.
   while `reconciliation_events` continues to record only committed durable
   changes and the canonical graph remains free of Workspace topology.
 - Model assistance is optional. Structural indexing and stored-memory queries
-  continue to work when Ollama is absent.
-- The embedding model selection is global. Each Project retains independent
-  vectors for that model; changing the global selection makes that Project's
-  nodes pending until its next explicit embedding sync, and later durable writes
-  and reconciliation refresh vectors for the selected model immediately.
+  continue to work when every provider is absent.
+- Gate, reconciliation, and embedding are independent global role bindings. Each
+  binding names a provider and model plus its relevant context or dimension
+  limit. Provider adapters satisfy small interfaces owned by `app`; local model
+  lifecycle operations remain Ollama-only and are not part of those interfaces.
+- Each Project retains independent vectors keyed by provider, model, and
+  dimensions. Changing the embedding binding makes that Project's nodes pending
+  until its next explicit embedding sync, and later durable writes and
+  reconciliation refresh vectors for the selected binding immediately.
 - `prepare` owns the complete context gateway: bounded input validation,
   optional gate classification, Typed PPR retrieval, token budgeting, and
   decision audit. CLI and agent hooks call this same path.

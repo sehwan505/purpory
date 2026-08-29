@@ -108,6 +108,8 @@ purpory model status
 purpory model start
 purpory model install qwen3-embedding:0.6b embedding
 purpory model select gate qwen3:4b
+purpory model select reconcile openai gpt-4.1-mini
+purpory model select embedding openai text-embedding-3-small
 purpory embed                              # fill every missing intent/knowledge embedding
 purpory embed 100                          # optionally bound one backfill run
 purpory integration codex install
@@ -137,19 +139,30 @@ or focused and only runs an update when the user explicitly requests one.
 
 Data is stored in `~/.purpory/purpory.db`. Set `PURPORY_DATABASE` to use another
 database and `PURPORY_OLLAMA_URL` to use a non-default Ollama endpoint.
-`prepare` works deterministically without a model. Use `model select gate` or set
-`PURPORY_GATE_MODEL` to enable `skip | search | ask` classification;
-remote gate endpoints additionally require `PURPORY_ALLOW_REMOTE_GATE=true`.
-Reconciliation uses `qwen3.5:9b` by default; override it with
-`model select reconcile`, `PURPORY_RECONCILE_MODEL`, or its context with
-`PURPORY_RECONCILE_CONTEXT_TOKENS`. The first embedding model selected or used
-is fixed for that Project. `purpory embed` backfills every missing or stale
-intent/knowledge node; later memory and reconciliation writes refresh their
-vectors immediately. Query and prepare rank semantic, exact, and recently opened
-seeds with direction-aware Typed PPR. Agent preflight returns at most three
-content-free signposts; CLI `query` returns five by default. `explain` loads
-selected evidence and `path` renders relationships without loading content.
-Default CLI responses remain character-budgeted, including `--json`. See the
+`prepare` works deterministically without a model. Gate, reconciliation, and
+embedding each select an independent `provider + model` binding. A model-only
+CLI selection remains shorthand for Ollama; pass `openai` between the role and
+model to use an OpenAI-compatible API. The same choice can be made with
+`PURPORY_GATE_PROVIDER`, `PURPORY_RECONCILE_PROVIDER`, and
+`PURPORY_EMBEDDING_PROVIDER` alongside the existing role model variables.
+
+External APIs use `PURPORY_OPENAI_API_KEY` and default to
+`https://api.openai.com/v1`. Set `PURPORY_OPENAI_BASE_URL` for another compatible
+endpoint; remote endpoints must use HTTPS. API keys are read from the process
+environment and are never stored in Purpory's database. Selecting an external
+provider sends that role's input to the configured service: gate sends the
+request catalog, reconciliation sends transcript evidence, and embedding sends
+knowledge or query text. Purpory never silently falls back between providers.
+
+Reconciliation defaults to 32,768 context tokens and embedding defaults to 512
+dimensions. Configure them in Global Settings or with
+`PURPORY_RECONCILE_CONTEXT_TOKENS`, `PURPORY_GATE_CONTEXT_TOKENS`, and
+`PURPORY_EMBEDDING_DIMENSIONS`. Provider, model, and dimensions identify stored
+vectors, so changing any of them makes the affected Project nodes pending until
+the next explicit `purpory embed`. Later durable writes refresh vectors for the
+selected binding immediately. Query and prepare rank semantic, exact, and
+recently opened seeds with direction-aware Typed PPR. Agent preflight returns at
+most three content-free signposts; CLI `query` returns five by default. See the
 [retrieval contract](docs/INTENT_GRAPH.md#retrieval) for weights and progression.
 
 Run the model-free first-value and retrieval-budget checks with:
