@@ -70,7 +70,7 @@ func (c *Client) GenerateJSON(ctx context.Context, model, system, prompt string,
 		} `json:"choices"`
 	}
 	if err := c.post(ctx, "/chat/completions", map[string]any{
-		"model": model, "messages": messages, "temperature": 0,
+		"model": model, "messages": messages,
 		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "purpory", "strict": true, "schema": schema}},
 	}, &result, timeout); err != nil {
 		return err
@@ -79,7 +79,7 @@ func (c *Client) GenerateJSON(ctx context.Context, model, system, prompt string,
 		return fmt.Errorf("call openai: response contains no choices")
 	}
 	if refusal := strings.TrimSpace(result.Choices[0].Message.Refusal); refusal != "" {
-		return fmt.Errorf("call openai: model refused the request: %s", refusal)
+		return fmt.Errorf("call openai: model refused the request")
 	}
 	content := strings.TrimSpace(result.Choices[0].Message.Content)
 	if content == "" {
@@ -155,8 +155,8 @@ func (c *Client) post(ctx context.Context, path string, value, target any, timeo
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("call openai: status %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("call openai: status %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20+1))
 	if err != nil {
