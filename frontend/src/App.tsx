@@ -351,7 +351,7 @@ export default function App() {
   }
 
   async function clearProviderCredential() {
-    if (!window.confirm("저장된 OpenAI-compatible API key를 OS keychain에서 삭제할까요?")) return;
+    if (!window.confirm("저장된 OpenAI-compatible API key를 암호화 저장소에서 삭제할까요?")) return;
     await perform(async () => {
       await ClearProviderCredential("openai");
       setMessage("OpenAI-compatible API key를 삭제했습니다.");
@@ -496,7 +496,7 @@ export default function App() {
             </form>)}</div>
             <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><Dropdown name="installRole" ariaLabel="설치 후 사용할 역할" options={[{ value: "", label: "설치만" }, { value: "gate", label: "gate" }, { value: "reconcile", label: "reconcile" }, { value: "embedding", label: "embedding" }]} /><button disabled={busy}>설치</button></div></form>
           </section>
-          <aside className="panel settingsNote"><p className="eyebrow">GLOBAL SCOPE</p><h2>모든 Project에 적용</h2><p>역할마다 provider와 모델을 독립적으로 선택합니다. 앱에서 입력한 API key는 OS keychain에, endpoint는 전역 설정에 저장됩니다. 환경변수로 설정한 값은 앱 설정보다 우선합니다.</p></aside>
+          <aside className="panel settingsNote"><p className="eyebrow">GLOBAL SCOPE</p><h2>모든 Project에 적용</h2><p>역할마다 provider와 모델을 독립적으로 선택합니다. 앱에서 입력한 API key는 로컬 데이터베이스에 암호화해 저장됩니다. 환경변수로 설정한 값은 앱 설정보다 우선합니다.</p></aside>
         </section>}
         </div>
       </main>

@@ -23,21 +23,21 @@ func newMemoryCredentials() *memoryCredentials {
 	return &memoryCredentials{values: map[string]string{}}
 }
 
-func (m *memoryCredentials) Get(account string) (string, bool, error) {
+func (m *memoryCredentials) Get(_ context.Context, account string) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	value, found := m.values[account]
 	return value, found, nil
 }
 
-func (m *memoryCredentials) Set(account, value string) error {
+func (m *memoryCredentials) Set(_ context.Context, account, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.values[account] = value
 	return nil
 }
 
-func (m *memoryCredentials) Delete(account string) error {
+func (m *memoryCredentials) Delete(_ context.Context, account string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.values, account)
@@ -88,7 +88,7 @@ func TestOpenAIProviderDrivesEveryModelRole(t *testing.T) {
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
 	provider, err := service.ConfigureProvider(ctx, providerOpenAI, server.URL+"/v1", "test-key")
-	if err != nil || !provider.Configured || provider.EndpointSource != "setting" || provider.CredentialSource != "keychain" {
+	if err != nil || !provider.Configured || provider.EndpointSource != "setting" || provider.CredentialSource != "database" {
 		t.Fatalf("provider configuration = %#v, %v", provider, err)
 	}
 

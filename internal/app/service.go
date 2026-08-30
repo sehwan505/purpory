@@ -218,9 +218,14 @@ func newService(ctx context.Context, databasePath string, database *store.Store,
 	if err != nil {
 		return nil, err
 	}
+	// ponytail: a sibling key protects database-only copies; replace this key source when deployments need separate custody.
+	credentials, err := credential.NewEncrypted(database, databasePath+".key")
+	if err != nil {
+		return nil, err
+	}
 	service := &Service{
 		store: database, databasePath: databasePath, workspace: observer,
-		ollama: client, ollamaURL: ollamaURL, credentials: credential.Keyring{},
+		ollama: client, ollamaURL: ollamaURL, credentials: credentials,
 	}
 	gate, err := service.modelName(ctx, "gate")
 	if err != nil {

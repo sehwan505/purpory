@@ -55,9 +55,9 @@ type embedder interface {
 }
 
 type credentialStore interface {
-	Get(string) (string, bool, error)
-	Set(string, string) error
-	Delete(string) error
+	Get(context.Context, string) (string, bool, error)
+	Set(context.Context, string, string) error
+	Delete(context.Context, string) error
 }
 
 type ModelSelection struct {
@@ -286,11 +286,11 @@ func (s *Service) ConfigureProvider(ctx context.Context, provider, endpoint, api
 	var hadPrevious bool
 	if apiKey != "" {
 		var err error
-		previous, hadPrevious, err = s.credentials.Get(openAICredentialAccount)
+		previous, hadPrevious, err = s.credentials.Get(ctx, openAICredentialAccount)
 		if err != nil {
 			return ProviderState{}, err
 		}
-		if err := s.credentials.Set(openAICredentialAccount, apiKey); err != nil {
+		if err := s.credentials.Set(ctx, openAICredentialAccount, apiKey); err != nil {
 			return ProviderState{}, err
 		}
 	}
@@ -299,9 +299,9 @@ func (s *Service) ConfigureProvider(ctx context.Context, provider, endpoint, api
 			var rollbackErr error
 			if apiKey != "" {
 				if hadPrevious {
-					rollbackErr = s.credentials.Set(openAICredentialAccount, previous)
+					rollbackErr = s.credentials.Set(ctx, openAICredentialAccount, previous)
 				} else {
-					rollbackErr = s.credentials.Delete(openAICredentialAccount)
+					rollbackErr = s.credentials.Delete(ctx, openAICredentialAccount)
 				}
 			}
 			if rollbackErr != nil {
@@ -321,7 +321,7 @@ func (s *Service) ClearProviderCredential(ctx context.Context, provider string) 
 	if strings.TrimSpace(os.Getenv(openAICredentialEnvironment)) != "" {
 		return ProviderState{}, fmt.Errorf("clear provider credential: credential is controlled by %s", openAICredentialEnvironment)
 	}
-	if err := s.credentials.Delete(openAICredentialAccount); err != nil {
+	if err := s.credentials.Delete(ctx, openAICredentialAccount); err != nil {
 		return ProviderState{}, err
 	}
 	s.refreshGate(ctx)
@@ -333,7 +333,7 @@ func (s *Service) openAIClient(ctx context.Context) (*openai.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	apiKey, _, err := s.openAICredential()
+	apiKey, _, err := s.openAICredential(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +348,7 @@ func (s *Service) openAIState(ctx context.Context) ProviderState {
 		state.Error = err.Error()
 		return state
 	}
-	apiKey, credentialSource, err := s.openAICredential()
+	apiKey, credentialSource, err := s.openAICredential(ctx)
 	state.CredentialSource = credentialSource
 	if err != nil {
 		state.Error = err.Error()
@@ -378,16 +378,19 @@ func (s *Service) openAIEndpoint(ctx context.Context) (string, string, error) {
 	return defaultOpenAIURL, "default", nil
 }
 
-func (s *Service) openAICredential() (string, string, error) {
+func (s *Service) openAICredential(ctx context.Context) (string, string, error) {
 	if value := strings.TrimSpace(os.Getenv(openAICredentialEnvironment)); value != "" {
 		return value, "environment", nil
 	}
-	value, found, err := s.credentials.Get(openAICredentialAccount)
+	value, found, err := s.credentials.Get(ctx, openAICredentialAccount)
 	if err != nil {
-		return "", "", err
+		if found {
+			return "", "database", err
+		}
+		return "", "none", err
 	}
 	if found {
-		return value, "keychain", nil
+		return value, "database", nil
 	}
 	return "", "none", nil
 }

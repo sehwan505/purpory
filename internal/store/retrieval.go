@@ -42,6 +42,40 @@ func (s *Store) SaveSetting(ctx context.Context, key, value string) error {
 	return nil
 }
 
+func (s *Store) Credential(ctx context.Context, account string) ([]byte, bool, error) {
+	var ciphertext []byte
+	err := s.db.QueryRowContext(ctx, `SELECT ciphertext FROM provider_credentials WHERE account = ?`, strings.TrimSpace(account)).Scan(&ciphertext)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("load credential: %w", err)
+	}
+	return ciphertext, true, nil
+}
+
+func (s *Store) SaveCredential(ctx context.Context, account string, ciphertext []byte) error {
+	account = strings.TrimSpace(account)
+	if account == "" || len(account) > 255 || len(ciphertext) == 0 || len(ciphertext) > 4_096 {
+		return fmt.Errorf("save credential: valid account and ciphertext are required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO provider_credentials(account, ciphertext) VALUES (?, ?)
+		ON CONFLICT(account) DO UPDATE SET ciphertext=excluded.ciphertext, updated_at=unixepoch()
+	`, account, ciphertext)
+	if err != nil {
+		return fmt.Errorf("save credential: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteCredential(ctx context.Context, account string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM provider_credentials WHERE account = ?`, strings.TrimSpace(account)); err != nil {
+		return fmt.Errorf("delete credential: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Embeddings(ctx context.Context, projectID, model string) ([]Embedding, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT node_id, content_hash, model, vector_json FROM embeddings

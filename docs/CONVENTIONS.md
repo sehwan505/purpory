@@ -62,8 +62,9 @@ formatting and basic correctness; reviewers should focus on behavior and names.
 - Log once at the application boundary. Libraries return errors instead of
   logging and returning the same error.
 - Never log secrets, full prompts, source contents, or personal paths by default.
-- Store provider credentials in the OS keychain, never SQLite, CLI arguments, or
-  command output. Environment credentials remain process-local overrides.
+- Encrypt provider credentials before SQLite persistence; never place plaintext
+  secrets in SQLite, CLI arguments, or command output. Environment credentials
+  remain process-local overrides.
 
 ## Persistence and external services
 

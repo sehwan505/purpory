@@ -156,11 +156,13 @@ purpory model provider status
 purpory model provider clear-key openai
 ```
 
-The endpoint is stored in Purpory's global settings and the API key in the OS
-keychain, never in Purpory's database or command output. Environment variables
-`PURPORY_OPENAI_API_KEY` and `PURPORY_OPENAI_BASE_URL` override saved values;
-remote endpoints must use HTTPS. Selecting an external provider sends that
-role's input to the configured service: gate sends the request catalog,
+The endpoint and encrypted API key are stored in Purpory's global database; the
+local encryption key is written beside the database as `purpory.db.key` with
+mode `0600` where supported. Back up both files for recovery, but treat the key
+file as a secret. Secrets never appear in command output. Environment
+variables `PURPORY_OPENAI_API_KEY` and `PURPORY_OPENAI_BASE_URL` override saved
+values; remote endpoints must use HTTPS. Selecting an external provider sends
+that role's input to the configured service: gate sends the request catalog,
 reconciliation sends transcript evidence, and embedding sends knowledge or
 query text. Purpory never silently falls back between providers.
 
