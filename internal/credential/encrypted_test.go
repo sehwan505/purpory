@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -42,7 +43,7 @@ func TestEncryptedLifecycle(t *testing.T) {
 		t.Fatal("ciphertext contains the plaintext credential")
 	}
 	info, err := os.Stat(keyPath)
-	if err != nil || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("master key permissions = %v, %v", info, err)
 	}
 	reopened, err := NewEncrypted(values, keyPath)
