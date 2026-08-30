@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -32,36 +30,35 @@ For decision-to-Material links, choose the single most specific relation per Mat
 applies_to means the intent scopes or constrains it; realized_by means it embodies the intended
 outcome; verified_by means it confirms satisfaction; contradicted_by means it conflicts with the intent.`
 
-type ollamaReconcileModel struct {
-	service   *Service
-	name      string
-	tokens    int
+type providerReconcileModel struct {
+	generator structuredGenerator
+	selection ModelSelection
 	materials []string
 }
 
-func (m ollamaReconcileModel) ContextTokens() int { return m.tokens }
+func (m providerReconcileModel) ContextTokens() int { return m.selection.ContextTokens }
 
-func (m ollamaReconcileModel) Extract(ctx context.Context, transcript string) ([]reconcile.Candidate, error) {
+func (m providerReconcileModel) Extract(ctx context.Context, transcript string) ([]reconcile.Candidate, error) {
 	result := struct {
 		Candidates []reconcile.Candidate `json:"candidates"`
 	}{}
 	schema := map[string]any{
-		"type": "object", "required": []string{"candidates"},
+		"type": "object", "additionalProperties": false, "required": []string{"candidates"},
 		"properties": map[string]any{"candidates": map[string]any{"type": "array", "items": candidateSchema(false, m.materials)}},
 	}
 	prompt := "Extract every durable memory candidate. evidenceIds must cite only bracketed USER ids that fully support the value; an empty list is correct when nothing qualifies. For decision candidates, materialLinks may contain only exact AVAILABLE MATERIAL refs whose relationship is supported by the cited USER statements. Do not link merely discussed or merely changed files.\n\nAVAILABLE MATERIALS\n" + strings.Join(m.materials, "\n") + "\n\nTRANSCRIPT\n" + transcript
-	if err := m.service.ollama.ChatJSON(ctx, m.name, reconcileSystemPrompt, prompt, schema, &result, m.tokens, 10*time.Minute); err != nil {
+	if err := m.generator.GenerateJSON(ctx, m.selection.Model, reconcileSystemPrompt, prompt, schema, &result, m.selection.ContextTokens, 10*time.Minute); err != nil {
 		return nil, err
 	}
 	return result.Candidates, nil
 }
 
-func (m ollamaReconcileModel) Consolidate(ctx context.Context, candidates []reconcile.Candidate) (reconcile.Candidate, error) {
+func (m providerReconcileModel) Consolidate(ctx context.Context, candidates []reconcile.Candidate) (reconcile.Candidate, error) {
 	result := struct {
 		Candidate reconcile.Candidate `json:"candidate"`
 	}{}
 	schema := map[string]any{
-		"type": "object", "required": []string{"candidate"},
+		"type": "object", "additionalProperties": false, "required": []string{"candidate"},
 		"properties": map[string]any{"candidate": candidateSchema(true, m.materials)},
 	}
 	encoded, err := json.Marshal(candidates)
@@ -69,7 +66,7 @@ func (m ollamaReconcileModel) Consolidate(ctx context.Context, candidates []reco
 		return reconcile.Candidate{}, fmt.Errorf("encode reconciliation candidates: %w", err)
 	}
 	prompt := "Consolidate these chronological candidates into one current memory. A later explicit user correction wins. sourceIds must contain each input id exactly once.\n\nCANDIDATES\n" + string(encoded)
-	if err := m.service.ollama.ChatJSON(ctx, m.name, reconcileSystemPrompt, prompt, schema, &result, m.tokens, 10*time.Minute); err != nil {
+	if err := m.generator.GenerateJSON(ctx, m.selection.Model, reconcileSystemPrompt, prompt, schema, &result, m.selection.ContextTokens, 10*time.Minute); err != nil {
 		return reconcile.Candidate{}, err
 	}
 	return result.Candidate, nil
@@ -96,7 +93,7 @@ func candidateSchema(reduced bool, materialRefs []string) map[string]any {
 		properties["sourceIds"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 		required = append(required, "sourceIds")
 	}
-	return map[string]any{"type": "object", "properties": properties, "required": required}
+	return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
 }
 
 func (s *Service) QueueSessionEnd(ctx context.Context, cwd, sessionID, agent, transcriptPath, reason string) (string, error) {
@@ -188,21 +185,16 @@ func (s *Service) ReconciliationEvents(ctx context.Context) ([]memory.ReconcileE
 	return s.store.ReconciliationEvents(ctx, s.project.ID)
 }
 
-func (s *Service) reconcileModel(ctx context.Context) (ollamaReconcileModel, error) {
+func (s *Service) reconcileModel(ctx context.Context) (providerReconcileModel, error) {
 	selected, err := s.modelName(ctx, "reconcile")
 	if err != nil {
-		return ollamaReconcileModel{}, err
+		return providerReconcileModel{}, err
 	}
-	name := selected.Model
-	tokens := 32768
-	if raw := strings.TrimSpace(os.Getenv("PURPORY_RECONCILE_CONTEXT_TOKENS")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 8192 || parsed > 262144 {
-			return ollamaReconcileModel{}, errors.New("configure reconciliation: context tokens must be between 8192 and 262144")
-		}
-		tokens = parsed
+	generator, err := s.generator(ctx, selected.Provider)
+	if err != nil {
+		return providerReconcileModel{}, err
 	}
-	return ollamaReconcileModel{service: s, name: name, tokens: tokens}, nil
+	return providerReconcileModel{generator: generator, selection: selected}, nil
 }
 
 func (s *Service) applyCandidates(ctx context.Context, sessionID string, candidates []reconcile.Candidate) error {

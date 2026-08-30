@@ -97,6 +97,49 @@ func TestEmbedCLIBackfillsAllMissingNodes(t *testing.T) {
 	}
 }
 
+func TestModelSelectCLIAcceptsProvider(t *testing.T) {
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	var output bytes.Buffer
+	if err := runCLI(context.Background(), service, []string{"model", "select", "embedding", "openai", "text-embedding-3-small"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var selected product.ModelSelection
+	if err := json.Unmarshal(output.Bytes(), &selected); err != nil || selected.Provider != "openai" || selected.Model != "text-embedding-3-small" || selected.Dimensions != 512 {
+		t.Fatalf("provider selection = %#v, %v", selected, err)
+	}
+}
+
+func TestProviderConfigurationCLIUsesEncryptedDatabaseWithoutAProject(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	var output, errorOutput bytes.Buffer
+	code := Run([]string{"--db", database, "model", "provider", "configure", "openai", "--url", "https://example.com/v1", "--api-key-stdin"}, strings.NewReader("secret-from-stdin\n"), &output, &errorOutput)
+	if code != 0 {
+		t.Fatalf("configure provider failed: %s", errorOutput.String())
+	}
+	var configured product.ProviderState
+	if err := json.Unmarshal(output.Bytes(), &configured); err != nil || !configured.Configured || configured.CredentialSource != "database" || strings.Contains(output.String(), "secret-from-stdin") {
+		t.Fatalf("configured provider = %#v, %v; output=%q", configured, err, output.String())
+	}
+	databaseBytes, err := os.ReadFile(database)
+	if err != nil || bytes.Contains(databaseBytes, []byte("secret-from-stdin")) {
+		t.Fatalf("database contains plaintext credential: %v", err)
+	}
+
+	output.Reset()
+	errorOutput.Reset()
+	code = Run([]string{"--db", database, "model", "provider", "status"}, strings.NewReader(""), &output, &errorOutput)
+	if code != 0 || strings.Contains(output.String(), "secret-from-stdin") || !strings.Contains(output.String(), "https://example.com/v1") {
+		t.Fatalf("provider status failed: code=%d output=%q error=%q", code, output.String(), errorOutput.String())
+	}
+
+	output.Reset()
+	errorOutput.Reset()
+	code = Run([]string{"--db", database, "model", "provider", "clear-key", "openai"}, strings.NewReader(""), &output, &errorOutput)
+	if code != 0 {
+		t.Fatalf("clear provider key failed: %s", errorOutput.String())
+	}
+}
+
 func TestPrepareCLIOptions(t *testing.T) {
 	root := t.TempDir()
 	service := openCLIService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")

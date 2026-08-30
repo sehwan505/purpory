@@ -56,6 +56,19 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 		}
 		return 0
 	}
+	if len(config.Args) >= 2 && config.Args[0] == "model" && config.Args[1] == "provider" {
+		service, err := product.OpenDesktop(context.Background(), config.DBPath, config.ProjectID)
+		if err != nil {
+			fmt.Fprintf(errorOutput, "purpory: %v\n", err)
+			return 1
+		}
+		defer service.Close()
+		if err := runCLI(context.Background(), service, config.Args, input, output); err != nil {
+			fmt.Fprintf(errorOutput, "purpory: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if isAgentHook(config.Args) {
 		content, readErr := io.ReadAll(io.LimitReader(input, maximumHookInput+1))
 		input = bytes.NewReader(content)

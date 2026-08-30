@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sehwan505/purpory/internal/credential"
 	"github.com/sehwan505/purpory/internal/extract"
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/material"
@@ -34,6 +35,8 @@ type Service struct {
 	store        *store.Store
 	databasePath string
 	ollama       *ollama.Client
+	ollamaURL    string
+	credentials  credentialStore
 	workspace    WorkspaceObserver
 	gate         contextprepare.Provider
 	update       sync.Mutex
@@ -215,12 +218,20 @@ func newService(ctx context.Context, databasePath string, database *store.Store,
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{store: database, databasePath: databasePath, ollama: client, workspace: observer}
+	// ponytail: a sibling key protects database-only copies; replace this key source when deployments need separate custody.
+	credentials, err := credential.NewEncrypted(database, databasePath+".key")
+	if err != nil {
+		return nil, err
+	}
+	service := &Service{
+		store: database, databasePath: databasePath, workspace: observer,
+		ollama: client, ollamaURL: ollamaURL, credentials: credentials,
+	}
 	gate, err := service.modelName(ctx, "gate")
 	if err != nil {
 		return nil, err
 	}
-	service.gate = newGateProvider(client, gate.Model)
+	service.gate = service.newGateProvider(ctx, gate)
 	return service, nil
 }
 

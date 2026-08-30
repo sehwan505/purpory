@@ -1,9 +1,9 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
-  AssignResource, ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, CreateProject, DeleteMemory, DeleteProject,
+  AssignResource, ClearProviderCredential, ConfigureProvider, ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, CreateProject, DeleteMemory, DeleteProject,
   EmbeddingStatus, Explain, Graph, InstallModel, Memories, ModelState, NeedsReviews,
   Observations, Projects, Query, ReconciliationEvents, Reconciliations, Remember, ResolveContextRequest,
-  ResolveNeedsReview, SelectModel, SelectProject, StartModels, Status, SyncEmbeddings, UnassignResource,
+  ResolveNeedsReview, SelectModelProvider, SelectProject, StartModels, Status, SyncEmbeddings, UnassignResource,
   Update, Workspace,
 } from "../wailsjs/go/main/App";
 import type { app, graph, memory, prepare, project, reconcile } from "../wailsjs/go/models";
@@ -18,7 +18,7 @@ const projectPages: { id: Page; label: string; description: string }[] = [
 ];
 const globalPages: { id: Page; label: string; description: string }[] = [
   { id: "projects", label: "Projects", description: "Project를 만들고 관찰된 Repository를 연결합니다." },
-  { id: "settings", label: "Settings", description: "모든 Project에 적용되는 로컬 모델을 설정합니다." },
+  { id: "settings", label: "Settings", description: "모든 Project에 적용되는 AI provider와 모델을 설정합니다." },
 ];
 const pages = [...projectPages, ...globalPages];
 
@@ -310,11 +310,14 @@ export default function App() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const role = String(data.get("role") ?? "");
+    const provider = String(data.get("provider") ?? "");
     const name = String(data.get("model") ?? "").trim();
     if (!name) return;
     await perform(async () => {
-      await SelectModel(role, name);
-      setMessage(`${role} 모델을 ${name}(으)로 선택했습니다. 모든 Project에 적용됩니다.`);
+      const contextTokens = Number(data.get("contextTokens") ?? 0);
+      const dimensions = Number(data.get("dimensions") ?? 0);
+      await SelectModelProvider(role, provider, name, contextTokens, dimensions);
+      setMessage(`${role} 모델을 ${provider}/${name}(으)로 선택했습니다. 모든 Project에 적용됩니다.`);
       await refresh();
     });
   }
@@ -328,6 +331,30 @@ export default function App() {
     await perform(async () => {
       await InstallModel(name, role);
       setMessage(role ? `${name} 설치 및 전역 ${role} 선택을 완료했습니다.` : `${name} 설치를 완료했습니다.`);
+      await refresh();
+    });
+  }
+
+  async function configureProvider(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const endpoint = String(data.get("endpoint") ?? "").trim();
+    const apiKey = String(data.get("apiKey") ?? "").trim();
+    await perform(async () => {
+      await ConfigureProvider("openai", endpoint, apiKey);
+      const keyInput = form.elements.namedItem("apiKey");
+      if (keyInput instanceof HTMLInputElement) keyInput.value = "";
+      setMessage("OpenAI-compatible provider 설정을 저장했습니다.");
+      await refresh();
+    });
+  }
+
+  async function clearProviderCredential() {
+    if (!window.confirm("저장된 OpenAI-compatible API key를 암호화 저장소에서 삭제할까요?")) return;
+    await perform(async () => {
+      await ClearProviderCredential("openai");
+      setMessage("OpenAI-compatible API key를 삭제했습니다.");
       await refresh();
     });
   }
@@ -355,6 +382,9 @@ export default function App() {
   const sessions = views.flatMap(view => view.sessions ?? []);
   const allSessions = [...sessions, ...(workspace?.unmappedSessions ?? [])];
   const model = modelState?.ollama;
+  const providers = modelState?.providers ?? [];
+  const openAI = providers.find(provider => provider.id === "openai");
+  const embeddingModel = modelState?.selected?.find(selected => selected.role === "embedding");
   const currentPage = pages.find(item => item.id === page)!;
   const globalPage = globalPages.some(item => item.id === page);
   const recentSessions = [...allSessions].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)).slice(0, 5);
@@ -384,7 +414,7 @@ export default function App() {
         </nav>
         <div className="engine">
           <span className={model?.available ? "dot online" : "dot"} />
-          <div><strong>{model?.available ? "Ollama 연결됨" : "Ollama 선택 사항"}</strong><small>{model?.version ?? "로컬 모델 없이도 동작"}</small></div>
+          <div><strong>{model?.available ? "Ollama 연결됨" : openAI?.configured ? "외부 AI 설정됨" : "AI 선택 사항"}</strong><small>{model?.version ?? (openAI?.configured ? "OpenAI-compatible" : "모델 없이도 동작")}</small></div>
         </div>
       </aside>
 
@@ -453,15 +483,20 @@ export default function App() {
 
         {page === "settings" && <section className="settingsGrid">
           <section className="panel modelCard">
-            <div className="cardTitle"><div><p className="eyebrow">GLOBAL SETTINGS</p><h2>Ollama와 Embedding</h2></div><span className="status globalStatus">GLOBAL</span></div>
+            <div className="cardTitle"><div><p className="eyebrow">GLOBAL SETTINGS</p><h2>AI Providers와 모델</h2></div><span className="status globalStatus">GLOBAL</span></div>
             <p className="settingsIntro">선택한 모델은 모든 Project에 적용됩니다. 구조 분석과 기본 검색은 모델 없이도 동작합니다.</p>
-            <div className="modelSummary"><p><strong>{model?.version || "Ollama 미연결"}</strong><span>현재 Project Embedding {embeddingStatus?.current ?? 0}개 최신 · {embeddingStatus?.pending ?? 0}개 대기</span></p><button className="secondary" disabled={busy} onClick={() => void startModels()}>Ollama 시작</button><button disabled={busy || !status?.project.id || !model?.available || (embeddingStatus?.pending ?? 0) === 0} onClick={() => void syncEmbeddings()}>현재 Project 동기화</button></div>
-            <div className="modelRoles">{(modelState?.selected ?? []).map(selected => <form key={`${selected.role}-${selected.model}`} onSubmit={event => void selectModel(event)}>
-              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>global · {selected.source}</small></label><div><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 태그" /><button className="secondary" disabled={busy}>선택</button></div>
+            <div className="providerSummary">{providers.map(provider => <p key={provider.id}><strong>{provider.label}</strong><span className={provider.available ? "providerReady" : "providerIdle"}>{provider.available ? "연결됨" : provider.configured ? "설정됨" : "미설정"}</span><small title={provider.endpoint}>{provider.endpoint}</small>{provider.error && <em>{provider.error}</em>}</p>)}</div>
+            {openAI && <form className="providerForm" key={`${openAI.endpoint}-${openAI.endpointSource}-${openAI.credentialSource}`} onSubmit={event => void configureProvider(event)}>
+              <label htmlFor="openai-endpoint">OpenAI-compatible 연결 <small>endpoint · {openAI.endpointSource} / key · {openAI.credentialSource}</small></label>
+              <div><input id="openai-endpoint" name="endpoint" type="url" defaultValue={openAI.endpoint} disabled={openAI.endpointSource === "environment"} required aria-label="OpenAI-compatible endpoint" /><input name="apiKey" type="password" autoComplete="new-password" placeholder={openAI.credentialSource === "none" ? "API key" : "기존 API key 유지"} disabled={openAI.credentialSource === "environment"} aria-label="OpenAI-compatible API key" /><button disabled={busy}>저장</button><button type="button" className="secondary" disabled={busy || openAI.credentialSource === "none" || openAI.credentialSource === "environment"} onClick={() => void clearProviderCredential()}>키 삭제</button></div>
+            </form>}
+            <div className="modelSummary"><p><strong>{embeddingModel ? `${embeddingModel.provider}/${embeddingModel.model}` : "Embedding 모델 로드 중"}</strong><span>현재 Project Embedding {embeddingStatus?.current ?? 0}개 최신 · {embeddingStatus?.pending ?? 0}개 대기</span></p><button className="secondary" disabled={busy} onClick={() => void startModels()}>Ollama 시작</button><button disabled={busy || !status?.project.id || !embeddingModel?.model || (embeddingStatus?.pending ?? 0) === 0} onClick={() => void syncEmbeddings()}>현재 Project 동기화</button></div>
+            <div className="modelRoles">{(modelState?.selected ?? []).map(selected => <form key={`${selected.role}-${selected.provider}-${selected.model}-${selected.contextTokens}-${selected.dimensions}`} onSubmit={event => void selectModel(event)}>
+              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>global · {selected.source}</small></label><div><Dropdown name="provider" ariaLabel={`${selected.role} provider`} defaultValue={selected.provider} options={providers.map(provider => ({ value: provider.id, label: provider.label }))} /><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 ID" required />{selected.role === "embedding" ? <input className="modelParameter" name="dimensions" type="number" min="1" max="16384" defaultValue={selected.dimensions || 512} aria-label="embedding dimensions" /> : <input className="modelParameter" name="contextTokens" type="number" min={selected.role === "reconcile" ? 8192 : 1024} max="1048576" defaultValue={selected.contextTokens || (selected.role === "gate" ? 8192 : 32768)} aria-label="context tokens" />}<button className="secondary" disabled={busy}>선택</button></div>
             </form>)}</div>
             <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><Dropdown name="installRole" ariaLabel="설치 후 사용할 역할" options={[{ value: "", label: "설치만" }, { value: "gate", label: "gate" }, { value: "reconcile", label: "reconcile" }, { value: "embedding", label: "embedding" }]} /><button disabled={busy}>설치</button></div></form>
           </section>
-          <aside className="panel settingsNote"><p className="eyebrow">GLOBAL SCOPE</p><h2>모든 Project에 적용</h2><p>모델 설치와 역할 선택은 전역입니다. Memory, Graph, Workspace, Reconcile 같은 작업 데이터는 선택한 Project에만 저장됩니다.</p></aside>
+          <aside className="panel settingsNote"><p className="eyebrow">GLOBAL SCOPE</p><h2>모든 Project에 적용</h2><p>역할마다 provider와 모델을 독립적으로 선택합니다. 앱에서 입력한 API key는 로컬 데이터베이스에 암호화해 저장됩니다. 환경변수로 설정한 값은 앱 설정보다 우선합니다.</p></aside>
         </section>}
         </div>
       </main>

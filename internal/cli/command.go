@@ -395,11 +395,17 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			}
 			return writeJSON(output, status, nil)
 		case "select":
-			if len(arguments) != 4 {
-				return errors.New("model select requires a role and model")
+			if len(arguments) == 4 {
+				result, err := service.SelectModel(ctx, arguments[2], arguments[3])
+				return writeJSON(output, result, err)
 			}
-			result, err := service.SelectModel(ctx, arguments[2], arguments[3])
-			return writeJSON(output, result, err)
+			if len(arguments) == 5 {
+				result, err := service.SelectModelProvider(ctx, arguments[2], arguments[3], arguments[4], 0, 0)
+				return writeJSON(output, result, err)
+			}
+			return errors.New("model select requires a role, optional provider, and model")
+		case "provider":
+			return runModelProviderCommand(ctx, service, arguments[2:], input, output)
 		case "install":
 			if len(arguments) < 3 || len(arguments) > 4 {
 				return errors.New("model install requires a model and optional role")
@@ -411,7 +417,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			result, err := service.InstallModel(ctx, arguments[2], role)
 			return writeJSON(output, result, err)
 		default:
-			return errors.New("model requires status, list, run, install, select, or start")
+			return errors.New("model requires status, list, run, install, select, provider, or start")
 		}
 	case "preflight":
 		if len(arguments) != 2 {
@@ -455,6 +461,50 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+func runModelProviderCommand(ctx context.Context, service *product.Service, arguments []string, input io.Reader, output io.Writer) error {
+	if len(arguments) == 1 && arguments[0] == "status" {
+		state, err := service.ModelState(ctx)
+		if err != nil {
+			return err
+		}
+		return writeJSON(output, state.Providers, nil)
+	}
+	if len(arguments) == 2 && arguments[0] == "clear-key" {
+		result, err := service.ClearProviderCredential(ctx, arguments[1])
+		return writeJSON(output, result, err)
+	}
+	if len(arguments) < 2 || arguments[0] != "configure" {
+		return errors.New("model provider requires status, configure, or clear-key")
+	}
+	provider := arguments[1]
+	flags := flag.NewFlagSet("model provider configure", flag.ContinueOnError)
+	flags.SetOutput(output)
+	endpoint := flags.String("url", "", "OpenAI-compatible base URL")
+	apiKeyStdin := flags.Bool("api-key-stdin", false, "read the API key from stdin")
+	if err := flags.Parse(arguments[2:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("model provider configure accepts only --url and --api-key-stdin")
+	}
+	apiKey := ""
+	if *apiKeyStdin {
+		value, err := io.ReadAll(io.LimitReader(input, 2_049))
+		if err != nil {
+			return fmt.Errorf("configure provider: read API key: %w", err)
+		}
+		if len(value) > 2_048 {
+			return errors.New("configure provider: API key must be at most 2048 characters")
+		}
+		apiKey = strings.TrimSpace(string(value))
+		if apiKey == "" {
+			return errors.New("configure provider: API key from stdin is empty")
+		}
+	}
+	result, err := service.ConfigureProvider(ctx, provider, *endpoint, apiKey)
+	return writeJSON(output, result, err)
 }
 
 func runKnowledgeCommand(ctx context.Context, service *product.Service, arguments []string, output io.Writer) error {

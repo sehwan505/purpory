@@ -62,14 +62,17 @@ formatting and basic correctness; reviewers should focus on behavior and names.
 - Log once at the application boundary. Libraries return errors instead of
   logging and returning the same error.
 - Never log secrets, full prompts, source contents, or personal paths by default.
+- Encrypt provider credentials before SQLite persistence; never place plaintext
+  secrets in SQLite, CLI arguments, or command output. Environment credentials
+  remain process-local overrides.
 
 ## Persistence and external services
 
 - SQLite is the source of truth. Every multi-write operation uses a transaction.
 - Migrations are ordered, embedded, forward-only, and tested from an empty
   database. Back up before destructive schema changes.
-- Ollama is the first local model adapter. Provider-specific request and response
-  types stay inside its package.
+- Ollama and OpenAI-compatible APIs are model adapters. Provider-specific request
+  and response types stay inside their packages; role interfaces stay in `app`.
 - Network clients set timeouts, honor context cancellation, bound response sizes,
   and return actionable errors.
 

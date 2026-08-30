@@ -19,15 +19,17 @@ const embeddingDimensions = 512
 const semanticQueryTimeout = 2 * time.Second
 
 type EmbeddingSyncResult struct {
+	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Embedded int    `json:"embedded"`
 	Current  int    `json:"current"`
 }
 
 type EmbeddingStatus struct {
-	Model   string `json:"model"`
-	Current int    `json:"current"`
-	Pending int    `json:"pending"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Current  int    `json:"current"`
+	Pending  int    `json:"pending"`
 }
 
 type embeddingCandidate struct {
@@ -51,12 +53,12 @@ func (s *Service) EmbeddingStatus(ctx context.Context) (EmbeddingStatus, error) 
 		return EmbeddingStatus{}, err
 	}
 	candidates := embeddingCandidates(nodes)
-	existing, err := s.store.Embeddings(ctx, s.project.ID, selected.Model)
+	existing, err := s.store.Embeddings(ctx, s.project.ID, embeddingIdentity(selected))
 	if err != nil {
 		return EmbeddingStatus{}, err
 	}
 	hashes := embeddingHashes(existing)
-	result := EmbeddingStatus{Model: selected.Model}
+	result := EmbeddingStatus{Provider: selected.Provider, Model: selected.Model}
 	for _, candidate := range candidates {
 		if hashes[candidate.node.ID] == candidate.hash {
 			result.Current++
@@ -81,8 +83,8 @@ func (s *Service) SyncEmbeddings(ctx context.Context, limit int) (EmbeddingSyncR
 	if err != nil {
 		return EmbeddingSyncResult{}, err
 	}
-	embedded, current, err := s.syncEmbeddingCandidates(ctx, selected.Model, embeddingCandidates(nodes), limit)
-	return EmbeddingSyncResult{Model: selected.Model, Embedded: embedded, Current: current}, err
+	embedded, current, err := s.syncEmbeddingCandidates(ctx, selected, embeddingCandidates(nodes), limit)
+	return EmbeddingSyncResult{Provider: selected.Provider, Model: selected.Model, Embedded: embedded, Current: current}, err
 }
 
 func (s *Service) syncNodeEmbeddings(ctx context.Context, nodeIDs []string) error {
@@ -104,12 +106,17 @@ func (s *Service) syncNodeEmbeddings(ctx context.Context, nodeIDs []string) erro
 			candidates = append(candidates, candidate)
 		}
 	}
-	_, _, err = s.syncEmbeddingCandidates(ctx, selected.Model, candidates, 0)
+	_, _, err = s.syncEmbeddingCandidates(ctx, selected, candidates, 0)
 	return err
 }
 
-func (s *Service) syncEmbeddingCandidates(ctx context.Context, model string, candidates []embeddingCandidate, limit int) (int, int, error) {
-	existing, err := s.store.Embeddings(ctx, s.project.ID, model)
+func (s *Service) syncEmbeddingCandidates(ctx context.Context, selected ModelSelection, candidates []embeddingCandidate, limit int) (int, int, error) {
+	modelID := embeddingIdentity(selected)
+	existing, err := s.store.Embeddings(ctx, s.project.ID, modelID)
+	if err != nil {
+		return 0, 0, err
+	}
+	provider, err := s.embeddingProvider(ctx, selected.Provider)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -133,12 +140,12 @@ func (s *Service) syncEmbeddingCandidates(ctx context.Context, model string, can
 		for index, candidate := range batch {
 			texts[index] = candidate.text
 		}
-		vectors, err := s.ollama.Embed(ctx, model, texts, embeddingDimensions)
+		vectors, err := provider.Embed(ctx, selected.Model, texts, selected.Dimensions)
 		if err != nil {
 			return embedded, current, err
 		}
 		for index, candidate := range batch {
-			if err := s.store.SaveEmbedding(ctx, s.project.ID, candidate.node.ID, candidate.hash, model, vectors[index]); err != nil {
+			if err := s.store.SaveEmbedding(ctx, s.project.ID, candidate.node.ID, candidate.hash, modelID, vectors[index]); err != nil {
 				return embedded, current, err
 			}
 			embedded++
@@ -153,7 +160,7 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 		return nil, err
 	}
 	candidates := embeddingCandidates(nodes)
-	existing, err := s.store.Embeddings(ctx, s.project.ID, selected.Model)
+	existing, err := s.store.Embeddings(ctx, s.project.ID, embeddingIdentity(selected))
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +179,11 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	}
 	queryContext, cancel := context.WithTimeout(ctx, semanticQueryTimeout)
 	defer cancel()
-	vectors, err := s.ollama.Embed(queryContext, selected.Model, []string{query}, embeddingDimensions)
+	provider, err := s.embeddingProvider(ctx, selected.Provider)
+	if err != nil {
+		return nil, err
+	}
+	vectors, err := provider.Embed(queryContext, selected.Model, []string{query}, selected.Dimensions)
 	if err != nil {
 		return nil, nil // ponytail: dense retrieval is optional; exact and graph retrieval remain available.
 	}
@@ -191,6 +202,13 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 		result = result[:limit]
 	}
 	return result, nil
+}
+
+func embeddingIdentity(selected ModelSelection) string {
+	if selected.Provider == providerOllama && selected.Dimensions == embeddingDimensions {
+		return selected.Model // Preserve existing local embeddings and avoid a needless backfill.
+	}
+	return fmt.Sprintf("%s/%s#%d", selected.Provider, selected.Model, selected.Dimensions)
 }
 
 func pprSeeds(semantic []semanticMatch, exact, opened []string) map[string]float64 {
