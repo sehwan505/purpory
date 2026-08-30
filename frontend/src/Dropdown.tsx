@@ -57,7 +57,7 @@ export function Dropdown({ options, value, defaultValue, onChange, id, name, ari
       if (event.key === "Escape") setOpen(false);
     }}><span>{selected?.label ?? "선택"}</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg></button>
     {open && <div ref={list} id={`${triggerID}-options`} className="dropdownMenu" role="listbox" aria-labelledby={ariaLabel ? undefined : triggerID} aria-label={ariaLabel}>
-      {options.map(option => <button type="button" className="dropdownOption" role="option" aria-selected={option.value === selectedValue} key={option.value} disabled={option.disabled} title={option.label} onClick={() => choose(option.value)} onKeyDown={event => {
+      {options.map(option => <button type="button" className="dropdownOption" role="option" aria-selected={option.value === selectedValue} key={option.value} disabled={option.disabled} title={option.label} onMouseDown={event => event.preventDefault()} onClick={() => choose(option.value)} onKeyDown={event => {
         if (event.key === "ArrowDown") move(event, 1);
         if (event.key === "ArrowUp") move(event, -1);
         if (event.key === "Escape") { event.preventDefault(); setOpen(false); trigger.current?.focus(); }
