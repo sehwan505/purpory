@@ -59,6 +59,10 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 	if err != nil {
 		return PrepareResult{}, err
 	}
+	history, err := s.navigationNodeIDs(ctx, request.SessionID)
+	if err != nil {
+		return PrepareResult{}, err
+	}
 	openRequests, err := s.store.OpenContextRequestCount(ctx, s.project.ID)
 	if err != nil {
 		return PrepareResult{}, err
@@ -96,7 +100,7 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		result.Action = "ask"
 		result.Clarification = proposal.Clarification
 	default:
-		if err := s.prepareHints(ctx, request, physicalGraph, opened, &result); err != nil {
+		if err := s.prepareHints(ctx, request, physicalGraph, append(history, opened...), opened, &result); err != nil {
 			return PrepareResult{}, err
 		}
 	}
@@ -131,6 +135,15 @@ func (s *Service) PrepareContext(ctx context.Context, request contextprepare.Req
 		return PrepareResult{}, err
 	}
 	result.DecisionID = decisionID
+	if result.Hints != nil && request.SessionID != "anon" {
+		events := make([]contextprepare.NavigationEvent, 0, len(result.Hints.Nodes))
+		for _, node := range result.Hints.Nodes {
+			events = append(events, contextprepare.NavigationEvent{Action: "deliver", TargetNodeID: node.ID, DecisionID: &decisionID})
+		}
+		if err := s.store.AppendNavigation(ctx, s.project.ID, request.SessionID, events); err != nil {
+			return PrepareResult{}, err
+		}
+	}
 	return result, nil
 }
 
@@ -138,6 +151,7 @@ func (s *Service) prepareHints(
 	ctx context.Context,
 	request contextprepare.Request,
 	physicalGraph contextGraph,
+	history []string,
 	opened []string,
 	result *PrepareResult,
 ) error {
@@ -154,7 +168,7 @@ func (s *Service) prepareHints(
 		exact = append(exact, physicalGraph.seeds(keyword)...)
 	}
 	exact = uniqueNodeIDs(exact)
-	ranked := graph.TypedPPR(physicalGraph.nodes, physicalGraph.edges, pprSeeds(semantic, exact, opened))
+	ranked := graph.TypedPPR(physicalGraph.nodes, physicalGraph.edges, pprSeeds(semantic, exact, history))
 	result.Hints = prepareHintMap(ranked, physicalGraph.nodes, physicalGraph.edges, semantic, exact, opened, request.TokenBudget)
 	if result.Hints != nil {
 		agent := sessionAgent(request.SessionID)

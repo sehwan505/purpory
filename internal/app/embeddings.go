@@ -155,9 +155,20 @@ func (s *Service) syncEmbeddingCandidates(ctx context.Context, selected ModelSel
 }
 
 func (s *Service) semanticMatches(ctx context.Context, query string, nodes []graph.Node, limit int) ([]semanticMatch, error) {
+	results, err := s.semanticMatchesBatch(ctx, []string{query}, nodes, limit)
+	if err != nil || len(results) == 0 {
+		return nil, err
+	}
+	return results[0], nil
+}
+
+func (s *Service) semanticMatchesBatch(ctx context.Context, queries []string, nodes []graph.Node, limit int) ([][]semanticMatch, error) {
+	if len(queries) == 0 {
+		return nil, nil
+	}
 	selected, err := s.modelName(ctx, "embedding")
 	if err != nil || selected.Model == "" || selected.Source == "default" {
-		return nil, err
+		return make([][]semanticMatch, len(queries)), err
 	}
 	candidates := embeddingCandidates(nodes)
 	existing, err := s.store.Embeddings(ctx, s.project.ID, embeddingIdentity(selected))
@@ -175,7 +186,7 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 		}
 	}
 	if len(valid) == 0 {
-		return nil, nil
+		return make([][]semanticMatch, len(queries)), nil
 	}
 	queryContext, cancel := context.WithTimeout(ctx, semanticQueryTimeout)
 	defer cancel()
@@ -183,25 +194,29 @@ func (s *Service) semanticMatches(ctx context.Context, query string, nodes []gra
 	if err != nil {
 		return nil, err
 	}
-	vectors, err := provider.Embed(queryContext, selected.Model, []string{query}, selected.Dimensions)
+	vectors, err := provider.Embed(queryContext, selected.Model, queries, selected.Dimensions)
 	if err != nil {
-		return nil, nil // ponytail: dense retrieval is optional; exact and graph retrieval remain available.
+		return make([][]semanticMatch, len(queries)), nil // ponytail: dense retrieval is optional; exact and graph retrieval remain available.
 	}
-	var result []semanticMatch
-	for id, vector := range valid {
-		similarity := cosine(vectors[0], vector)
-		result = append(result, semanticMatch{node: byID[id].node, score: similarity})
+	if len(vectors) != len(queries) {
+		return nil, fmt.Errorf("semantic matches: provider returned %d vectors for %d queries", len(vectors), len(queries))
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].score != result[j].score {
-			return result[i].score > result[j].score
+	results := make([][]semanticMatch, len(queries))
+	for queryIndex, queryVector := range vectors {
+		for id, vector := range valid {
+			results[queryIndex] = append(results[queryIndex], semanticMatch{node: byID[id].node, score: cosine(queryVector, vector)})
 		}
-		return result[i].node.ID < result[j].node.ID
-	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
+		sort.Slice(results[queryIndex], func(i, j int) bool {
+			if results[queryIndex][i].score != results[queryIndex][j].score {
+				return results[queryIndex][i].score > results[queryIndex][j].score
+			}
+			return results[queryIndex][i].node.ID < results[queryIndex][j].node.ID
+		})
+		if limit > 0 && len(results[queryIndex]) > limit {
+			results[queryIndex] = results[queryIndex][:limit]
+		}
 	}
-	return result, nil
+	return results, nil
 }
 
 func embeddingIdentity(selected ModelSelection) string {

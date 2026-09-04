@@ -71,6 +71,7 @@ func (s *Store) Knowledge(ctx context.Context, projectID string) ([]graph.Node, 
 }
 
 func (s *Store) SaveLink(ctx context.Context, projectID string, link graph.Link) error {
+	link = graph.NormalizeLink(link)
 	if err := validateLink(link); err != nil {
 		return err
 	}
@@ -97,47 +98,113 @@ func validateLink(link graph.Link) error {
 		strings.TrimSpace(link.TargetRef) == "" || strings.TrimSpace(link.Relation) == "" {
 		return errors.New("save link: valid kinds, references, and relation are required")
 	}
+	if link.SourceKind == link.TargetKind && link.SourceRef == link.TargetRef {
+		return errors.New("save link: self links are not supported")
+	}
 	if link.SourceKind == graph.KindIntent && link.TargetKind == graph.KindMaterial && !graph.IsIntentMaterialRelation(link.Relation) {
 		return errors.New("save link: unsupported intent to material relation")
+	}
+	if link.SourceKind == graph.KindIntent && link.TargetKind == graph.KindIntent && !graph.IsIntentIntentRelation(link.Relation) {
+		return errors.New("save link: unsupported intent to intent relation")
 	}
 	return nil
 }
 
-func saveGraphLink(ctx context.Context, database databaseRunner, projectID string, link graph.Link, provenance string) (bool, error) {
+func (s *Store) LinkStates(ctx context.Context, projectID string) (map[graph.Link]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source.kind, source.ref, edge.relation, target.kind, target.ref, edge.state
+		FROM edges edge
+		JOIN nodes source ON source.project_id = edge.project_id AND source.id = edge.source_id
+		JOIN nodes target ON target.project_id = edge.project_id AND target.id = edge.target_id
+		WHERE edge.project_id = ?
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("load link states: %w", err)
+	}
+	defer rows.Close()
+	result := map[graph.Link]string{}
+	for rows.Next() {
+		var link graph.Link
+		var state string
+		if err := rows.Scan(&link.SourceKind, &link.SourceRef, &link.Relation, &link.TargetKind, &link.TargetRef, &state); err != nil {
+			return nil, fmt.Errorf("load link states: scan: %w", err)
+		}
+		result[link] = state
+	}
+	return result, rows.Err()
+}
+
+func graphLinkState(ctx context.Context, database databaseRunner, projectID string, link graph.Link) (string, error) {
+	link = graph.NormalizeLink(link)
+	var state string
+	err := database.QueryRowContext(ctx, `
+		SELECT edge.state FROM edges edge
+		JOIN nodes source ON source.project_id = edge.project_id AND source.id = edge.source_id
+		JOIN nodes target ON target.project_id = edge.project_id AND target.id = edge.target_id
+		WHERE edge.project_id = ? AND source.kind = ? AND source.ref = ?
+		  AND target.kind = ? AND target.ref = ? AND edge.relation = ?
+	`, projectID, link.SourceKind, link.SourceRef, link.TargetKind, link.TargetRef, link.Relation).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return state, err
+}
+
+func saveGraphLink(ctx context.Context, database databaseRunner, projectID string, link graph.Link, provenance string) (string, error) {
+	link = graph.NormalizeLink(link)
 	sourceID, err := ensureGraphNode(ctx, database, projectID, link.SourceKind, link.SourceRef, provenance)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	targetID, err := ensureGraphNode(ctx, database, projectID, link.TargetKind, link.TargetRef, provenance)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	var owner string
+	var owner, state string
 	err = database.QueryRowContext(ctx, `
-		SELECT owner FROM edges WHERE project_id = ? AND source_id = ? AND target_id = ? AND relation = ?
-	`, projectID, sourceID, targetID, link.Relation).Scan(&owner)
+		SELECT owner, state FROM edges WHERE project_id = ? AND source_id = ? AND target_id = ? AND relation = ?
+	`, projectID, sourceID, targetID, link.Relation).Scan(&owner, &state)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		if _, err := database.ExecContext(ctx, `
-			INSERT INTO edges(project_id, source_id, target_id, relation, owner, provenance)
-			VALUES (?, ?, ?, ?, 'durable', ?)
+			INSERT INTO edges(project_id, source_id, target_id, relation, owner, provenance, state, created_at)
+			VALUES (?, ?, ?, ?, 'durable', ?, 'active', unixepoch())
 		`, projectID, sourceID, targetID, link.Relation, provenance); err != nil {
-			return false, fmt.Errorf("save link: insert edge: %w", err)
+			return "", fmt.Errorf("save link: insert edge: %w", err)
 		}
-		return true, nil
+		return "added", nil
 	case err != nil:
-		return false, fmt.Errorf("save link: load edge: %w", err)
-	case owner != graph.OwnerDurable:
+		return "", fmt.Errorf("save link: load edge: %w", err)
+	case owner != graph.OwnerDurable || state != graph.StateActive:
 		if _, err := database.ExecContext(ctx, `
-			UPDATE edges SET owner = 'durable', provenance = ?
+			UPDATE edges SET owner = 'durable', provenance = ?, state = 'active',
+				created_at = CASE WHEN created_at = 0 THEN unixepoch() ELSE created_at END, retired_at = NULL
 			WHERE project_id = ? AND source_id = ? AND target_id = ? AND relation = ?
 		`, provenance, projectID, sourceID, targetID, link.Relation); err != nil {
-			return false, fmt.Errorf("save link: promote edge: %w", err)
+			return "", fmt.Errorf("save link: promote edge: %w", err)
 		}
-		return true, nil
+		if state == graph.StateRetired {
+			return "reactivated", nil
+		}
+		return "added", nil
 	default:
-		return false, nil
+		return "", nil
 	}
+}
+
+func retireGraphLink(ctx context.Context, database databaseRunner, projectID string, link graph.Link) (bool, error) {
+	link = graph.NormalizeLink(link)
+	result, err := database.ExecContext(ctx, `
+		UPDATE edges SET state = 'retired', retired_at = unixepoch()
+		WHERE project_id = ? AND owner = 'durable' AND state = 'active' AND relation = ?
+		  AND source_id = (SELECT id FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?)
+		  AND target_id = (SELECT id FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?)
+	`, projectID, link.Relation, projectID, link.SourceKind, link.SourceRef, projectID, link.TargetKind, link.TargetRef)
+	if err != nil {
+		return false, fmt.Errorf("retire link: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	return changed > 0, err
 }
 
 func ensureGraphNode(ctx context.Context, database databaseRunner, projectID, kind, ref, provenance string) (string, error) {
@@ -183,7 +250,7 @@ func (s *Store) Graph(ctx context.Context, projectID string) ([]graph.Node, []gr
 	}
 	edgeRows, err := s.db.QueryContext(ctx, `
 		SELECT source_id, target_id, relation, owner, provenance
-		FROM edges WHERE project_id = ? ORDER BY source_id, target_id, relation
+		FROM edges WHERE project_id = ? AND state = 'active' ORDER BY source_id, target_id, relation
 	`, projectID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load graph: edges: %w", err)
@@ -266,8 +333,8 @@ func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, material
 	}
 	for _, edge := range edges {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO edges(project_id, source_id, target_id, relation, owner, provenance)
-			VALUES (?, ?, ?, ?, 'observed', 'update') ON CONFLICT DO NOTHING
+			INSERT INTO edges(project_id, source_id, target_id, relation, owner, provenance, state, created_at)
+			VALUES (?, ?, ?, ?, 'observed', 'update', 'active', unixepoch()) ON CONFLICT DO NOTHING
 		`, projectID, edge.SourceID, edge.TargetID, edge.Relation); err != nil {
 			return fmt.Errorf("replace knowledge: insert edge: %w", err)
 		}

@@ -162,6 +162,17 @@ type Decision struct {
 	Feedback      *Feedback `json:"feedback,omitempty"`
 }
 
+// NavigationEvent is an append-only observation of how a session explored the graph.
+// It is a retrieval signal, never evidence for a durable graph relation.
+type NavigationEvent struct {
+	ID           int64  `json:"id"`
+	Action       string `json:"action"`
+	SourceNodeID string `json:"sourceNodeId,omitempty"`
+	TargetNodeID string `json:"targetNodeId,omitempty"`
+	DecisionID   *int64 `json:"decisionId,omitempty"`
+	CreatedAt    string `json:"createdAt,omitempty"`
+}
+
 func ValidateRequest(value Request) (Request, error) {
 	value.Message = strings.TrimSpace(value.Message)
 	value.SessionID = strings.TrimSpace(value.SessionID)

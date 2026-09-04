@@ -1,5 +1,8 @@
 # Intent-evidence memory graph
 
+단계별 구현과 지속 관리 계약은 [그래프 수명주기 계획](GRAPH_LIFECYCLE_PLAN.md)에
+정리되어 있다.
+
 ## Objective
 
 Purpory must keep a user's durable intent authoritative while continuously
@@ -21,8 +24,9 @@ that observed output can rewrite human intent.
 4. Require manual links. This is precise but cannot support autonomous operation.
    Retained only as an override path through the durable link store.
 5. At session end, refresh observed Materials, reconcile explicit user intent,
-   and let the reconciliation model select typed relationships only to
-   transcript-mentioned targets from an existence-checked Material catalog.
+   and let the reconciliation model select typed relationships only to bounded
+   existing Intent candidates and transcript-mentioned targets from an
+   existence-checked Material catalog.
    Persist the memory node and durable edges in one transaction. Selected.
 
 The selected boundary has both forms of evidence available: explicit user
@@ -31,12 +35,14 @@ establishes which targets actually exist. A model may choose from real targets
 but cannot invent a target reference or link a merely changed file. `update`
 remains responsible only for observation and never deletes durable edges.
 Workspace, View, and Session data remain outside the canonical graph; the
-reconciliation audit records the originating session and cited user evidence.
+reconciliation audit records the originating session and exact cited user
+evidence spans.
 
 ## Canonical graph
 
 ```text
 Intent (authoritative durable decision)
+  ├─ refines / depends_on / conflicts_with ─▶ Intent
   ├─ applies_to ──────▶ Material (scope or constraint)
   ├─ realized_by ─────▶ Material (intended outcome)
   ├─ verified_by ─────▶ Material (confirmation)
@@ -58,7 +64,8 @@ The stored graph therefore has two ownership zones:
 - reconcile or an explicit human action owns rows with `owner=durable`.
 
 Both zones live in the same `nodes` and `edges` tables. `provenance` records the
-writer, and query-time planning remains outside this canonical graph.
+writer. Retired durable edges remain auditable but are excluded from the active
+projection. Query-time planning remains outside this canonical graph.
 
 Workspace topology is operational state used as reconciliation input and is not
 projected into this graph. Session IDs and transcript evidence IDs remain in the
@@ -67,8 +74,9 @@ reconciliation audit as provenance rather than becoming graph nodes.
 ## Retrieval
 
 Retrieval uses Typed Personalized PageRank over the physical project graph.
-Embedding top-k, exact address/content matches, and the Session's most recently
-opened nodes form one weighted personalization distribution. Cosine scores are
+Embedding top-k, exact address/content matches, and the Session's most recent
+ordered navigation events form one weighted personalization distribution. Repeated
+visits add weight and recent events decay by position. Cosine scores are
 softmaxed only relative to that top-k; they are not treated as calibrated
 confidence. Durable Intent-to-evidence relations carry the strongest forward
 weight, reverse containment is stronger than forward containment, and other
@@ -85,6 +93,10 @@ physical edge.
 There is no forced minimum result count: no semantic, exact, or recent-session
 seed means no hint. Workspace Resources remain outside the physical knowledge
 graph. Exact per-session content suppression and token budgeting still apply.
+
+Navigation events are operational state, not graph evidence. They may broaden a
+bounded reconciliation candidate set but cannot authorize a durable edge; exact
+USER evidence is still required for both additions and retirements.
 
 ## Research basis
 

@@ -113,16 +113,60 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 	}
 	projectID := proposals[0].Memory.ProjectID
 	seen := map[string]bool{}
-	for _, proposal := range proposals {
+	for proposalIndex := range proposals {
+		proposal := &proposals[proposalIndex]
 		if proposal.Memory.ProjectID != projectID || seen[proposal.Memory.Key] {
 			return nil, errors.New("reconcile memory: proposals must have one project and unique keys")
 		}
-		if len(proposal.Links) > 0 && len(proposal.EvidenceIDs) == 0 {
-			return nil, errors.New("reconcile memory: linked proposals require user evidence")
+		if (len(proposal.EvidenceIDs) > 0 || len(proposal.EvidenceRefs) > 0) && !sameEvidenceIDs(proposal.EvidenceIDs, proposal.EvidenceRefs) {
+			return nil, errors.New("reconcile memory: proposals require matching grounded user evidence")
 		}
-		for _, link := range proposal.Links {
-			if link.SourceKind != "intent" || link.SourceRef != proposal.Memory.Key || link.TargetKind != "material" || strings.TrimSpace(link.TargetRef) == "" || !graph.IsIntentMaterialRelation(link.Relation) {
-				return nil, errors.New("reconcile memory: links must connect their intent to material with a supported semantic relation")
+		if len(proposal.Links)+len(proposal.RetiredLinks) > 0 && len(proposal.EvidenceRefs) == 0 {
+			return nil, errors.New("reconcile memory: linked proposals require grounded user evidence")
+		}
+		if len(proposal.EvidenceRefs) > 16 {
+			return nil, errors.New("reconcile memory: at most 16 user excerpts are allowed")
+		}
+		for _, ref := range proposal.EvidenceRefs {
+			if !validExcerpt(ref.MessageID, ref.PartID, ref.Quote, ref.StartByte, ref.EndByte) {
+				return nil, errors.New("reconcile memory: invalid user evidence excerpt")
+			}
+		}
+		if len(proposal.ContextRefs) > 16 || len(proposal.ContextRefs) > 0 && len(proposal.EvidenceRefs) == 0 {
+			return nil, errors.New("reconcile memory: assistant context requires user evidence and at most 16 excerpts")
+		}
+		for _, ref := range proposal.ContextRefs {
+			if !validExcerpt(ref.MessageID, ref.PartID, ref.Quote, ref.StartByte, ref.EndByte) {
+				return nil, errors.New("reconcile memory: invalid assistant context excerpt")
+			}
+		}
+		normalizedEvidence := map[graph.Link][]memory.EvidenceRef{}
+		for link, refs := range proposal.LinkEvidence {
+			normalizedEvidence[graph.NormalizeLink(link)] = refs
+		}
+		proposal.LinkEvidence = normalizedEvidence
+		normalizedRetirementEvidence := map[graph.Link][]memory.EvidenceRef{}
+		for link, refs := range proposal.RetirementEvidence {
+			normalizedRetirementEvidence[graph.NormalizeLink(link)] = refs
+		}
+		proposal.RetirementEvidence = normalizedRetirementEvidence
+		operations := map[graph.Link]bool{}
+		for linkIndex := range proposal.Links {
+			proposal.Links[linkIndex] = graph.NormalizeLink(proposal.Links[linkIndex])
+			link := proposal.Links[linkIndex]
+			if proposal.Memory.Kind != memory.Decision || !reconcileLinkOwnedBy(link, proposal.Memory.Key) {
+				return nil, errors.New("reconcile memory: links must connect their grounded intent with a supported semantic relation")
+			}
+			if link.TargetKind == graph.KindIntent && !evidenceSubset(proposal.LinkEvidence[link], proposal.EvidenceRefs) {
+				return nil, errors.New("reconcile memory: intent links require candidate-grounded user evidence")
+			}
+			operations[link] = true
+		}
+		for linkIndex := range proposal.RetiredLinks {
+			proposal.RetiredLinks[linkIndex] = graph.NormalizeLink(proposal.RetiredLinks[linkIndex])
+			link := proposal.RetiredLinks[linkIndex]
+			if operations[link] || proposal.Memory.Kind != memory.Decision || link.TargetKind != graph.KindIntent || !reconcileLinkOwnedBy(link, proposal.Memory.Key) || !evidenceSubset(proposal.RetirementEvidence[link], proposal.EvidenceRefs) {
+				return nil, errors.New("reconcile memory: retirements must target an existing grounded intent relation")
 			}
 		}
 		seen[proposal.Memory.Key] = true
@@ -153,6 +197,43 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 			return nil, ErrMemoryConflict
 		}
 	}
+	for _, proposal := range proposals {
+		for _, links := range [][]graph.Link{proposal.Links, proposal.RetiredLinks} {
+			for _, link := range links {
+				if expected, tracked := proposal.ExpectedLinkStates[link]; tracked {
+					current, err := graphLinkState(ctx, connection, projectID, link)
+					if err != nil {
+						return nil, fmt.Errorf("reconcile memory: load link state: %w", err)
+					}
+					if current != expected {
+						return nil, ErrMemoryConflict
+					}
+				}
+				for _, endpoint := range []struct{ kind, ref string }{{link.SourceKind, link.SourceRef}, {link.TargetKind, link.TargetRef}} {
+					if endpoint.kind != graph.KindIntent || seen[endpoint.ref] {
+						continue
+					}
+					var state string
+					err := connection.QueryRowContext(ctx, `SELECT state FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?`, projectID, endpoint.kind, endpoint.ref).Scan(&state)
+					if errors.Is(err, sql.ErrNoRows) || err == nil && state != graph.StateActive {
+						return nil, ErrMemoryConflict
+					}
+					if err != nil {
+						return nil, fmt.Errorf("reconcile memory: load intent endpoint: %w", err)
+					}
+				}
+			}
+		}
+		for _, link := range proposal.RetiredLinks {
+			state, err := graphLinkState(ctx, connection, projectID, link)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile memory: load retirement state: %w", err)
+			}
+			if state != graph.StateActive {
+				return nil, ErrMemoryConflict
+			}
+		}
+	}
 	results := make([]SaveResult, 0, len(proposals))
 	var changes []memory.ReconcileChange
 	var links []memory.ReconcileLink
@@ -180,15 +261,29 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		}
 		results = append(results, result)
 		if result.Action != "unchanged" {
-			changes = append(changes, memory.ReconcileChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs})
+			changes = append(changes, memory.ReconcileChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs, EvidenceRefs: proposal.EvidenceRefs, ContextRefs: proposal.ContextRefs})
 		}
 		for _, link := range proposal.Links {
-			created, err := saveGraphLink(ctx, connection, projectID, link, "reconcile:"+sessionID)
+			action, err := saveGraphLink(ctx, connection, projectID, link, "reconcile:"+sessionID)
 			if err != nil {
 				return nil, fmt.Errorf("reconcile memory: save link: %w", err)
 			}
-			if created {
-				links = append(links, memory.ReconcileLink{SourceKind: link.SourceKind, SourceRef: link.SourceRef, Relation: link.Relation, TargetKind: link.TargetKind, TargetRef: link.TargetRef, EvidenceIDs: proposal.EvidenceIDs})
+			if action != "" {
+				evidenceRefs := proposal.LinkEvidence[link]
+				if len(evidenceRefs) == 0 {
+					evidenceRefs = proposal.EvidenceRefs
+				}
+				links = append(links, memory.ReconcileLink{Action: action, SourceKind: link.SourceKind, SourceRef: link.SourceRef, Relation: link.Relation, TargetKind: link.TargetKind, TargetRef: link.TargetRef, EvidenceIDs: evidenceRefIDs(evidenceRefs), EvidenceRefs: evidenceRefs, ContextRefs: proposal.ContextRefs})
+			}
+		}
+		for _, link := range proposal.RetiredLinks {
+			retired, err := retireGraphLink(ctx, connection, projectID, link)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile memory: retire link: %w", err)
+			}
+			if retired {
+				evidenceRefs := proposal.RetirementEvidence[link]
+				links = append(links, memory.ReconcileLink{Action: "retired", SourceKind: link.SourceKind, SourceRef: link.SourceRef, Relation: link.Relation, TargetKind: link.TargetKind, TargetRef: link.TargetRef, EvidenceIDs: evidenceRefIDs(evidenceRefs), EvidenceRefs: evidenceRefs, ContextRefs: proposal.ContextRefs})
 			}
 		}
 	}
@@ -206,6 +301,79 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 	}
 	committed = true
 	return results, nil
+}
+
+func validExcerpt(messageID, partID, quote string, start, end int) bool {
+	return strings.TrimSpace(messageID) != "" && len(messageID) <= 128 && strings.TrimSpace(partID) != "" && len(partID) <= 128 &&
+		strings.TrimSpace(quote) != "" && len([]rune(quote)) <= 1024 && start >= 0 && end > start && end-start == len(quote)
+}
+
+func sameEvidenceIDs(ids []string, refs []memory.EvidenceRef) bool {
+	want := map[string]bool{}
+	for _, id := range evidenceRefIDs(refs) {
+		want[id] = true
+	}
+	if len(ids) != len(want) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if !want[id] || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
+}
+
+func evidenceRefIDs(refs []memory.EvidenceRef) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if !seen[ref.MessageID] {
+			seen[ref.MessageID] = true
+			result = append(result, ref.MessageID)
+		}
+	}
+	return result
+}
+
+func evidenceSubset(values, allowed []memory.EvidenceRef) bool {
+	if len(values) == 0 {
+		return false
+	}
+	available := map[memory.EvidenceRef]bool{}
+	for _, value := range allowed {
+		available[value] = true
+	}
+	seen := map[memory.EvidenceRef]bool{}
+	for _, value := range values {
+		if !available[value] || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
+}
+
+func reconcileLinkOwnedBy(link graph.Link, key string) bool {
+	if link.SourceKind != graph.KindIntent || strings.TrimSpace(link.TargetRef) == "" {
+		return false
+	}
+	switch link.TargetKind {
+	case graph.KindMaterial:
+		return link.SourceRef == key && graph.IsIntentMaterialRelation(link.Relation)
+	case graph.KindIntent:
+		if !graph.IsIntentIntentRelation(link.Relation) || link.SourceRef == link.TargetRef {
+			return false
+		}
+		if link.Relation == graph.RelationConflictsWith {
+			return link.SourceRef == key || link.TargetRef == key
+		}
+		return link.SourceRef == key
+	default:
+		return false
+	}
 }
 
 func (s *Store) ReconciliationEvents(ctx context.Context, projectID string) ([]memory.ReconcileEvent, error) {

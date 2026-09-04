@@ -13,11 +13,15 @@ const (
 	OwnerDurable  = "durable"
 	StateActive   = "active"
 	StateMissing  = "missing"
+	StateRetired  = "retired"
 
 	RelationAppliesTo      = "applies_to"
 	RelationRealizedBy     = "realized_by"
 	RelationVerifiedBy     = "verified_by"
 	RelationContradictedBy = "contradicted_by"
+	RelationRefines        = "refines"
+	RelationDependsOn      = "depends_on"
+	RelationConflictsWith  = "conflicts_with"
 )
 
 // ReferenceID is stable within a project and keeps graph identities inspectable.
@@ -26,6 +30,10 @@ func ReferenceID(kind, ref string) string { return kind + ":" + ref }
 func IsIntentMaterialRelation(value string) bool {
 	return value == RelationAppliesTo || value == RelationRealizedBy ||
 		value == RelationVerifiedBy || value == RelationContradictedBy
+}
+
+func IsIntentIntentRelation(value string) bool {
+	return value == RelationRefines || value == RelationDependsOn || value == RelationConflictsWith
 }
 
 type Node struct {
@@ -81,6 +89,15 @@ type Link struct {
 	Relation   string `json:"relation"`
 	TargetKind string `json:"targetKind"`
 	TargetRef  string `json:"targetRef"`
+}
+
+// NormalizeLink stores symmetric Intent relationships in one deterministic direction.
+func NormalizeLink(link Link) Link {
+	if link.SourceKind == KindIntent && link.TargetKind == KindIntent && link.Relation == RelationConflictsWith && link.SourceRef > link.TargetRef {
+		link.SourceKind, link.TargetKind = link.TargetKind, link.SourceKind
+		link.SourceRef, link.TargetRef = link.TargetRef, link.SourceRef
+	}
+	return link
 }
 
 type Connection struct {

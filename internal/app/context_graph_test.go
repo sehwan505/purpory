@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sehwan505/purpory/internal/graph"
@@ -55,9 +56,21 @@ func TestContextGraphDoesNotProjectWorkspaceSessions(t *testing.T) {
 
 func TestPPRSeedsKeepSemanticPrimaryAndRecentContextActive(t *testing.T) {
 	semantic := []semanticMatch{{node: graph.Node{ID: "semantic"}, score: 0.8}}
-	seeds := pprSeeds(semantic, nil, []string{"opened"})
-	if seeds["semantic"] != 1 || seeds["opened"] != 0.5 {
+	seeds := pprSeeds(semantic, nil, []string{"recent", "older", "recent"})
+	if seeds["semantic"] != 1 || seeds["recent"] <= seeds["older"] {
 		t.Fatalf("unexpected personalized seeds: %#v", seeds)
+	}
+}
+
+func TestIntentLinkBatchesRespectModelContext(t *testing.T) {
+	request := reconcile.LinkRequest{Candidate: reconcile.Candidate{Key: "source", Value: strings.Repeat("x", 900)}, Targets: []reconcile.IntentTarget{{Key: "target", Value: "value"}}}
+	batches, err := linkRequestBatches([]reconcile.LinkRequest{request, request, request}, 1024)
+	if err != nil || len(batches) < 2 {
+		t.Fatalf("requests were not split by context: %#v %v", batches, err)
+	}
+	request.Candidate.Value = strings.Repeat("x", 3000)
+	if _, err := linkRequestBatches([]reconcile.LinkRequest{request}, 1024); err == nil {
+		t.Fatal("oversized single request was accepted")
 	}
 }
 
@@ -99,7 +112,7 @@ func TestTopicPathsExposeBranchesAndConnectRelatedLeaves(t *testing.T) {
 }
 
 func TestReconciliationOffersOnlyTranscriptMentionedMaterials(t *testing.T) {
-	messages := []reconcile.Message{{Role: "assistant", Text: "Implemented the result in internal/app/service.go."}}
+	messages := []reconcile.Event{{Role: "assistant", Text: "Implemented the result in internal/app/service.go."}}
 	materials := []material.Material{{URI: "file:README.md"}, {URI: "file:internal/app/service.go"}}
 	refs := mentionedMaterialRefs(messages, materials)
 	if len(refs) != 1 || refs[0] != "file:internal/app/service.go" {

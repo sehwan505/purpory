@@ -189,8 +189,8 @@ func TestReconcileEmbedsIntentAndKnowledgeWithGlobalModel(t *testing.T) {
 	}
 
 	candidates := []reconcile.Candidate{
-		{Key: "intent.database", Kind: memory.Decision, Value: "Use SQLite.", EvidenceIDs: []string{"U000001"}},
-		{Key: "knowledge.index", Kind: memory.Note, Value: "The index is rebuilt incrementally.", EvidenceIDs: []string{"U000002"}},
+		{Key: "intent.database", Kind: memory.Decision, Value: "Use SQLite.", EvidenceIDs: []string{"U000001"}, EvidenceRefs: []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: "Use SQLite.", EndByte: len("Use SQLite.")}}},
+		{Key: "knowledge.index", Kind: memory.Note, Value: "The index is rebuilt incrementally.", EvidenceIDs: []string{"U000002"}, EvidenceRefs: []memory.EvidenceRef{{MessageID: "U000002", PartID: "U000002P001", Quote: "The index is rebuilt incrementally.", EndByte: len("The index is rebuilt incrementally.")}}},
 	}
 	if err := service.applyCandidates(ctx, "reconcile:test", candidates); err != nil {
 		t.Fatalf("reconciliation failed: %v", err)
@@ -205,6 +205,81 @@ func TestReconcileEmbedsIntentAndKnowledgeWithGlobalModel(t *testing.T) {
 	}
 	if !ids["intent:intent.database"] || !ids["knowledge:knowledge.index"] {
 		t.Fatalf("intent and knowledge were not both embedded: %#v", ids)
+	}
+}
+
+func TestIntentLinkRequestsUseLocalCandidatesWithoutEmbedding(t *testing.T) {
+	ctx := context.Background()
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	value := "Mobile release requires offline support."
+	if _, err := service.Remember(ctx, "platform.offline", memory.Decision, &value, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.store.SaveLink(ctx, "demo", graph.Link{SourceKind: graph.KindIntent, SourceRef: "release.mobile", Relation: graph.RelationDependsOn, TargetKind: graph.KindIntent, TargetRef: "platform.offline"}); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []reconcile.Candidate{
+		{Key: "release.mobile", Kind: memory.Decision, Value: "The mobile release depends on offline support."},
+		{Key: "release.signed", Kind: memory.Decision, Value: "Release artifacts must be signed."},
+	}
+	requests, err := service.intentLinkRequests(ctx, candidates)
+	if err != nil || len(requests) != 2 {
+		t.Fatalf("intent candidates were not built locally: %#v %v", requests, err)
+	}
+	targets := map[string]bool{}
+	for _, target := range requests[0].Targets {
+		targets[target.Key] = true
+	}
+	if !targets["platform.offline"] || !targets["release.signed"] {
+		t.Fatalf("existing and same-batch intents were not retrieved: %#v", requests[0].Targets)
+	}
+	if len(requests[0].Existing) != 1 || requests[0].Existing[0].Relation != graph.RelationDependsOn || requests[0].Existing[0].TargetRef != "platform.offline" {
+		t.Fatalf("existing relation was not offered for explicit retirement: %#v", requests[0].Existing)
+	}
+	if requests[0].ExpectedStates[graph.RelationDependsOn+"\x00platform.offline"] != graph.StateActive {
+		t.Fatalf("Pass B did not retain its edge snapshot: %#v", requests[0].ExpectedStates)
+	}
+}
+
+func TestIntentLinkRequestsUseSharedEvidenceAndNavigationWithoutPersistingThem(t *testing.T) {
+	ctx := context.Background()
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	for key, value := range map[string]string{
+		"intent.shared":  "Uses the shared design document.",
+		"intent.visited": "Recently explored decision.",
+	} {
+		value := value
+		if _, err := service.Remember(ctx, key, memory.Decision, &value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.store.SaveLink(ctx, "demo", graph.Link{SourceKind: graph.KindIntent, SourceRef: "intent.shared", Relation: graph.RelationAppliesTo, TargetKind: graph.KindMaterial, TargetRef: "file:shared.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveSession(ctx, "codex:candidates", "codex", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.store.AppendNavigation(ctx, "demo", "codex:candidates", []contextprepare.NavigationEvent{{Action: "explain", TargetNodeID: "intent:intent.visited"}}); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []reconcile.Candidate{{
+		Key: "intent.new", Kind: memory.Decision, Value: "A new unrelated decision.",
+		MaterialLinks: []reconcile.MaterialLink{{Relation: graph.RelationAppliesTo, MaterialRef: "file:shared.md"}},
+	}}
+	requests, err := service.intentLinkRequests(ctx, candidates, "codex:candidates")
+	if err != nil || len(requests) != 1 {
+		t.Fatalf("intent candidates missing: %#v %v", requests, err)
+	}
+	targets := map[string]bool{}
+	for _, target := range requests[0].Targets {
+		targets[target.Key] = true
+	}
+	if !targets["intent.shared"] || !targets["intent.visited"] {
+		t.Fatalf("shared evidence and navigation were not candidate signals: %#v", requests[0].Targets)
+	}
+	_, edges, err := service.store.Graph(ctx, "demo")
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("retrieval signals leaked into canonical edges: %#v %v", edges, err)
 	}
 }
 
@@ -273,7 +348,7 @@ func TestHintExplorationUsesPathsAndSkipsOnlyOpenedNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := service.store.ReconcileMemories(ctx, "codex:explore", []store.MemoryProposal{{
-		Memory: entry, EvidenceIDs: []string{"U000001"}, Links: []graph.Link{{
+		Memory: entry, EvidenceIDs: []string{"U000001"}, EvidenceRefs: []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: value, EndByte: len(value)}}, Links: []graph.Link{{
 			SourceKind: graph.KindIntent, SourceRef: entry.Key, Relation: graph.RelationRealizedBy,
 			TargetKind: graph.KindMaterial, TargetRef: "file:guide.md",
 		}},
@@ -336,5 +411,18 @@ func TestHintExplorationUsesPathsAndSkipsOnlyOpenedNodes(t *testing.T) {
 	english, err := service.Query(ctx, "product", 10)
 	if err != nil || len(english.Paths) != 1 || english.Paths[0] != "product.discovery" {
 		t.Fatalf("English branch exploration failed: %#v %v", english.Paths, err)
+	}
+	trail, err := service.store.Navigation(ctx, "demo", "codex:explore", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := map[string]bool{}
+	for _, event := range trail {
+		actions[event.Action] = true
+	}
+	for _, action := range []string{"deliver", "explain", "query", "path"} {
+		if !actions[action] {
+			t.Fatalf("navigation did not record %q: %#v", action, trail)
+		}
 	}
 }
