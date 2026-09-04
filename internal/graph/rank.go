@@ -112,7 +112,10 @@ func TypedPPR(nodes []Node, edges []Edge, seeds map[string]float64) []Rank {
 
 func transitionWeight(relation string, forward bool) float64 {
 	switch relation {
-	case RelationAppliesTo, RelationRealizedBy, RelationVerifiedBy, RelationContradictedBy:
+	case RelationConflictsWith:
+		return 1
+	case RelationAppliesTo, RelationRealizedBy, RelationVerifiedBy, RelationContradictedBy,
+		RelationRefines, RelationDependsOn:
 		if forward {
 			return 1
 		}

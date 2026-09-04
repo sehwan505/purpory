@@ -32,10 +32,16 @@ type SaveResult struct {
 var ErrMemoryConflict = errors.New("reconcile memory: concurrent change")
 
 type MemoryProposal struct {
-	Memory       memory.Memory
-	ExpectedHash *string
-	EvidenceIDs  []string
-	Links        []graph.Link
+	Memory             memory.Memory
+	ExpectedHash       *string
+	EvidenceIDs        []string
+	EvidenceRefs       []memory.EvidenceRef
+	ContextRefs        []memory.ContextRef
+	Links              []graph.Link
+	LinkEvidence       map[graph.Link][]memory.EvidenceRef
+	RetiredLinks       []graph.Link
+	RetirementEvidence map[graph.Link][]memory.EvidenceRef
+	ExpectedLinkStates map[graph.Link]string
 }
 
 func DefaultPath() (string, error) {

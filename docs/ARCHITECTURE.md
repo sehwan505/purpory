@@ -79,9 +79,11 @@ Directories are added only when their first behavior is implemented.
   reported by the hook payload.
 - Session-end copies the transcript into a private queue and returns immediately.
   A detached worker treats the transcript as untrusted, accepts only memory
-  grounded in explicit user statements, applies at most 20 memories per atomic
-  batch with optimistic concurrency, and records an audit event. Failed jobs
-  remain available for retry.
+  grounded in exact excerpts of explicit user statements, and may use only the
+  exact assistant excerpt that a later user statement adopts as context. Both
+  excerpts retain their part ID and byte interval. It applies at most 20 memories
+  per atomic batch with optimistic concurrency and records an audit event. Failed
+  jobs remain available for retry.
 - A Material may be a document, source file, note, media item, conversation,
   external reference, or a future input. Core retrieval never requires code,
   Git, a programming language, or a code graph.
@@ -96,6 +98,9 @@ Directories are added only when their first behavior is implemented.
 - `update` replaces only observed nodes and edges. Durable semantic edges remain
   in the same graph; an absent endpoint becomes `missing` instead of being
   deleted, then returns to `active` when observation finds the same stable ref.
+- Durable edges have an independent `active`/`retired` lifecycle. Only an
+  explicitly user-grounded reconciliation may retire one; normal graph reads
+  exclude it while reconciliation audit preserves the operation.
 - Markdown and readable text contribute searchable content with Material URI and
   locators. Binary Materials are cataloged without persisting their contents.
 - The desktop is viewer-first: it reads committed state when opened or focused
@@ -133,10 +138,10 @@ Directories are added only when their first behavior is implemented.
   old redundant kind prefixes are removed only in the query-time projection.
   This derived hierarchy adds no Topic rows or edges to the canonical graph.
 - Query and prepare use one direction-aware Typed PPR path. Semantic top-k,
-  exact matches, and recently opened nodes personalize the walk. Prepare returns
+  exact matches, and the recent ordered navigation trail personalize the walk. Prepare returns
   at most three active, content-bearing, unopened signposts; opened nodes remain
-  lower-weight seeds so later calls move outward. `query` browses branches,
-  `explain` records opened evidence, and `path` exposes relationships. Each
+  lower-weight fallback seeds so later calls move outward. `query`, `explain`,
+  `path`, and prepare deliveries append Session-scoped operational events. Each
   HintMap remains audited. See [Intent Graph](INTENT_GRAPH.md#retrieval) for the
   ranking and budgeting contract.
 
@@ -167,3 +172,5 @@ needs completion or embeddings. A second persistence backend is not planned; it
 earns an interface only when a supported use case exists. A new Material format
 adds extraction behavior without changing discovery, storage, retrieval, or UI
 packages. Source-code formats may share language-aware resolution internally.
+Provider boundaries and the first-external-source adaptation path are defined in
+[Graph Lifecycle Plan](GRAPH_LIFECYCLE_PLAN.md#범용성-계약).

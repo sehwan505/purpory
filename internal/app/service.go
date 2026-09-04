@@ -456,7 +456,12 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 		return QueryResult{}, err
 	}
 	exact := contextGraph.seeds(query)
-	ranked := graph.TypedPPR(contextGraph.nodes, contextGraph.edges, pprSeeds(semantic, exact, nil))
+	sessionID := currentSessionID("")
+	history, err := s.navigationNodeIDs(ctx, sessionID)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	ranked := graph.TypedPPR(contextGraph.nodes, contextGraph.edges, pprSeeds(semantic, exact, history))
 	byID := make(map[string]graph.Node, len(contextGraph.nodes))
 	for _, node := range contextGraph.nodes {
 		byID[node.ID] = node
@@ -502,7 +507,13 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 			break
 		}
 	}
-	return QueryResult{Matches: matches, Nodes: nodeReferences(nodes), Edges: edges, Paths: contextGraph.branches(query, limit)}, nil
+	result := QueryResult{Matches: matches, Nodes: nodeReferences(nodes), Edges: edges, Paths: contextGraph.branches(query, limit)}
+	if sessionID != "anon" && len(matches) > 0 {
+		if err := s.recordNavigation(ctx, sessionID, "query", matches[0].Node.ID, "", nil); err != nil {
+			return QueryResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) Graph(ctx context.Context, scope string, limit int) (GraphResult, error) {
@@ -563,6 +574,15 @@ func (s *Service) ExplainMany(ctx context.Context, queries []string) ([]ExplainR
 	if err := s.store.SaveDeliveries(ctx, s.project.ID, sessionID, opened); err != nil {
 		return nil, err
 	}
+	if sessionID != "anon" {
+		events := make([]contextprepare.NavigationEvent, 0, len(nodes))
+		for _, node := range nodes {
+			events = append(events, contextprepare.NavigationEvent{Action: "explain", TargetNodeID: node.ID})
+		}
+		if err := s.store.AppendNavigation(ctx, s.project.ID, sessionID, events); err != nil {
+			return nil, err
+		}
+	}
 	return results, nil
 }
 
@@ -573,7 +593,44 @@ func (s *Service) Path(ctx context.Context, source, target string) (graph.Path, 
 	}
 	result, err := contextGraph.path(source, target)
 	result.Nodes = nodeReferences(result.Nodes)
-	return result, err
+	if err != nil {
+		return result, err
+	}
+	if sessionID := currentSessionID(""); sessionID != "anon" && len(result.Nodes) > 0 {
+		if err := s.recordNavigation(ctx, sessionID, "path", result.Nodes[0].ID, result.Nodes[len(result.Nodes)-1].ID, nil); err != nil {
+			return graph.Path{}, err
+		}
+	}
+	return result, nil
+}
+
+func (s *Service) navigationNodeIDs(ctx context.Context, sessionID string) ([]string, error) {
+	if sessionID == "anon" {
+		return nil, nil
+	}
+	events, err := s.store.Navigation(ctx, s.project.ID, sessionID, 8)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, 8)
+	for _, event := range events {
+		for _, id := range []string{event.TargetNodeID, event.SourceNodeID} {
+			if id != "" {
+				result = append(result, id)
+				if len(result) == 8 {
+					return result, nil
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func (s *Service) recordNavigation(ctx context.Context, sessionID, action, sourceID, targetID string, decisionID *int64) error {
+	if err := s.SaveSessionAt(ctx, s.currentRoot(ctx), sessionID, sessionAgent(sessionID), "active"); err != nil {
+		return err
+	}
+	return s.store.AppendNavigation(ctx, s.project.ID, sessionID, []contextprepare.NavigationEvent{{Action: action, SourceNodeID: sourceID, TargetNodeID: targetID, DecisionID: decisionID}})
 }
 
 func (s *Service) Update(ctx context.Context) (UpdateResult, error) {

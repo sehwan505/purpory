@@ -61,21 +61,44 @@ type ReconcileEvent struct {
 }
 
 type ReconcileChange struct {
-	Key         string   `json:"key"`
-	Action      string   `json:"action"`
-	Before      *Memory  `json:"before,omitempty"`
-	After       Memory   `json:"after"`
-	VersionID   int64    `json:"versionId,omitempty"`
-	EvidenceIDs []string `json:"evidenceIds"`
+	Key          string        `json:"key"`
+	Action       string        `json:"action"`
+	Before       *Memory       `json:"before,omitempty"`
+	After        Memory        `json:"after"`
+	VersionID    int64         `json:"versionId,omitempty"`
+	EvidenceIDs  []string      `json:"evidenceIds"`
+	EvidenceRefs []EvidenceRef `json:"evidenceRefs,omitempty"`
+	ContextRefs  []ContextRef  `json:"contextRefs,omitempty"`
 }
 
 type ReconcileLink struct {
-	SourceKind  string   `json:"sourceKind"`
-	SourceRef   string   `json:"sourceRef"`
-	Relation    string   `json:"relation"`
-	TargetKind  string   `json:"targetKind"`
-	TargetRef   string   `json:"targetRef"`
-	EvidenceIDs []string `json:"evidenceIds"`
+	Action       string        `json:"action"`
+	SourceKind   string        `json:"sourceKind"`
+	SourceRef    string        `json:"sourceRef"`
+	Relation     string        `json:"relation"`
+	TargetKind   string        `json:"targetKind"`
+	TargetRef    string        `json:"targetRef"`
+	EvidenceIDs  []string      `json:"evidenceIds"`
+	EvidenceRefs []EvidenceRef `json:"evidenceRefs,omitempty"`
+	ContextRefs  []ContextRef  `json:"contextRefs,omitempty"`
+}
+
+// EvidenceRef identifies the exact user excerpt authorizing a durable change.
+type EvidenceRef struct {
+	MessageID string `json:"messageId"`
+	PartID    string `json:"partId"`
+	Quote     string `json:"quote"`
+	StartByte int    `json:"startByte"`
+	EndByte   int    `json:"endByte"`
+}
+
+// ContextRef identifies only the assistant excerpt adopted by later user evidence.
+type ContextRef struct {
+	MessageID string `json:"messageId"`
+	PartID    string `json:"partId"`
+	Quote     string `json:"quote"`
+	StartByte int    `json:"startByte"`
+	EndByte   int    `json:"endByte"`
 }
 
 type Review struct {

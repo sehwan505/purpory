@@ -9,8 +9,45 @@ import (
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/material"
 	"github.com/sehwan505/purpory/internal/memory"
+	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/project"
 )
+
+func TestNavigationTrailPreservesOrderRepeatsAndSessionBoundary(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	current := project.Project{ID: "demo", Name: "Demo", Root: "/demo"}
+	if err := database.SaveProject(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	for _, sessionID := range []string{"codex:one", "codex:two"} {
+		if err := database.SaveSession(ctx, current.ID, "", sessionID, "codex", "active"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []contextprepare.NavigationEvent{
+		{Action: "query", TargetNodeID: "intent:one"},
+		{Action: "explain", TargetNodeID: "intent:two"},
+		{Action: "explain", TargetNodeID: "intent:one"},
+	}
+	if err := database.AppendNavigation(ctx, current.ID, "codex:one", want); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AppendNavigation(ctx, current.ID, "codex:two", []contextprepare.NavigationEvent{{Action: "query", TargetNodeID: "intent:other"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := database.Navigation(ctx, current.ID, "codex:one", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].TargetNodeID != "intent:one" || got[1].TargetNodeID != "intent:two" || got[2].TargetNodeID != "intent:one" || got[0].ID <= got[1].ID {
+		t.Fatalf("unexpected newest-first trail: %#v", got)
+	}
+}
 
 func TestProjectRoundTrip(t *testing.T) {
 	ctx := context.Background()
@@ -321,6 +358,32 @@ func TestUpdateSnapshotPreservesIntentLinks(t *testing.T) {
 	}
 }
 
+func TestSaveLinkAcceptsOnlyDefinedIntentRelations(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.SaveProject(ctx, project.Project{ID: "demo", Name: "Demo", Root: "/demo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	link := graph.Link{SourceKind: graph.KindIntent, SourceRef: "release.mobile", Relation: graph.RelationDependsOn, TargetKind: graph.KindIntent, TargetRef: "platform.offline"}
+	if err := database.SaveLink(ctx, "demo", link); err != nil {
+		t.Fatal(err)
+	}
+	link.Relation = "related_to"
+	if err := database.SaveLink(ctx, "demo", link); err == nil {
+		t.Fatal("undefined intent relation was accepted")
+	}
+
+	_, edges, err := database.Graph(ctx, "demo")
+	if err != nil || len(edges) != 1 || edges[0].Relation != graph.RelationDependsOn {
+		t.Fatalf("intent relation mismatch: %#v, %v", edges, err)
+	}
+}
+
 func TestMemoryRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
@@ -398,8 +461,19 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	link := graph.Link{SourceKind: "intent", SourceRef: want.Key, Relation: graph.RelationRealizedBy, TargetKind: "material", TargetRef: "file:frontend.tsx"}
-	results, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{{Memory: want, EvidenceIDs: []string{"U000001"}, Links: []graph.Link{link}}})
+	targetValue := "Offline mode remains available."
+	target, err := memory.New(current.ID, "platform.offline", memory.Decision, &targetValue, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SaveMemory(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	materialLink := graph.Link{SourceKind: "intent", SourceRef: want.Key, Relation: graph.RelationRealizedBy, TargetKind: "material", TargetRef: "file:frontend.tsx"}
+	intentLink := graph.Link{SourceKind: graph.KindIntent, SourceRef: want.Key, Relation: graph.RelationDependsOn, TargetKind: graph.KindIntent, TargetRef: target.Key}
+	contextRefs := []memory.ContextRef{{MessageID: "A000001", PartID: "A000001P001", Quote: "Keep intent visible.", EndByte: len("Keep intent visible.")}}
+	evidenceRefs := []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: value, EndByte: len(value)}}
+	results, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{{Memory: want, EvidenceIDs: []string{"U000001"}, EvidenceRefs: evidenceRefs, ContextRefs: contextRefs, Links: []graph.Link{materialLink, intentLink}, LinkEvidence: map[graph.Link][]memory.EvidenceRef{intentLink: evidenceRefs}}})
 	if err != nil || len(results) != 1 || results[0].Action != "created" {
 		t.Fatalf("unexpected reconciliation: %#v %v", results, err)
 	}
@@ -414,12 +488,77 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 		t.Fatalf("conflict changed memory: %#v %v", got, err)
 	}
 	graphNodes, graphEdges, err := database.Graph(ctx, current.ID)
-	if err != nil || len(graphNodes) != 2 || len(graphEdges) != 1 || graphEdges[0].Owner != graph.OwnerDurable || graphEdges[0].Provenance != "reconcile:codex:one" {
+	if err != nil || len(graphNodes) != 3 || len(graphEdges) != 2 || graphEdges[0].Owner != graph.OwnerDurable || graphEdges[0].Provenance != "reconcile:codex:one" {
 		t.Fatalf("reconciliation graph link missing: %#v %#v %v", graphNodes, graphEdges, err)
 	}
 	events, err := database.ReconciliationEvents(ctx, current.ID)
-	if err != nil || len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].After.Value == nil || *events[0].Changes[0].After.Value != value || len(events[0].Links) != 1 || events[0].Links[0].Relation != graph.RelationRealizedBy || events[0].Links[0].EvidenceIDs[0] != "U000001" {
+	if err != nil || len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].After.Value == nil || *events[0].Changes[0].After.Value != value || len(events[0].Changes[0].EvidenceRefs) != 1 || events[0].Changes[0].EvidenceRefs[0].EndByte != len(value) || len(events[0].Changes[0].ContextRefs) != 1 || events[0].Changes[0].ContextRefs[0].PartID != "A000001P001" || len(events[0].Links) != 2 || events[0].Links[0].Relation != graph.RelationRealizedBy || events[0].Links[1].Relation != graph.RelationDependsOn || events[0].Links[1].EvidenceIDs[0] != "U000001" || len(events[0].Links[1].EvidenceRefs) != 1 || len(events[0].Links[1].ContextRefs) != 1 {
 		t.Fatalf("reconciliation provenance missing: %#v %v", events, err)
+	}
+}
+
+func TestReconcileRetiresAndReactivatesDurableLinkWithoutOmission(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	current := project.Project{ID: "demo", Name: "Demo", Root: "/demo"}
+	if err := database.SaveProject(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	value := "Mobile depends on offline support."
+	source, _ := memory.New(current.ID, "release.mobile", memory.Decision, &value, nil)
+	targetValue := "Offline support remains available."
+	target, _ := memory.New(current.ID, "platform.offline", memory.Decision, &targetValue, nil)
+	if _, err := database.SaveMemory(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	link := graph.Link{SourceKind: graph.KindIntent, SourceRef: source.Key, Relation: graph.RelationDependsOn, TargetKind: graph.KindIntent, TargetRef: target.Key}
+	evidence := []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: value, EndByte: len(value)}}
+	base := MemoryProposal{Memory: source, EvidenceIDs: []string{"U000001"}, EvidenceRefs: evidence, Links: []graph.Link{link}, LinkEvidence: map[graph.Link][]memory.EvidenceRef{link: evidence}}
+	if _, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{base}); err != nil {
+		t.Fatal(err)
+	}
+	base.ExpectedHash = &source.Hash
+	base.Links, base.LinkEvidence = nil, nil
+	if _, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{base}); err != nil {
+		t.Fatal(err)
+	}
+	if _, edges, err := database.Graph(ctx, current.ID); err != nil || len(edges) != 1 {
+		t.Fatalf("omission retired a durable link: %#v %v", edges, err)
+	}
+	base.RetiredLinks = []graph.Link{link}
+	base.RetirementEvidence = map[graph.Link][]memory.EvidenceRef{link: evidence}
+	if _, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{base}); err != nil {
+		t.Fatal(err)
+	}
+	if _, edges, err := database.Graph(ctx, current.ID); err != nil || len(edges) != 0 {
+		t.Fatalf("retired link remained traversable: %#v %v", edges, err)
+	}
+	var state string
+	var retiredAt any
+	if err := database.db.QueryRowContext(ctx, `SELECT state, retired_at FROM edges WHERE project_id = ?`, current.ID).Scan(&state, &retiredAt); err != nil || state != graph.StateRetired || retiredAt == nil {
+		t.Fatalf("retirement history missing: %q %#v %v", state, retiredAt, err)
+	}
+	base.RetiredLinks, base.RetirementEvidence = nil, nil
+	base.Links = []graph.Link{link}
+	base.LinkEvidence = map[graph.Link][]memory.EvidenceRef{link: evidence}
+	base.ExpectedLinkStates = map[graph.Link]string{link: graph.StateActive}
+	if _, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{base}); !errors.Is(err, ErrMemoryConflict) {
+		t.Fatalf("stale add reactivated a retired edge: %v", err)
+	}
+	base.ExpectedLinkStates[link] = graph.StateRetired
+	if _, err := database.ReconcileMemories(ctx, "codex:one", []MemoryProposal{base}); err != nil {
+		t.Fatal(err)
+	}
+	if _, edges, err := database.Graph(ctx, current.ID); err != nil || len(edges) != 1 {
+		t.Fatalf("reactivated link was not traversable: %#v %v", edges, err)
+	}
+	events, err := database.ReconciliationEvents(ctx, current.ID)
+	if err != nil || len(events) != 3 || events[0].Links[0].Action != "reactivated" || events[1].Links[0].Action != "retired" {
+		t.Fatalf("link lifecycle audit missing: %#v %v", events, err)
 	}
 }
 
