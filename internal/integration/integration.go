@@ -2,6 +2,7 @@
 package integration
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,14 +12,21 @@ import (
 )
 
 const (
-	startMarker = "<!-- purpory:start -->"
-	endMarker   = "<!-- purpory:end -->"
-	section     = startMarker + "\n## Purpory\n\n" +
+	startMarker             = "<!-- purpory:start -->"
+	endMarker               = "<!-- purpory:end -->"
+	claudeSkillPolicyMarker = "# purpory:claude-invocation-policy"
+	section                 = startMarker + "\n## Purpory\n\n" +
 		"- Preflight provides graph hints, not source content. Inspect only relevant node IDs.\n" +
 		"- Before answering codebase questions, run `purpory query \"<question>\"`; it returns at most five content-free candidates.\n" +
 		"- Load only selected evidence with `purpory explain \"<path or node ID>\"`; use `purpory path \"<A>\" \"<B>\"` for relationships.\n" +
 		"- After modifying code, run `purpory update`.\n" + endMarker
 )
+
+//go:embed skills/purpory-explore/SKILL.md
+var explorationSkill string
+
+//go:embed skills/purpory-explore/agents/openai.yaml
+var explorationSkillMetadata string
 
 func Install(agent string) (string, error) {
 	directory, err := configDirectory(agent)
@@ -44,7 +52,11 @@ func Install(agent string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if changed || hooksChanged {
+	skillChanged, err := configureExplorationSkill(directory, agent, true)
+	if err != nil {
+		return "", err
+	}
+	if changed || hooksChanged || skillChanged {
 		return "installed", nil
 	}
 	return "unchanged", nil
@@ -80,7 +92,11 @@ func Uninstall(agent string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if changed || hooksChanged {
+	skillChanged, err := configureExplorationSkill(directory, agent, false)
+	if err != nil {
+		return "", err
+	}
+	if changed || hooksChanged || skillChanged {
 		return "uninstalled", nil
 	}
 	return "unchanged", nil
@@ -114,6 +130,44 @@ func agentFile(directory, agent string) (string, error) {
 	default:
 		return "", errors.New("configure integration: agent must be codex or claude")
 	}
+}
+
+func configureExplorationSkill(directory, agent string, install bool) (bool, error) {
+	root := filepath.Join(directory, "skills", "purpory-explore")
+	content := explorationSkill
+	if strings.EqualFold(strings.TrimSpace(agent), "claude") {
+		content = strings.Replace(content, claudeSkillPolicyMarker, "disable-model-invocation: true", 1)
+	}
+	files := map[string]string{filepath.Join(root, "SKILL.md"): content}
+	if strings.EqualFold(strings.TrimSpace(agent), "codex") {
+		files[filepath.Join(root, "agents", "openai.yaml")] = explorationSkillMetadata
+	}
+	changed := false
+	for path, content := range files {
+		if !install {
+			if err := os.Remove(path); err == nil {
+				changed = true
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return false, fmt.Errorf("configure integration: remove %s: %w", path, err)
+			}
+			continue
+		}
+		current, mode, err := read(path)
+		if err != nil {
+			return false, err
+		}
+		if current != content {
+			if err := atomicWrite(path, content, mode); err != nil {
+				return false, err
+			}
+			changed = true
+		}
+	}
+	if !install {
+		_ = os.Remove(filepath.Join(root, "agents"))
+		_ = os.Remove(root)
+	}
+	return changed, nil
 }
 
 func configureHooks(directory, agent string, install bool) (bool, error) {

@@ -22,22 +22,30 @@ func (s *Store) DeleteMemory(ctx context.Context, projectID, key string) (bool, 
 		return false, fmt.Errorf("delete memory: begin: %w", err)
 	}
 	defer tx.Rollback()
+	deleted, err := deleteMemory(ctx, tx, projectID, key)
+	if err != nil || !deleted {
+		return deleted, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("delete memory: commit: %w", err)
+	}
+	return true, nil
+}
+
+func deleteMemory(ctx context.Context, database databaseRunner, projectID, key string) (bool, error) {
 	var kind memory.Kind
-	err = tx.QueryRowContext(ctx, `SELECT kind FROM memories WHERE project_id = ? AND key = ?`, projectID, key).Scan(&kind)
+	err := database.QueryRowContext(ctx, `SELECT kind FROM memories WHERE project_id = ? AND key = ?`, projectID, key).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("delete memory: load: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND id = ?`, projectID, graph.ReferenceID(kind.NodeKind(), key)); err != nil {
+	if _, err := database.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND id = ?`, projectID, graph.ReferenceID(kind.NodeKind(), key)); err != nil {
 		return false, fmt.Errorf("delete memory: graph node: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND key = ?`, projectID, key); err != nil {
+	if _, err := database.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND key = ?`, projectID, key); err != nil {
 		return false, fmt.Errorf("delete memory: record: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("delete memory: commit: %w", err)
 	}
 	return true, nil
 }

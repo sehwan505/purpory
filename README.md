@@ -116,6 +116,13 @@ purpory integration codex install
 purpory integration claude install
 ```
 
+Agent-driven graph changes use the explicitly invoked `purpory-explore` skill.
+For example, use `$purpory-explore connect the cache policy to its implementation`
+in Codex or `/purpory-explore connect the cache policy to its implementation` in
+Claude Code. The skill controls exploration mode and leaves successful changes
+rollbackable; invoke it with `checkpoint` or `rollback` to resolve the pending
+baseline.
+
 Register a Project once with `project add` before using project-scoped commands.
 Ordinary CLI commands and agent hooks resolve the working directory against
 registered Projects and never create one implicitly. Hooks silently do nothing
