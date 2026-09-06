@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	product "github.com/sehwan505/purpory/internal/app"
+	"github.com/sehwan505/purpory/internal/memory"
 )
 
 func runExplorationCommand(ctx context.Context, service *product.Service, arguments []string, output io.Writer) error {
@@ -35,20 +36,27 @@ func runExplorationCommand(ctx context.Context, service *product.Service, argume
 		result, err := service.Exploration(ctx, *sessionID)
 		return writeJSON(output, result, err)
 	case "set":
-		if len(arguments) < 3 || len(arguments) > 4 {
+		setFlags := flag.NewFlagSet("explore set", flag.ContinueOnError)
+		setFlags.SetOutput(output)
+		kind := setFlags.String("kind", string(memory.Note), "memory kind")
+		if err := setFlags.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		values := setFlags.Args()
+		if len(values) < 2 || len(values) > 3 {
 			return errors.New("explore set requires KEY VALUE and optional REASON")
 		}
 		reason := ""
-		if len(arguments) == 4 {
-			reason = arguments[3]
+		if len(values) == 3 {
+			reason = values[2]
 		}
-		result, err := service.SetAgentKnowledge(ctx, *sessionID, arguments[1], arguments[2], reason)
+		result, err := service.SetAgentMemory(ctx, *sessionID, memory.Kind(*kind), values[0], values[1], reason)
 		return writeJSON(output, result, err)
 	case "delete":
 		if len(arguments) != 2 {
 			return errors.New("explore delete requires KEY")
 		}
-		result, err := service.DeleteAgentKnowledge(ctx, *sessionID, arguments[1])
+		result, err := service.DeleteAgentMemory(ctx, *sessionID, arguments[1])
 		return writeJSON(output, result, err)
 	case "link":
 		if len(arguments) < 4 || len(arguments) > 5 {
