@@ -190,6 +190,46 @@ func TestMigrateDropsLegacyDeliveryJSON(t *testing.T) {
 	}
 }
 
+func TestMigrateGeneralizesAgentChangeLog(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agent_log.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveProject(ctx, project.Project{ID: "demo", Name: "Demo", Root: "/demo"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		DROP TABLE agent_change_log;
+		CREATE TABLE agent_change_log (
+			id INTEGER PRIMARY KEY, project_id TEXT NOT NULL, session_id TEXT NOT NULL,
+			entity TEXT NOT NULL CHECK (entity IN ('knowledge', 'edge')), entity_key TEXT NOT NULL,
+			action TEXT NOT NULL CHECK (action IN ('set', 'delete', 'link', 'unlink')),
+			before_json TEXT NOT NULL CHECK (json_valid(before_json)),
+			after_json TEXT NOT NULL CHECK (json_valid(after_json)), created_at INTEGER NOT NULL DEFAULT (unixepoch())
+		) STRICT;
+		CREATE INDEX agent_change_log_project_id ON agent_change_log(project_id, id);
+		INSERT INTO agent_change_log(project_id, session_id, entity, entity_key, action, before_json, after_json)
+		VALUES ('demo', 'codex:test', 'knowledge', 'policy.test', 'set', 'null', '{}');
+		DELETE FROM schema_migrations WHERE version = 26;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var entity string
+	if err := database.db.QueryRowContext(ctx, `SELECT entity FROM agent_change_log`).Scan(&entity); err != nil || entity != "memory" {
+		t.Fatalf("agent log entity was not migrated: %q %v", entity, err)
+	}
+}
+
 func TestProjectsOrdersMostRecentFirst(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))

@@ -15,6 +15,8 @@ const (
 	startMarker             = "<!-- purpory:start -->"
 	endMarker               = "<!-- purpory:end -->"
 	claudeSkillPolicyMarker = "# purpory:claude-invocation-policy"
+	skillName               = "purpory-curate"
+	previousSkillName       = "purpory-explore"
 	section                 = startMarker + "\n## Purpory\n\n" +
 		"- Preflight provides graph hints, not source content. Inspect only relevant node IDs.\n" +
 		"- Before answering codebase questions, run `purpory query \"<question>\"`; it returns at most five content-free candidates.\n" +
@@ -22,11 +24,11 @@ const (
 		"- After modifying code, run `purpory update`.\n" + endMarker
 )
 
-//go:embed skills/purpory-explore/SKILL.md
-var explorationSkill string
+//go:embed skills/purpory-curate/SKILL.md
+var skill string
 
-//go:embed skills/purpory-explore/agents/openai.yaml
-var explorationSkillMetadata string
+//go:embed skills/purpory-curate/agents/openai.yaml
+var skillMetadata string
 
 func Install(agent string) (string, error) {
 	directory, err := configDirectory(agent)
@@ -52,7 +54,7 @@ func Install(agent string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	skillChanged, err := configureExplorationSkill(directory, agent, true)
+	skillChanged, err := configureSkill(directory, agent, true)
 	if err != nil {
 		return "", err
 	}
@@ -92,7 +94,7 @@ func Uninstall(agent string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	skillChanged, err := configureExplorationSkill(directory, agent, false)
+	skillChanged, err := configureSkill(directory, agent, false)
 	if err != nil {
 		return "", err
 	}
@@ -132,26 +134,26 @@ func agentFile(directory, agent string) (string, error) {
 	}
 }
 
-func configureExplorationSkill(directory, agent string, install bool) (bool, error) {
-	root := filepath.Join(directory, "skills", "purpory-explore")
-	content := explorationSkill
+func configureSkill(directory, agent string, install bool) (bool, error) {
+	root := filepath.Join(directory, "skills", skillName)
+	if !install {
+		changed, err := removeSkill(root)
+		if err != nil {
+			return false, err
+		}
+		removed, err := removeSkill(filepath.Join(directory, "skills", previousSkillName))
+		return changed || removed, err
+	}
+	content := skill
 	if strings.EqualFold(strings.TrimSpace(agent), "claude") {
 		content = strings.Replace(content, claudeSkillPolicyMarker, "disable-model-invocation: true", 1)
 	}
 	files := map[string]string{filepath.Join(root, "SKILL.md"): content}
 	if strings.EqualFold(strings.TrimSpace(agent), "codex") {
-		files[filepath.Join(root, "agents", "openai.yaml")] = explorationSkillMetadata
+		files[filepath.Join(root, "agents", "openai.yaml")] = skillMetadata
 	}
 	changed := false
 	for path, content := range files {
-		if !install {
-			if err := os.Remove(path); err == nil {
-				changed = true
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return false, fmt.Errorf("configure integration: remove %s: %w", path, err)
-			}
-			continue
-		}
 		current, mode, err := read(path)
 		if err != nil {
 			return false, err
@@ -163,10 +165,24 @@ func configureExplorationSkill(directory, agent string, install bool) (bool, err
 			changed = true
 		}
 	}
-	if !install {
-		_ = os.Remove(filepath.Join(root, "agents"))
-		_ = os.Remove(root)
+	removed, err := removeSkill(filepath.Join(directory, "skills", previousSkillName))
+	if err != nil {
+		return false, err
 	}
+	return changed || removed, nil
+}
+
+func removeSkill(root string) (bool, error) {
+	changed := false
+	for _, path := range []string{filepath.Join(root, "SKILL.md"), filepath.Join(root, "agents", "openai.yaml")} {
+		if err := os.Remove(path); err == nil {
+			changed = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("configure integration: remove %s: %w", path, err)
+		}
+	}
+	_ = os.Remove(filepath.Join(root, "agents"))
+	_ = os.Remove(root)
 	return changed, nil
 }
 

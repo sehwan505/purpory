@@ -1,6 +1,0 @@
-interface:
-  display_name: "Purpory Explore"
-  short_description: "Safely edit canonical Purpory graph knowledge"
-  default_prompt: "Use $purpory-explore to improve the requested part of this project's knowledge graph."
-policy:
-  allow_implicit_invocation: false

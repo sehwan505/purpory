@@ -24,7 +24,7 @@ type AgentChange struct {
 	CreatedAt string          `json:"createdAt"`
 }
 
-type knowledgeSnapshot struct {
+type memorySnapshot struct {
 	Memory     memory.Memory `json:"memory"`
 	Provenance string        `json:"provenance"`
 }
@@ -95,18 +95,18 @@ func (s *Store) AgentChanges(ctx context.Context, projectID string, limit int) (
 	return changes, rows.Err()
 }
 
-func (s *Store) SetAgentKnowledge(ctx context.Context, projectID, sessionID, provenance string, entry memory.Memory) (AgentChange, error) {
+func (s *Store) SetAgentMemory(ctx context.Context, projectID, sessionID, provenance string, entry memory.Memory) (AgentChange, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AgentChange{}, fmt.Errorf("set agent knowledge: begin: %w", err)
+		return AgentChange{}, fmt.Errorf("set agent memory: begin: %w", err)
 	}
 	defer tx.Rollback()
-	before, err := loadKnowledgeSnapshot(ctx, tx, projectID, entry.Key)
+	before, err := loadMemorySnapshot(ctx, tx, projectID, entry.Key)
 	if err != nil {
 		return AgentChange{}, err
 	}
 	if before != nil && before.Memory.Kind != entry.Kind {
-		return AgentChange{}, fmt.Errorf("set agent knowledge %q: existing memory has kind %q", entry.Key, before.Memory.Kind)
+		return AgentChange{}, fmt.Errorf("set agent memory %q: existing memory has kind %q", entry.Key, before.Memory.Kind)
 	}
 	if before != nil && before.Memory.Hash == entry.Hash && before.Provenance == provenance {
 		return AgentChange{Action: "unchanged"}, tx.Commit()
@@ -114,37 +114,37 @@ func (s *Store) SetAgentKnowledge(ctx context.Context, projectID, sessionID, pro
 	if _, err := saveMemory(ctx, tx, entry); err != nil {
 		return AgentChange{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET provenance = ? WHERE project_id = ? AND id = ?`, provenance, projectID, graph.ReferenceID(graph.KindKnowledge, entry.Key)); err != nil {
-		return AgentChange{}, fmt.Errorf("set agent knowledge: provenance: %w", err)
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET provenance = ? WHERE project_id = ? AND id = ?`, provenance, projectID, graph.ReferenceID(entry.Kind.NodeKind(), entry.Key)); err != nil {
+		return AgentChange{}, fmt.Errorf("set agent memory: provenance: %w", err)
 	}
-	after, err := loadKnowledgeSnapshot(ctx, tx, projectID, entry.Key)
+	after, err := loadMemorySnapshot(ctx, tx, projectID, entry.Key)
 	if err != nil {
 		return AgentChange{}, err
 	}
-	change, err := appendAgentChange(ctx, tx, projectID, sessionID, "knowledge", entry.Key, "set", before, after)
+	change, err := appendAgentChange(ctx, tx, projectID, sessionID, "memory", entry.Key, "set", before, after)
 	if err != nil {
 		return AgentChange{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return AgentChange{}, fmt.Errorf("set agent knowledge: commit: %w", err)
+		return AgentChange{}, fmt.Errorf("set agent memory: commit: %w", err)
 	}
 	return change, nil
 }
 
-func (s *Store) DeleteAgentKnowledge(ctx context.Context, projectID, sessionID, key string) (AgentChange, error) {
+func (s *Store) DeleteAgentMemory(ctx context.Context, projectID, sessionID, key string) (AgentChange, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AgentChange{}, fmt.Errorf("delete agent knowledge: begin: %w", err)
+		return AgentChange{}, fmt.Errorf("delete agent memory: begin: %w", err)
 	}
 	defer tx.Rollback()
-	before, err := loadKnowledgeSnapshot(ctx, tx, projectID, key)
+	before, err := loadMemorySnapshot(ctx, tx, projectID, key)
 	if err != nil {
 		return AgentChange{}, err
 	}
-	if before == nil || before.Memory.Kind != memory.Note {
-		return AgentChange{}, fmt.Errorf("delete agent knowledge %q: not found", key)
+	if before == nil {
+		return AgentChange{}, fmt.Errorf("delete agent memory %q: not found", key)
 	}
-	edges, err := incidentEdges(ctx, tx, projectID, graph.ReferenceID(graph.KindKnowledge, key))
+	edges, err := incidentEdges(ctx, tx, projectID, graph.ReferenceID(before.Memory.Kind.NodeKind(), key))
 	if err != nil {
 		return AgentChange{}, err
 	}
@@ -158,14 +158,14 @@ func (s *Store) DeleteAgentKnowledge(ctx context.Context, projectID, sessionID, 
 		return AgentChange{}, err
 	}
 	if !deleted {
-		return AgentChange{}, fmt.Errorf("delete agent knowledge %q: disappeared during transaction", key)
+		return AgentChange{}, fmt.Errorf("delete agent memory %q: disappeared during transaction", key)
 	}
-	change, err := appendAgentChange(ctx, tx, projectID, sessionID, "knowledge", key, "delete", before, nil)
+	change, err := appendAgentChange(ctx, tx, projectID, sessionID, "memory", key, "delete", before, nil)
 	if err != nil {
 		return AgentChange{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return AgentChange{}, fmt.Errorf("delete agent knowledge: commit: %w", err)
+		return AgentChange{}, fmt.Errorf("delete agent memory: commit: %w", err)
 	}
 	return change, nil
 }
@@ -258,9 +258,9 @@ func (s *Store) RollbackAgentChanges(ctx context.Context, projectID string) (int
 	if err := validateAgentRollback(ctx, tx, projectID, changes); err != nil {
 		return 0, err
 	}
-	// Restore knowledge first so edge foreign keys point at their baseline nodes.
+	// Restore memories first so edge foreign keys point at their baseline nodes.
 	for _, change := range changes {
-		if change.Entity != "knowledge" {
+		if change.Entity != "memory" {
 			continue
 		}
 		if string(change.Before) == "null" {
@@ -269,15 +269,15 @@ func (s *Store) RollbackAgentChanges(ctx context.Context, projectID string) (int
 			}
 			continue
 		}
-		var snapshot knowledgeSnapshot
+		var snapshot memorySnapshot
 		if err := json.Unmarshal(change.Before, &snapshot); err != nil {
-			return 0, fmt.Errorf("rollback agent changes: decode knowledge: %w", err)
+			return 0, fmt.Errorf("rollback agent changes: decode memory: %w", err)
 		}
 		if _, err := saveMemory(ctx, tx, snapshot.Memory); err != nil {
 			return 0, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET provenance = ? WHERE project_id = ? AND id = ?`, snapshot.Provenance, projectID, graph.ReferenceID(snapshot.Memory.Kind.NodeKind(), snapshot.Memory.Key)); err != nil {
-			return 0, fmt.Errorf("rollback agent changes: knowledge provenance: %w", err)
+			return 0, fmt.Errorf("rollback agent changes: memory provenance: %w", err)
 		}
 	}
 	for _, change := range changes {
@@ -351,8 +351,8 @@ func appendAgentChange(ctx context.Context, tx *sql.Tx, projectID, sessionID, en
 	return AgentChange{ID: id, SessionID: sessionID, Entity: entity, EntityKey: entityKey, Action: action, Before: beforeJSON, After: afterJSON, CreatedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)}, nil
 }
 
-func loadKnowledgeSnapshot(ctx context.Context, database databaseRunner, projectID, key string) (*knowledgeSnapshot, error) {
-	var snapshot knowledgeSnapshot
+func loadMemorySnapshot(ctx context.Context, database databaseRunner, projectID, key string) (*memorySnapshot, error) {
+	var snapshot memorySnapshot
 	err := database.QueryRowContext(ctx, `
 		SELECT project_id, key, kind, value, source, content_hash FROM memories
 		WHERE project_id = ? AND key = ?
@@ -361,10 +361,10 @@ func loadKnowledgeSnapshot(ctx context.Context, database databaseRunner, project
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("load agent knowledge baseline: %w", err)
+		return nil, fmt.Errorf("load agent memory baseline: %w", err)
 	}
 	if err := database.QueryRowContext(ctx, `SELECT provenance FROM nodes WHERE project_id = ? AND id = ?`, projectID, graph.ReferenceID(snapshot.Memory.Kind.NodeKind(), key)).Scan(&snapshot.Provenance); err != nil {
-		return nil, fmt.Errorf("load agent knowledge provenance: %w", err)
+		return nil, fmt.Errorf("load agent memory provenance: %w", err)
 	}
 	return &snapshot, nil
 }
@@ -390,14 +390,14 @@ func incidentEdges(ctx context.Context, tx *sql.Tx, projectID, nodeID string) ([
 		WHERE project_id = ? AND (source_id = ? OR target_id = ?)
 	`, projectID, nodeID, nodeID)
 	if err != nil {
-		return nil, fmt.Errorf("load agent knowledge edges: %w", err)
+		return nil, fmt.Errorf("load agent memory edges: %w", err)
 	}
 	defer rows.Close()
 	edges := []edgeSnapshot{}
 	for rows.Next() {
 		var edge edgeSnapshot
 		if err := rows.Scan(&edge.SourceID, &edge.TargetID, &edge.Relation, &edge.Owner, &edge.Provenance, &edge.State); err != nil {
-			return nil, fmt.Errorf("load agent knowledge edges: scan: %w", err)
+			return nil, fmt.Errorf("load agent memory edges: scan: %w", err)
 		}
 		edges = append(edges, edge)
 	}
@@ -438,8 +438,8 @@ func validateAgentRollback(ctx context.Context, tx *sql.Tx, projectID string, ch
 		var encoded []byte
 		var err error
 		switch change.Entity {
-		case "knowledge":
-			snapshot, loadErr := loadKnowledgeSnapshot(ctx, tx, projectID, change.EntityKey)
+		case "memory":
+			snapshot, loadErr := loadMemorySnapshot(ctx, tx, projectID, change.EntityKey)
 			if loadErr != nil {
 				return loadErr
 			}

@@ -116,9 +116,9 @@ purpory integration codex install
 purpory integration claude install
 ```
 
-Agent-driven graph changes use the explicitly invoked `purpory-explore` skill.
-For example, use `$purpory-explore connect the cache policy to its implementation`
-in Codex or `/purpory-explore connect the cache policy to its implementation` in
+Agent-driven graph changes use the explicitly invoked `purpory-curate` skill.
+For example, use `$purpory-curate connect the cache policy to its implementation`
+in Codex or `/purpory-curate connect the cache policy to its implementation` in
 Claude Code. The skill controls exploration mode and leaves successful changes
 rollbackable; invoke it with `checkpoint` or `rollback` to resolve the pending
 baseline.

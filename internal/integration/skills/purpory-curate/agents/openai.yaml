@@ -1,0 +1,6 @@
+interface:
+  display_name: "Purpory Curate"
+  short_description: "Curate project memory and graph relations safely"
+  default_prompt: "Use $purpory-curate to apply the requested change to this project's knowledge graph."
+policy:
+  allow_implicit_invocation: false

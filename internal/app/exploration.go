@@ -44,20 +44,20 @@ func (s *Service) Exploration(ctx context.Context, explicitSessionID string) (Ex
 	return ExplorationStatus{SessionID: sessionID, Enabled: enabled, PendingChanges: count}, nil
 }
 
-func (s *Service) SetAgentKnowledge(ctx context.Context, explicitSessionID, key, value, reason string) (store.AgentChange, error) {
+func (s *Service) SetAgentMemory(ctx context.Context, explicitSessionID string, kind memory.Kind, key, value, reason string) (store.AgentChange, error) {
 	sessionID, err := s.explorationSession(ctx, explicitSessionID, true)
 	if err != nil {
 		return store.AgentChange{}, err
 	}
 	value, reason = strings.TrimSpace(value), strings.TrimSpace(reason)
 	if value == "" || len(value) > 1_048_576 || utf8.RuneCountInString(reason) > 4_096 {
-		return store.AgentChange{}, errors.New("set agent knowledge: value is required, value must be at most 1 MiB, and reason must be at most 4096 characters")
+		return store.AgentChange{}, errors.New("set agent memory: value is required, value must be at most 1 MiB, and reason must be at most 4096 characters")
 	}
-	entry, err := memory.New(s.project.ID, key, memory.Note, &value, nil)
+	entry, err := memory.New(s.project.ID, key, kind, &value, nil)
 	if err != nil {
 		return store.AgentChange{}, err
 	}
-	change, err := s.store.SetAgentKnowledge(ctx, s.project.ID, sessionID, agentProvenance(sessionID, reason), entry)
+	change, err := s.store.SetAgentMemory(ctx, s.project.ID, sessionID, agentProvenance(sessionID, reason), entry)
 	if err != nil {
 		return store.AgentChange{}, err
 	}
@@ -67,7 +67,7 @@ func (s *Service) SetAgentKnowledge(ctx context.Context, explicitSessionID, key,
 	return change, nil
 }
 
-func (s *Service) DeleteAgentKnowledge(ctx context.Context, explicitSessionID, key string) (store.AgentChange, error) {
+func (s *Service) DeleteAgentMemory(ctx context.Context, explicitSessionID, key string) (store.AgentChange, error) {
 	sessionID, err := s.explorationSession(ctx, explicitSessionID, true)
 	if err != nil {
 		return store.AgentChange{}, err
@@ -76,7 +76,7 @@ func (s *Service) DeleteAgentKnowledge(ctx context.Context, explicitSessionID, k
 	if err != nil {
 		return store.AgentChange{}, err
 	}
-	return s.store.DeleteAgentKnowledge(ctx, s.project.ID, sessionID, key)
+	return s.store.DeleteAgentMemory(ctx, s.project.ID, sessionID, key)
 }
 
 func (s *Service) SetAgentLink(ctx context.Context, explicitSessionID, source, relation, target, reason string) (store.AgentChange, error) {

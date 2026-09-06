@@ -234,15 +234,19 @@ func TestAgentExplorationCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	output.Reset()
-	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "set", "knowledge.cli", "Managed knowledge."}, bytes.NewReader(nil), &output); err != nil {
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "set", "--kind", "decision", "policy.cli", "Managed policy."}, bytes.NewReader(nil), &output); err != nil {
 		t.Fatal(err)
 	}
 	var created store.AgentChange
 	if err := json.Unmarshal(output.Bytes(), &created); err != nil || created.ID == 0 {
-		t.Fatalf("agent knowledge change missing: %#v %v", created, err)
+		t.Fatalf("agent memory change missing: %#v %v", created, err)
+	}
+	current, err := service.Memory(ctx, "policy.cli")
+	if err != nil || current.Kind != memory.Decision {
+		t.Fatalf("agent memory kind was not preserved: %#v %v", current, err)
 	}
 	output.Reset()
-	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "link", "knowledge.stable", "related_to", "knowledge.cli"}, bytes.NewReader(nil), &output); err != nil {
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "link", "knowledge.stable", "related_to", "policy.cli"}, bytes.NewReader(nil), &output); err != nil {
 		t.Fatal(err)
 	}
 	output.Reset()
@@ -259,7 +263,7 @@ func TestAgentExplorationCLI(t *testing.T) {
 	}
 	var history []store.AgentChange
 	if err := json.Unmarshal(output.Bytes(), &history); err != nil || len(history) != 2 {
-		t.Fatalf("unexpected agent knowledge history: %#v %v", history, err)
+		t.Fatalf("unexpected agent memory history: %#v %v", history, err)
 	}
 	output.Reset()
 	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "rollback"}, bytes.NewReader(nil), &output); err != nil {

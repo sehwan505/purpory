@@ -144,8 +144,8 @@ Directories are added only when their first behavior is implemented.
   `path`, and prepare deliveries append Session-scoped operational events. Each
   HintMap remains audited. See [Intent Graph](INTENT_GRAPH.md#retrieval) for the
   ranking and budgeting contract.
-- The explicitly invoked `purpory-explore` skill grants one Codex or Claude Code
-  Session temporary write access to canonical Knowledge and graph edges. The
+- The explicitly invoked `purpory-curate` skill grants one Codex or Claude Code
+  Session temporary write access to canonical Memory and graph edges. The
   user's invocation supplies the complete target; the skill owns only the safe
   enter, modify, verify, and exit procedure. Each mutation records before and
   after images in a project undo log. `rollback` restores the baseline once and
