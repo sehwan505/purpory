@@ -17,7 +17,7 @@ import (
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
 
-const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] <setup|project|knowledge|remember|request|decision|review|prepare|query|embed|explain|path|update|model|integration|preflight|session-end|session|version>"
+const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] <setup|project|knowledge|remember|request|decision|review|prepare|query|explain|path|explore|embed|update|model|integration|preflight|session-end|session|version>"
 
 func runCLI(ctx context.Context, service *product.Service, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) == 0 {
@@ -322,6 +322,8 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 		_, err = fmt.Fprintln(output, renderPath(result))
 		return err
+	case "explore":
+		return runExplorationCommand(ctx, service, arguments[1:], output)
 	case "update":
 		flags := flag.NewFlagSet(command, flag.ContinueOnError)
 		flags.SetOutput(output)

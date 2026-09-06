@@ -14,6 +14,7 @@ import (
 	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
+	"github.com/sehwan505/purpory/internal/store"
 )
 
 func openCLIService(t *testing.T, root, database, id string) *product.Service {
@@ -218,6 +219,59 @@ func TestExplorationCLIIsBoundedAndProgressive(t *testing.T) {
 	}
 	if len([]rune(output.String())) > evidenceCharBudget+1 || !strings.Contains(output.String(), "selected evidence") || !strings.Contains(output.String(), "[truncated;") {
 		t.Fatalf("explain did not return bounded selected evidence: %d runes", len([]rune(output.String())))
+	}
+}
+
+func TestAgentExplorationCLI(t *testing.T) {
+	ctx := context.Background()
+	service := openCLIService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	value := "Stable knowledge."
+	if _, err := service.Remember(ctx, "knowledge.stable", memory.Note, &value, nil); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "on"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "set", "knowledge.cli", "Managed knowledge."}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var created store.AgentChange
+	if err := json.Unmarshal(output.Bytes(), &created); err != nil || created.ID == 0 {
+		t.Fatalf("agent knowledge change missing: %#v %v", created, err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "link", "knowledge.stable", "related_to", "knowledge.cli"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "status"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var status product.ExplorationStatus
+	if err := json.Unmarshal(output.Bytes(), &status); err != nil || !status.Enabled || status.PendingChanges != 2 {
+		t.Fatalf("unexpected exploration status: %#v %v", status, err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "history"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	var history []store.AgentChange
+	if err := json.Unmarshal(output.Bytes(), &history); err != nil || len(history) != 2 {
+		t.Fatalf("unexpected agent knowledge history: %#v %v", history, err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "rollback"}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "set", "knowledge.accepted", "Accepted."}, bytes.NewReader(nil), &output); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := runCLI(ctx, service, []string{"explore", "--session", "codex:cli", "checkpoint"}, bytes.NewReader(nil), &output); err != nil || strings.TrimSpace(output.String()) != "1" {
+		t.Fatalf("checkpoint failed: %q %v", output.String(), err)
 	}
 }
 
