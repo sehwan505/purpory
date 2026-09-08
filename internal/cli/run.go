@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/integration"
@@ -17,6 +18,10 @@ import (
 func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int {
 	config, err := launch.Parse(arguments)
 	if err != nil {
+		fmt.Fprintf(errorOutput, "purpory: %v\n", err)
+		return 2
+	}
+	if err := validateExpectedProject(config); err != nil {
 		fmt.Fprintf(errorOutput, "purpory: %v\n", err)
 		return 2
 	}
@@ -80,7 +85,12 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 			}
 		}
 	}
-	service, err := product.Open(context.Background(), config.Root, config.DBPath, config.ProjectID)
+	var service *product.Service
+	if config.ExpectedProjectID != "" {
+		service, err = product.OpenExpectedProject(context.Background(), config.Root, config.DBPath, config.ExpectedProjectID)
+	} else {
+		service, err = product.Open(context.Background(), config.Root, config.DBPath, config.ProjectID)
+	}
 	if err != nil {
 		if errors.Is(err, project.ErrNotRegistered) && isAgentHook(config.Args) {
 			return 0
@@ -94,6 +104,27 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 		return 1
 	}
 	return 0
+}
+
+func validateExpectedProject(config launch.Config) error {
+	if !config.ExpectedProjectSet {
+		return nil
+	}
+	if strings.TrimSpace(config.ExpectedProjectID) == "" {
+		return errors.New("--expect-project requires a non-empty ID")
+	}
+	if config.ProjectSet || project.RequestedID(config.ProjectID) != "" {
+		return errors.New("--expect-project cannot be combined with --project or PURPORY_PROJECT_ID")
+	}
+	if len(config.Args) == 0 {
+		return errors.New("--expect-project requires knowledge, remember, query, or explain")
+	}
+	switch config.Args[0] {
+	case "knowledge", "remember", "query", "explain":
+		return nil
+	default:
+		return errors.New("--expect-project supports only knowledge, remember, query, and explain")
+	}
 }
 
 func recordHookObservation(ctx context.Context, databasePath, cwd string) error {

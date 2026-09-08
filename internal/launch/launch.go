@@ -9,11 +9,14 @@ import (
 )
 
 type Config struct {
-	Root      string
-	RootSet   bool
-	DBPath    string
-	ProjectID string
-	Args      []string
+	Root               string
+	RootSet            bool
+	DBPath             string
+	ProjectID          string
+	ProjectSet         bool
+	ExpectedProjectID  string
+	ExpectedProjectSet bool
+	Args               []string
 }
 
 func Parse(arguments []string) (Config, error) {
@@ -28,7 +31,7 @@ func Parse(arguments []string) (Config, error) {
 	config := Config{Root: root, DBPath: database}
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
-		if argument != "--root" && argument != "--db" && argument != "--project" {
+		if argument != "--root" && argument != "--db" && argument != "--project" && argument != "--expect-project" {
 			config.Args = append(config.Args, argument)
 			continue
 		}
@@ -44,6 +47,10 @@ func Parse(arguments []string) (Config, error) {
 			config.DBPath = arguments[index]
 		case "--project":
 			config.ProjectID = arguments[index]
+			config.ProjectSet = true
+		case "--expect-project":
+			config.ExpectedProjectID = arguments[index]
+			config.ExpectedProjectSet = true
 		}
 	}
 	return config, nil

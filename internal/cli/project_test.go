@@ -61,6 +61,48 @@ func TestProjectMustBeRegisteredBeforeNormalCommands(t *testing.T) {
 	}
 }
 
+func TestProjectResolveAndExpectedProject(t *testing.T) {
+	root := t.TempDir()
+	database := filepath.Join(t.TempDir(), "purpory.db")
+	registered, err := product.RegisterProject(context.Background(), root, database, "demo", "Demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, errorOutput bytes.Buffer
+	if code := Run([]string{"--root", root, "--db", database, "project", "resolve"}, strings.NewReader(""), &output, &errorOutput); code != 0 {
+		t.Fatalf("project resolve failed: %s", errorOutput.String())
+	}
+	var resolved project.Project
+	if err := json.Unmarshal(output.Bytes(), &resolved); err != nil || resolved != registered {
+		t.Fatalf("project resolve = %#v, %v; want %#v", resolved, err, registered)
+	}
+
+	output.Reset()
+	errorOutput.Reset()
+	if code := Run([]string{"--root", root, "--db", database, "--expect-project", "demo", "remember", "--list"}, strings.NewReader(""), &output, &errorOutput); code != 0 {
+		t.Fatalf("expected project failed: %s", errorOutput.String())
+	}
+	for _, test := range []struct {
+		arguments []string
+		code      int
+	}{
+		{[]string{"--root", root, "--db", database, "--expect-project", "other", "remember", "--list"}, 1},
+		{[]string{"--root", root, "--db", database, "--project", "demo", "--expect-project", "demo", "remember", "--list"}, 2},
+		{[]string{"--root", root, "--db", database, "--expect-project", "", "remember", "--list"}, 2},
+		{[]string{"--root", root, "--db", database, "--expect-project", "demo", "update"}, 2},
+	} {
+		output.Reset()
+		errorOutput.Reset()
+		if code := Run(test.arguments, strings.NewReader(""), &output, &errorOutput); code != test.code {
+			t.Fatalf("Run(%v) = %d, want %d: %s", test.arguments, code, test.code, errorOutput.String())
+		}
+	}
+	t.Setenv("PURPORY_PROJECT_ID", "demo")
+	if code := Run([]string{"--root", root, "--db", database, "--expect-project", "demo", "remember", "--list"}, strings.NewReader(""), &output, &errorOutput); code != 2 {
+		t.Fatalf("environment override with --expect-project = %d, want 2", code)
+	}
+}
+
 func TestIntegrationDoesNotRequireRegisteredProject(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv("CODEX_HOME", directory)
