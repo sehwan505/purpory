@@ -14,11 +14,11 @@ func TestQueueSnapshotsAndCompletesIdempotently(t *testing.T) {
 	if err := os.WriteFile(transcript, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first, err := Enqueue("codex", "codex:one", "demo", root, filepath.Join(root, "purpory.db"), transcript, "exit")
+	first, err := Enqueue("hermes", "hermes:one", "demo", root, filepath.Join(root, "purpory.db"), transcript, "exit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Enqueue("codex", "codex:one", "demo", root, filepath.Join(root, "purpory.db"), transcript, "exit")
+	second, err := Enqueue("hermes", "hermes:one", "demo", root, filepath.Join(root, "purpory.db"), transcript, "exit")
 	if err != nil || first != second {
 		t.Fatalf("queue was not idempotent: %q %q %v", first, second, err)
 	}

@@ -90,6 +90,13 @@ func TestPreflightFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAgentSessionSupportsHermes(t *testing.T) {
+	session, err := agentSession("HERMES", "one")
+	if err != nil || session != "hermes:one" {
+		t.Fatalf("Hermes session was not accepted: %q %v", session, err)
+	}
+}
+
 func TestReconciliationWorkerDrainsQueue(t *testing.T) {
 	root := t.TempDir()
 	database := filepath.Join(t.TempDir(), "purpory.db")

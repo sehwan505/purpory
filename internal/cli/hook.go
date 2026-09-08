@@ -156,8 +156,8 @@ func startReconciliation() error {
 
 func agentSession(agent, sessionID string) (string, error) {
 	agent = strings.ToLower(strings.TrimSpace(agent))
-	if agent != "codex" && agent != "claude" {
-		return "", errors.New("agent hook: agent must be codex or claude")
+	if agent != "codex" && agent != "claude" && agent != "hermes" {
+		return "", errors.New("agent hook: agent must be codex, claude, or hermes")
 	}
 	return agent + ":" + strings.TrimSpace(sessionID), nil
 }

@@ -10,5 +10,7 @@
 /frontend/wailsjs/
 /frontend/package.json.md5
 *.tsbuildinfo
+__pycache__/
+*.egg-info/
 coverage.out
 *.log

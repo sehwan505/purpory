@@ -116,6 +116,17 @@ purpory integration codex install
 purpory integration claude install
 ```
 
+Hermes Agent uses its official Python memory-provider entry point. The adapter
+still calls the standalone Go CLI; Python does not enter Purpory's core:
+
+```sh
+python -m pip install ./integrations/hermes
+hermes config set memory.provider purpory
+```
+
+Run Hermes from a registered Project, or set `PURPORY_ROOT` when the Hermes
+process starts elsewhere. See [`integrations/hermes`](integrations/hermes/README.md).
+
 Agent-driven graph changes use the explicitly invoked `purpory-curate` skill.
 For example, use `$purpory-curate connect the cache policy to its implementation`
 in Codex or `/purpory-curate connect the cache policy to its implementation` in

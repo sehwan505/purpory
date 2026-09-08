@@ -64,8 +64,8 @@ var ErrJobLocked = errors.New("process reconciliation: job is already running")
 
 func Enqueue(agent, sessionID, projectID, cwd, dbPath, transcriptPath, reason string) (string, error) {
 	agent = strings.ToLower(strings.TrimSpace(agent))
-	if agent != "codex" && agent != "claude" {
-		return "", errors.New("queue reconciliation: agent must be codex or claude")
+	if agent != "codex" && agent != "claude" && agent != "hermes" {
+		return "", errors.New("queue reconciliation: agent must be codex, claude, or hermes")
 	}
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(projectID) == "" || strings.TrimSpace(dbPath) == "" {
 		return "", errors.New("queue reconciliation: session, project, and database are required")
