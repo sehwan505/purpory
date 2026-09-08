@@ -89,7 +89,11 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store read-only: resolve path: %w", err)
 	}
-	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute), RawQuery: "mode=ro"}).String()
+	uriPath := filepath.ToSlash(absolute)
+	if filepath.VolumeName(absolute) != "" && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro"}).String()
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, fmt.Errorf("open store read-only: %w", err)
