@@ -423,12 +423,12 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 	case "preflight":
 		if len(arguments) != 2 {
-			return errors.New("preflight requires codex or claude")
+			return errors.New("preflight requires codex, claude, or hermes")
 		}
 		return runPreflight(ctx, service, arguments[1], input, output)
 	case "session-end":
 		if len(arguments) != 2 {
-			return errors.New("session-end requires codex or claude")
+			return errors.New("session-end requires codex, claude, or hermes")
 		}
 		_, err := runSessionEnd(ctx, service, arguments[1], input)
 		if err != nil {
