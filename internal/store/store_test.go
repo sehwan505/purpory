@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -12,6 +13,46 @@ import (
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/project"
 )
+
+func TestOpenReadOnly(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "database with space.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := project.Project{ID: "demo", Name: "Demo", Root: "/demo"}
+	if err := database.SaveProject(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if got, err := database.Project(ctx, want.ID); err != nil || got != want {
+		t.Fatalf("read-only project = %#v, %v", got, err)
+	}
+	if database.db.Stats().MaxOpenConnections != 1 {
+		t.Fatalf("read-only connection limit = %d", database.db.Stats().MaxOpenConnections)
+	}
+	if err := database.SaveProject(ctx, project.Project{ID: "other", Name: "Other"}); err == nil {
+		t.Fatal("read-only store accepted a write")
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing.db")
+	if value, err := OpenReadOnly(ctx, missing); err == nil {
+		value.Close()
+		t.Fatal("read-only store created a missing database")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("missing database was created: %v", err)
+	}
+}
 
 func TestNavigationTrailPreservesOrderRepeatsAndSessionBoundary(t *testing.T) {
 	ctx := context.Background()

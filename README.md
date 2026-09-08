@@ -85,11 +85,13 @@ The standalone CLI provides automation-friendly commands:
 
 ```sh
 purpory project add .
+purpory --root /path/to/worktree project resolve
 purpory project list
 purpory project remove PROJECT_ID
 purpory update
 purpory update --json
 purpory remember --kind decision --value "Use SQLite" decision.database
+purpory --root /path/to/worktree --expect-project PROJECT_ID remember --list
 purpory remember --confirm decision.database
 purpory remember --batch changes.json          # preview
 purpory remember --batch changes.json --apply  # optimistic, atomic apply
@@ -138,6 +140,10 @@ Register a Project once with `project add` before using project-scoped commands.
 Ordinary CLI commands and agent hooks resolve the working directory against
 registered Projects and never create one implicitly. Hooks silently do nothing
 outside a registered Project.
+`project resolve` performs that lookup through a read-only database connection.
+`--expect-project` verifies automatic resolution before `knowledge`, `remember`,
+`query`, or `explain`; it cannot be combined with `--project` or
+`PURPORY_PROJECT_ID` and does not refresh workspace assignments.
 `project remove` only unregisters a Project; its stored history is preserved and
 becomes available again if the same ID is registered later.
 

@@ -30,16 +30,17 @@ import (
 const Version = "0.1.0"
 
 type Service struct {
-	project      project.Project
-	activeRoot   string
-	store        *store.Store
-	databasePath string
-	ollama       *ollama.Client
-	ollamaURL    string
-	credentials  credentialStore
-	workspace    WorkspaceObserver
-	gate         contextprepare.Provider
-	update       sync.Mutex
+	project             project.Project
+	activeRoot          string
+	store               *store.Store
+	databasePath        string
+	ollama              *ollama.Client
+	ollamaURL           string
+	credentials         credentialStore
+	workspace           WorkspaceObserver
+	preserveAssignments bool
+	gate                contextprepare.Provider
+	update              sync.Mutex
 }
 
 type WorkspaceObserver interface {
@@ -96,6 +97,27 @@ func Open(ctx context.Context, root, databasePath, projectID string) (*Service, 
 	return OpenWithObserver(ctx, root, databasePath, projectID, project.Local{})
 }
 
+func ResolveProject(ctx context.Context, root, databasePath string) (project.Project, error) {
+	workspace, err := (project.Local{}).Observe(ctx, root)
+	if err != nil {
+		return project.Project{}, err
+	}
+	database, err := store.OpenReadOnly(ctx, databasePath)
+	if err != nil {
+		return project.Project{}, err
+	}
+	defer database.Close()
+	return database.ProjectForWorkspace(ctx, workspace, "")
+}
+
+func OpenExpectedProject(ctx context.Context, root, databasePath, expectedID string) (*Service, error) {
+	expectedID = strings.TrimSpace(expectedID)
+	if expectedID == "" {
+		return nil, errors.New("open expected project: expected ID is required")
+	}
+	return openWithObserver(ctx, root, databasePath, "", expectedID, project.Local{})
+}
+
 func RegisterProject(ctx context.Context, root, databasePath, projectID, name string) (project.Project, error) {
 	return registerProject(ctx, root, databasePath, projectID, name, project.Local{})
 }
@@ -127,6 +149,10 @@ func registerProject(ctx context.Context, root, databasePath, projectID, name st
 }
 
 func OpenWithObserver(ctx context.Context, root, databasePath, projectID string, observer WorkspaceObserver) (*Service, error) {
+	return openWithObserver(ctx, root, databasePath, project.RequestedID(projectID), "", observer)
+}
+
+func openWithObserver(ctx context.Context, root, databasePath, projectID, expectedID string, observer WorkspaceObserver) (*Service, error) {
 	if observer == nil {
 		return nil, errors.New("open service: workspace observer is required")
 	}
@@ -138,18 +164,24 @@ func OpenWithObserver(ctx context.Context, root, databasePath, projectID string,
 	if err != nil {
 		return nil, err
 	}
-	registered, err := database.ProjectForWorkspace(ctx, workspace, project.RequestedID(projectID))
+	registered, err := database.ProjectForWorkspace(ctx, workspace, projectID)
 	if err != nil {
 		database.Close()
 		return nil, err
 	}
-	if err := database.SaveWorkspace(ctx, registered.ID, workspace.Resources); err != nil {
+	if expectedID != "" && registered.ID != expectedID {
 		database.Close()
-		return nil, err
+		return nil, fmt.Errorf("open expected project: resolved %q, expected %q", registered.ID, expectedID)
 	}
-	if err := database.SaveObservations(ctx, workspace.Resources); err != nil {
-		database.Close()
-		return nil, err
+	if expectedID == "" {
+		if err := database.SaveWorkspace(ctx, registered.ID, workspace.Resources); err != nil {
+			database.Close()
+			return nil, err
+		}
+		if err := database.SaveObservations(ctx, workspace.Resources); err != nil {
+			database.Close()
+			return nil, err
+		}
 	}
 	service, err := newService(ctx, databasePath, database, observer)
 	if err != nil {
@@ -158,6 +190,7 @@ func OpenWithObserver(ctx context.Context, root, databasePath, projectID string,
 	}
 	service.project = registered
 	service.activeRoot = workspace.Project.Root
+	service.preserveAssignments = expectedID != ""
 	return service, nil
 }
 
@@ -771,11 +804,21 @@ func (s *Service) SaveSessionAt(ctx context.Context, cwd, sessionID, agent, stat
 	if strings.TrimSpace(cwd) == "" {
 		return errors.New("save session: project has no assigned resource")
 	}
-	workspace, err := s.workspace.Observe(ctx, cwd)
+	stored, err := s.store.Workspace(ctx, s.project)
 	if err != nil {
 		return err
 	}
-	stored, err := s.store.Workspace(ctx, s.project)
+	if s.preserveAssignments {
+		for _, resource := range stored.Resources {
+			for _, view := range resource.Views {
+				if sameRoot(view.Root, cwd) {
+					return s.store.SaveSession(ctx, s.project.ID, view.ID, sessionID, agent, status)
+				}
+			}
+		}
+		return s.store.SaveSession(ctx, s.project.ID, "", sessionID, agent, status)
+	}
+	workspace, err := s.workspace.Observe(ctx, cwd)
 	if err != nil {
 		return err
 	}

@@ -68,6 +68,10 @@ func runSetupCommand(ctx context.Context, config launch.Config, arguments []stri
 }
 
 func runProjectCommand(ctx context.Context, config launch.Config, arguments []string, output io.Writer) error {
+	if len(arguments) == 1 && arguments[0] == "resolve" {
+		value, err := product.ResolveProject(ctx, config.Root, config.DBPath)
+		return writeJSON(output, value, err)
+	}
 	if len(arguments) == 1 && arguments[0] == "list" {
 		database, err := store.Open(ctx, config.DBPath)
 		if err != nil {
@@ -87,7 +91,7 @@ func runProjectCommand(ctx context.Context, config launch.Config, arguments []st
 		return writeJSON(output, removed, err)
 	}
 	if len(arguments) == 0 || arguments[0] != "add" {
-		return errors.New("project requires add [PATH], list, or remove ID")
+		return errors.New("project requires add [PATH], list, resolve, or remove ID")
 	}
 	flags := flag.NewFlagSet("project add", flag.ContinueOnError)
 	flags.SetOutput(output)
