@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sehwan505/purpory/internal/agent"
 	"github.com/sehwan505/purpory/internal/ollama"
 	"github.com/sehwan505/purpory/internal/openai"
 )
@@ -17,6 +18,8 @@ import (
 const (
 	providerOllama              = "ollama"
 	providerOpenAI              = "openai"
+	providerCodex               = "codex"
+	providerClaude              = "claude"
 	defaultOpenAIURL            = "https://api.openai.com/v1"
 	openAIEndpointSetting       = "provider.openai.url"
 	openAICredentialAccount     = "provider.openai.api-key"
@@ -123,12 +126,17 @@ func (s *Service) modelName(ctx context.Context, role string) (ModelSelection, e
 			selected.Model = value // Legacy model-only settings belong to Ollama.
 		}
 	}
-	if value := strings.TrimSpace(os.Getenv(config.providerEnvironment)); value != "" {
-		selected.Provider = strings.ToLower(value)
+	providerOverride := strings.TrimSpace(os.Getenv(config.providerEnvironment))
+	modelOverride := strings.TrimSpace(os.Getenv(config.modelEnvironment))
+	if providerOverride != "" {
+		selected.Provider = strings.ToLower(providerOverride)
+		if (selected.Provider == providerCodex || selected.Provider == providerClaude) && modelOverride == "" {
+			selected.Model = ""
+		}
 		selected.Source = "environment"
 	}
-	if value := strings.TrimSpace(os.Getenv(config.modelEnvironment)); value != "" {
-		selected.Model = value
+	if modelOverride != "" {
+		selected.Model = modelOverride
 		selected.Source = "environment"
 	}
 	if raw := strings.TrimSpace(os.Getenv(config.parameterEnvironment)); raw != "" {
@@ -154,9 +162,11 @@ func validateModelSelection(selected ModelSelection, requireModel bool) error {
 		return errors.New("select model: role must be gate, reconcile, or embedding")
 	}
 	if selected.Provider != providerOllama && selected.Provider != providerOpenAI {
-		return errors.New("select model: provider must be ollama or openai")
+		if selected.Role != "reconcile" || selected.Provider != providerCodex && selected.Provider != providerClaude {
+			return errors.New("select model: provider must be ollama or openai, or codex or claude for reconcile")
+		}
 	}
-	if len(selected.Model) > 255 || requireModel && strings.TrimSpace(selected.Model) == "" {
+	if len(selected.Model) > 255 || requireModel && strings.TrimSpace(selected.Model) == "" && selected.Provider != providerCodex && selected.Provider != providerClaude {
 		return errors.New("select model: model is required")
 	}
 	if selected.Role == "embedding" {
@@ -239,6 +249,8 @@ func (s *Service) generator(ctx context.Context, provider string) (structuredGen
 		return s.ollama, nil
 	case providerOpenAI:
 		return s.openAIClient(ctx)
+	case providerCodex, providerClaude:
+		return agent.New(provider)
 	default:
 		return nil, fmt.Errorf("configure model: unknown provider %q", provider)
 	}

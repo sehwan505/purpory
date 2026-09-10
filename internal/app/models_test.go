@@ -153,6 +153,15 @@ func TestLegacyModelSettingRemainsAnOllamaBinding(t *testing.T) {
 	}
 }
 
+func TestAgentReconcileProviderUsesItsConfiguredDefaultModel(t *testing.T) {
+	t.Setenv("PURPORY_RECONCILE_PROVIDER", providerCodex)
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	selected, err := service.modelName(context.Background(), "reconcile")
+	if err != nil || selected.Provider != providerCodex || selected.Model != "" {
+		t.Fatalf("agent selection = %#v, %v", selected, err)
+	}
+}
+
 func TestProviderEnvironmentOverridesStoredConfiguration(t *testing.T) {
 	t.Setenv(openAIEndpointEnvironment, "https://environment.example/v1")
 	t.Setenv(openAICredentialEnvironment, "environment-secret")

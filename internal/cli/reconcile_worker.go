@@ -3,11 +3,47 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"os"
+	"strings"
 
 	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/reconcile"
 )
+
+func runReconcileCommand(ctx context.Context, arguments []string) error {
+	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
+	executor := flags.String("executor", "", "codex or claude")
+	model := flags.String("model", "", "optional executor model")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("reconcile accepts no positional arguments")
+	}
+	*executor = strings.ToLower(strings.TrimSpace(*executor))
+	if *executor != "codex" && *executor != "claude" {
+		return errors.New("reconcile requires --executor codex or claude")
+	}
+	restoreProvider := setEnvironment("PURPORY_RECONCILE_PROVIDER", *executor)
+	defer restoreProvider()
+	restoreModel := setEnvironment("PURPORY_RECONCILE_MODEL", strings.TrimSpace(*model))
+	defer restoreModel()
+	return drainReconciliations(ctx)
+}
+
+func setEnvironment(key, value string) func() {
+	previous, found := os.LookupEnv(key)
+	_ = os.Setenv(key, value)
+	return func() {
+		if found {
+			_ = os.Setenv(key, previous)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	}
+}
 
 func drainReconciliations(ctx context.Context) error {
 	paths, err := reconcile.Pending()

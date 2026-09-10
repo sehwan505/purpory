@@ -171,7 +171,7 @@ class PurporyMemoryProvider(MemoryProvider):
                 "transcript_path": path,
                 "reason": "hermes-session-end",
             }
-            self._run(["session-end", "hermes"], json.dumps(payload), timeout=15)
+            self._run(["session-end", "hermes", "--defer"], json.dumps(payload), timeout=15)
         finally:
             if path:
                 Path(path).unlink(missing_ok=True)

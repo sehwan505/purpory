@@ -32,6 +32,13 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 		}
 		return 0
 	}
+	if len(config.Args) > 0 && config.Args[0] == "reconcile" {
+		if err := runReconcileCommand(context.Background(), config.Args[1:]); err != nil {
+			fmt.Fprintf(errorOutput, "purpory: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if len(config.Args) == 1 && (config.Args[0] == "help" || config.Args[0] == "--help" || config.Args[0] == "-h") {
 		fmt.Fprintln(output, usage)
 		return 0
@@ -162,5 +169,6 @@ func runIntegrationCommand(arguments []string, output io.Writer) error {
 }
 
 func isAgentHook(arguments []string) bool {
-	return len(arguments) == 2 && (arguments[0] == "preflight" || arguments[0] == "session-end")
+	return len(arguments) == 2 && arguments[0] == "preflight" ||
+		(len(arguments) == 2 || len(arguments) == 3 && arguments[2] == "--defer") && arguments[0] == "session-end"
 }

@@ -669,26 +669,6 @@ Typed PPR을 `query`와 `prepare`가 공유하는 유일한 graph walk로 유지
 - model 출력에서 빠진 관계를 retire하지 않고 `update`가 지속 수명주기를
   변경하지 못하는지 테스트한다.
 
-### Phase 5 — 확장 전에 측정
-
-상태: 수명주기 E2E 구현됨, 고정 평가 corpus와 provider usage 계측은 보류.
-
-작은 transcript/query corpus를 저장소에 포함하고 다음을 기록한다.
-
-- Intent 추출 precision
-- Intent-link precision과 recall
-- 활성 Intent orphan 비율
-- 예상 path 도달 가능성
-- 한 번 및 여러 번 탐색한 뒤의 retrieval recall@3
-- Session 안에서 같은 결과가 반복되는 비율
-- 오래되었거나 잘못 retire된 edge 수
-- 관계가 없을 때의 abstention 정확도
-- reconciliation model 호출 수, token, latency, retry 수
-- zero-base 및 반복 update의 idempotence
-
-이 측정이 필요성을 입증한 뒤에만 `related_to`, `supersedes`, community
-detection, approximate PPR, 주기적 relinking, graph database를 검토한다.
-
 ## 반드시 지켜야 할 불변 조건
 
 1. Project 생성은 명시적이며 observation이 Project를 만들지 않는다.
@@ -702,26 +682,3 @@ detection, approximate PPR, 주기적 relinking, graph database를 검토한다.
 8. 관계 없음도 유효한 결과이며 graph는 의도적으로 sparse하다.
 9. navigation state는 Session 범위에만 있고 canonical graph에 속하지 않는다.
 10. 열지 않은 내용은 progressive retrieval 경계를 넘지 않는다.
-
-## 연구 근거
-
-- [Google LangExtract](https://github.com/google/langextract)는 structured
-  extraction을 정확한 source span에 정렬하고 few-shot 예시와 bounded chunk를
-  사용하는 근거다. Purpory는 dependency 대신 이 grounding 계약만 차용한다.
-- [HippoRAG](https://arxiv.org/abs/2405.14831)은 associative multi-hop 검색을
-  위해 semantic recognition 뒤에 Personalized PageRank를 적용하는 근거다.
-- [HippoRAG 2](https://arxiv.org/abs/2502.14802)는 factual retrieval을 graph
-  구조로 대체하지 않고 graph retrieval과 passage 통합을 결합하는 근거다.
-- [LongMemEval](https://arxiv.org/abs/2410.10813)은 extraction, multi-session
-  reasoning, temporal reasoning, update, abstention을 독립적으로 테스트해야
-  하는 memory 능력으로 구분한다.
-- [A-MEM](https://arxiv.org/abs/2502.12110)은 새 memory를 과거 memory와
-  비교하고 의미 있는 link를 동적으로 추가하는 근거다.
-- [Zep](https://arxiv.org/abs/2501.13956)은 지속적으로 갱신되는 memory에서
-  provenance와 과거 관계를 보존하는 근거다.
-- [Microsoft GraphRAG local search](https://microsoft.github.io/graphrag/query/local_search/)는
-  semantic match를 graph 진입점으로 사용한 뒤 명시적 관계로 확장하는 근거다.
-
-이 시스템들은 설계 근거이며 dependency가 아니다. Purpory는 SQLite, 제한된
-로컬 후보 집합, 명시적 사용자 권위, 기존 domain-neutral Material model을
-그대로 유지한다.

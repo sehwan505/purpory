@@ -98,25 +98,6 @@ Navigation events are operational state, not graph evidence. They may broaden a
 bounded reconciliation candidate set but cannot authorize a durable edge; exact
 USER evidence is still required for both additions and retirements.
 
-## Research basis
-
-- [HippoRAG](https://arxiv.org/abs/2405.14831) supports graph-based associative
-  retrieval and Personalized PageRank for efficient multi-hop memory.
-- [LongMemEval](https://arxiv.org/abs/2410.10813) separates indexing, retrieval,
-  and reading and identifies extraction, cross-session reasoning, temporal
-  reasoning, updates, and abstention as distinct long-term-memory requirements.
-- [A-MEM](https://arxiv.org/abs/2502.12110) supports linking new memories into an
-  evolving network rather than treating memory as an independent flat record.
-- [Zep](https://arxiv.org/abs/2501.13956) supports maintaining historical
-  relationships while dynamically integrating conversation and business data.
-- [Generative Agents](https://arxiv.org/abs/2304.03442) shows that observation,
-  reflection, and planning all matter; Purpory maps these to Material update,
-  session reconciliation, and prepare-time retrieval.
-- [Recovering Traceability Links in Requirements Documents](https://aclanthology.org/K15-1024/)
-  shows why textual similarity alone misses or misclassifies semantic
-  traceability, motivating constrained model judgment instead of all-pairs
-  similarity links.
-
 ## Evaluation contract
 
 The engine must keep these checks runnable without a model or network:
@@ -133,7 +114,3 @@ The engine must keep these checks runnable without a model or network:
 8. Workspace Sessions never project into the canonical graph;
 9. default `query`, `explain`, and `path` output stays within its character and
    item budgets, omits unopened content, and preserves that boundary in JSON.
-
-Future retrieval changes should be evaluated against LongMemEval's five ability
-classes plus project-specific intent-to-evidence recall, false-link rate, stale
-link detection, and token cost.
