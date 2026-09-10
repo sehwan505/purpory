@@ -57,6 +57,18 @@ func TestUpdateJSON(t *testing.T) {
 	}
 }
 
+func TestReconcileExecutorOverrideIsScoped(t *testing.T) {
+	t.Setenv("PURPORY_RECONCILE_DIR", filepath.Join(t.TempDir(), "reconcile"))
+	t.Setenv("PURPORY_RECONCILE_PROVIDER", "ollama")
+	t.Setenv("PURPORY_RECONCILE_MODEL", "local-model")
+	if err := runReconcileCommand(context.Background(), []string{"--executor", "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("PURPORY_RECONCILE_PROVIDER") != "ollama" || os.Getenv("PURPORY_RECONCILE_MODEL") != "local-model" {
+		t.Fatal("reconcile executor override leaked into the process")
+	}
+}
+
 func TestEmbedCLIBackfillsAllMissingNodes(t *testing.T) {
 	vector := make([]float64, 512)
 	vector[0] = 1

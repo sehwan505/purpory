@@ -85,7 +85,7 @@ class ProviderTest(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(captured["arguments"], ["session-end", "hermes"])
+        self.assertEqual(captured["arguments"], ["session-end", "hermes", "--defer"])
         self.assertEqual(captured["payload"]["session_id"], "session-1")
         self.assertEqual(
             captured["records"],

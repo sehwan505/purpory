@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
+	"github.com/sehwan505/purpory/internal/reconcile"
 )
 
 func TestAgentHooksTrackSession(t *testing.T) {
@@ -116,5 +118,26 @@ func TestReconciliationWorkerDrainsQueue(t *testing.T) {
 	}
 	if _, err := os.Stat(job); !os.IsNotExist(err) {
 		t.Fatalf("worker did not complete queued job: %v", err)
+	}
+}
+
+func TestHermesSessionEndCanDeferReconciliation(t *testing.T) {
+	root := t.TempDir()
+	transcript := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(transcript, []byte("{\"role\":\"user\",\"content\":\"Remember SQLite.\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PURPORY_RECONCILE_DIR", filepath.Join(t.TempDir(), "reconcile"))
+	service := openCLIService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	payload, _ := json.Marshal(map[string]string{
+		"hook_event_name": "SessionEnd", "session_id": "one", "cwd": root,
+		"transcript_path": transcript, "reason": "hermes-session-end",
+	})
+	if err := runCLI(context.Background(), service, []string{"session-end", "hermes", "--defer"}, bytes.NewReader(payload), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := reconcile.Pending()
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("deferred reconciliation queue = %v, %v", paths, err)
 	}
 }

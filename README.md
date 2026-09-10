@@ -114,6 +114,8 @@ purpory model select reconcile openai gpt-4.1-mini
 purpory model select embedding openai text-embedding-3-small
 purpory embed                              # fill every missing intent/knowledge embedding
 purpory embed 100                          # optionally bound one backfill run
+purpory reconcile --executor codex         # process queued sessions with Codex
+purpory reconcile --executor claude        # process queued sessions with Claude Code
 purpory integration codex install
 purpory integration claude install
 ```
@@ -127,7 +129,9 @@ hermes config set memory.provider purpory
 ```
 
 Run Hermes from a registered Project, or set `PURPORY_ROOT` when the Hermes
-process starts elsewhere. See [`integrations/hermes`](integrations/hermes/README.md).
+process starts elsewhere. Hermes queues session-end transcripts without starting
+the reconciler; run `purpory reconcile --executor codex` (or `claude`) from its
+cron. See [`integrations/hermes`](integrations/hermes/README.md).
 
 Agent-driven graph changes use the explicitly invoked `purpory-curate` skill.
 For example, use `$purpory-curate connect the cache policy to its implementation`
@@ -149,10 +153,11 @@ becomes available again if the same ID is registered later.
 
 The integration commands run without a registered Project and install once in
 the user's global Codex or Claude configuration. They preserve existing agent
-configuration while installing prompt and session-end hooks. Session-end
-snapshots are reconciled in a detached worker; only explicit user statements may
+configuration while installing prompt and session-end hooks. Codex and Claude
+session-end snapshots are reconciled in a detached worker; Hermes defers them for
+an explicit cron-driven `reconcile` command. Only explicit user statements may
 become durable project memory. Failed jobs remain queued and are retried by the
-next worker. Git repositories are observed as one Resource with all local
+next run. Git repositories are observed as one Resource with all local
 worktrees represented as Views; non-Git folders use the same workspace model.
 Codex requires reviewing the installed user hook once with `/hooks`.
 

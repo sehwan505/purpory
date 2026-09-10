@@ -17,7 +17,7 @@ import (
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
 
-const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] [--expect-project ID] <setup|project|knowledge|remember|request|decision|review|prepare|query|explain|path|explore|embed|update|model|integration|preflight|session-end|session|version>"
+const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] [--expect-project ID] <setup|project|knowledge|remember|request|decision|review|prepare|query|explain|path|explore|embed|update|reconcile|model|integration|preflight|session-end|session|version>"
 
 func runCLI(ctx context.Context, service *product.Service, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) == 0 {
@@ -427,12 +427,15 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 		return runPreflight(ctx, service, arguments[1], input, output)
 	case "session-end":
-		if len(arguments) != 2 {
-			return errors.New("session-end requires codex, claude, or hermes")
+		if len(arguments) < 2 || len(arguments) > 3 || len(arguments) == 3 && arguments[2] != "--defer" {
+			return errors.New("session-end requires codex, claude, or hermes and optional --defer")
 		}
 		_, err := runSessionEnd(ctx, service, arguments[1], input)
 		if err != nil {
 			return err
+		}
+		if len(arguments) == 3 {
+			return nil
 		}
 		return startReconciliation()
 	case "session":
