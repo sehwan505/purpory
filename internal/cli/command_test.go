@@ -67,6 +67,12 @@ func TestReconcileExecutorOverrideIsScoped(t *testing.T) {
 	if os.Getenv("PURPORY_RECONCILE_PROVIDER") != "ollama" || os.Getenv("PURPORY_RECONCILE_MODEL") != "local-model" {
 		t.Fatal("reconcile executor override leaked into the process")
 	}
+	if err := runReconcileCommand(context.Background(), []string{"--executor", "openai-codex", "--model", "gpt-5.6-sol"}); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("PURPORY_RECONCILE_PROVIDER") != "ollama" || os.Getenv("PURPORY_RECONCILE_MODEL") != "local-model" {
+		t.Fatal("OAuth executor override leaked into the process")
+	}
 }
 
 func TestEmbedCLIBackfillsAllMissingNodes(t *testing.T) {

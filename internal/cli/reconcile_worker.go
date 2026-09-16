@@ -14,7 +14,7 @@ import (
 
 func runReconcileCommand(ctx context.Context, arguments []string) error {
 	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
-	executor := flags.String("executor", "", "codex or claude")
+	executor := flags.String("executor", "", "codex, openai-codex, or claude")
 	model := flags.String("model", "", "optional executor model")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -23,8 +23,8 @@ func runReconcileCommand(ctx context.Context, arguments []string) error {
 		return errors.New("reconcile accepts no positional arguments")
 	}
 	*executor = strings.ToLower(strings.TrimSpace(*executor))
-	if *executor != "codex" && *executor != "claude" {
-		return errors.New("reconcile requires --executor codex or claude")
+	if *executor != "codex" && *executor != "openai-codex" && *executor != "claude" {
+		return errors.New("reconcile requires --executor codex, openai-codex, or claude")
 	}
 	restoreProvider := setEnvironment("PURPORY_RECONCILE_PROVIDER", *executor)
 	defer restoreProvider()

@@ -162,6 +162,33 @@ func TestAgentReconcileProviderUsesItsConfiguredDefaultModel(t *testing.T) {
 	}
 }
 
+func TestCodexOAuthIsSeparateReconcileOnlyProvider(t *testing.T) {
+	ctx := context.Background()
+	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
+	t.Setenv("PURPORY_RECONCILE_PROVIDER", providerCodexOAuth)
+	if _, err := service.reconcileModel(ctx); err == nil || !strings.Contains(err.Error(), "select a reconcile model") {
+		t.Fatalf("missing OAuth model was accepted: %v", err)
+	}
+	t.Setenv("PURPORY_RECONCILE_PROVIDER", "")
+	if _, err := service.SelectModelProvider(ctx, "gate", providerCodexOAuth, "gpt-5.6-sol", 0, 0); err == nil {
+		t.Fatal("OAuth provider was allowed for the gate")
+	}
+	if _, err := service.SelectModelProvider(ctx, "reconcile", providerCodexOAuth, "gpt-5.6-sol", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := service.modelName(ctx, "reconcile")
+	if err != nil || selected.Provider != providerCodexOAuth || selected.Model != "gpt-5.6-sol" {
+		t.Fatalf("stored OAuth model binding = %#v %v", selected, err)
+	}
+	state, err := service.ModelState(ctx)
+	if err != nil || len(state.Providers) != 3 || state.Providers[2].ID != providerCodexOAuth || state.Providers[2].Configured {
+		t.Fatalf("OAuth provider state = %#v %v", state, err)
+	}
+	if _, err := service.ClearProviderCredential(ctx, providerCodexOAuth); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProviderEnvironmentOverridesStoredConfiguration(t *testing.T) {
 	t.Setenv(openAIEndpointEnvironment, "https://environment.example/v1")
 	t.Setenv(openAICredentialEnvironment, "environment-secret")

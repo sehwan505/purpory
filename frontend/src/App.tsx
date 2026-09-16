@@ -1,13 +1,14 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   AssignResource, ClearProviderCredential, ConfigureProvider, ConfirmMemory, ContextDecisions, ContextFeedback, ContextRequests, CreateProject, DeleteMemory, DeleteProject,
-  EmbeddingStatus, Explain, Graph, InstallModel, Memories, ModelState, NeedsReviews,
+  EmbeddingStatus, Explain, FinishCodexOAuth, Graph, InstallModel, Memories, ModelState, NeedsReviews,
   Observations, Projects, Query, ReconciliationEvents, Reconciliations, Remember, ResolveContextRequest,
-  ResolveNeedsReview, SelectModelProvider, SelectProject, StartModels, Status, SyncEmbeddings, UnassignResource,
+  ResolveNeedsReview, SelectModelProvider, SelectProject, StartCodexOAuth, StartModels, Status, SyncEmbeddings, UnassignResource,
   Update, Workspace,
 } from "../wailsjs/go/main/App";
 import type { app, graph, memory, prepare, project, reconcile } from "../wailsjs/go/models";
 import { Dropdown } from "./Dropdown";
+import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
 import { GraphView, NavIcon, NodeDetails, ProjectPicker, ReconciliationQueue, ResourceAssignments, WorkspaceAttention, WorkspaceHistory, WorkspaceTopology, reconciliationLabel, relativeTime, type Page } from "./ProjectViews";
 
 const projectPages: { id: Page; label: string; description: string }[] = [
@@ -43,6 +44,7 @@ export default function App() {
   const [explanation, setExplanation] = useState<app.ExplainResult>();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [codexDevice, setCodexDevice] = useState<{ url: string; userCode: string }>();
   const [workspaceMode, setWorkspaceMode] = useState<"current" | "history">("current");
   const [query, setQuery] = useState("");
   const [key, setKey] = useState("");
@@ -350,12 +352,31 @@ export default function App() {
     });
   }
 
-  async function clearProviderCredential() {
-    if (!window.confirm("저장된 OpenAI-compatible API key를 암호화 저장소에서 삭제할까요?")) return;
+  async function clearProviderCredential(provider: "openai" | "openai-codex") {
     await perform(async () => {
-      await ClearProviderCredential("openai");
-      setMessage("OpenAI-compatible API key를 삭제했습니다.");
+      await ClearProviderCredential(provider);
+      setMessage(`${provider} 인증 정보를 삭제했습니다.`);
       await refresh();
+    });
+  }
+
+  async function loginCodexOAuth() {
+    await perform(async () => {
+      const device = await StartCodexOAuth();
+      setCodexDevice(device);
+      try {
+        BrowserOpenURL(device.url);
+      } catch {
+        setMessage("브라우저를 열지 못했습니다. 아래 주소와 코드를 사용해 주세요.");
+      }
+      void FinishCodexOAuth().then(async () => {
+        setCodexDevice(undefined);
+        setMessage("ChatGPT Codex 로그인이 완료됐습니다.");
+        await refresh();
+      }).catch(error => {
+        setCodexDevice(undefined);
+        setMessage(errorMessage(error));
+      });
     });
   }
 
@@ -384,6 +405,7 @@ export default function App() {
   const model = modelState?.ollama;
   const providers = modelState?.providers ?? [];
   const openAI = providers.find(provider => provider.id === "openai");
+  const codexOAuth = providers.find(provider => provider.id === "openai-codex");
   const embeddingModel = modelState?.selected?.find(selected => selected.role === "embedding");
   const currentPage = pages.find(item => item.id === page)!;
   const globalPage = globalPages.some(item => item.id === page);
@@ -485,14 +507,19 @@ export default function App() {
           <section className="panel modelCard">
             <div className="cardTitle"><div><p className="eyebrow">GLOBAL SETTINGS</p><h2>AI Providers와 모델</h2></div><span className="status globalStatus">GLOBAL</span></div>
             <p className="settingsIntro">선택한 모델은 모든 Project에 적용됩니다. 구조 분석과 기본 검색은 모델 없이도 동작합니다.</p>
-            <div className="providerSummary">{providers.map(provider => <p key={provider.id}><strong>{provider.label}</strong><span className={provider.available ? "providerReady" : "providerIdle"}>{provider.available ? "연결됨" : provider.configured ? "설정됨" : "미설정"}</span><small title={provider.endpoint}>{provider.endpoint}</small>{provider.error && <em>{provider.error}</em>}</p>)}</div>
+            <div className="providerSummary">{providers.map(provider => {
+              const oauth = provider.id === "openai-codex";
+              const ready = oauth ? provider.configured : provider.available;
+              return <p key={provider.id}><strong>{oauth ? "ChatGPT Codex" : provider.label}</strong><span className={ready ? "providerReady" : "providerIdle"}>{oauth ? provider.configured ? "로그인됨" : "로그인 필요" : ready ? "연결됨" : provider.configured ? "설정됨" : "미설정"}</span>{!oauth && <small title={provider.endpoint}>{provider.endpoint}</small>}{!oauth && provider.error && <em>{provider.error}</em>}</p>;
+            })}</div>
             {openAI && <form className="providerForm" key={`${openAI.endpoint}-${openAI.endpointSource}-${openAI.credentialSource}`} onSubmit={event => void configureProvider(event)}>
               <label htmlFor="openai-endpoint">OpenAI-compatible 연결 <small>endpoint · {openAI.endpointSource} / key · {openAI.credentialSource}</small></label>
-              <div><input id="openai-endpoint" name="endpoint" type="url" defaultValue={openAI.endpoint} disabled={openAI.endpointSource === "environment"} required aria-label="OpenAI-compatible endpoint" /><input name="apiKey" type="password" autoComplete="new-password" placeholder={openAI.credentialSource === "none" ? "API key" : "기존 API key 유지"} disabled={openAI.credentialSource === "environment"} aria-label="OpenAI-compatible API key" /><button disabled={busy}>저장</button><button type="button" className="secondary" disabled={busy || openAI.credentialSource === "none" || openAI.credentialSource === "environment"} onClick={() => void clearProviderCredential()}>키 삭제</button></div>
+              <div><input id="openai-endpoint" name="endpoint" type="url" defaultValue={openAI.endpoint} disabled={openAI.endpointSource === "environment"} required aria-label="OpenAI-compatible endpoint" /><input name="apiKey" type="password" autoComplete="new-password" placeholder={openAI.credentialSource === "none" ? "API key" : "기존 API key 유지"} disabled={openAI.credentialSource === "environment"} aria-label="OpenAI-compatible API key" /><button disabled={busy}>저장</button><button type="button" className="secondary" disabled={busy || openAI.credentialSource === "none" || openAI.credentialSource === "environment"} onClick={() => void clearProviderCredential("openai")}>키 삭제</button></div>
             </form>}
+            {codexOAuth && <div className="providerForm codexOAuthForm"><div className="codexOAuthHeader"><strong>ChatGPT Codex</strong><span className={codexOAuth.configured ? "providerReady" : "providerIdle"}>{codexOAuth.configured ? "로그인됨" : "로그인 필요"}</span></div><div className="codexOAuthActions"><button type="button" disabled={busy || !!codexDevice} onClick={() => void loginCodexOAuth()}>{codexDevice ? "승인 대기 중…" : codexOAuth.configured ? "다시 로그인" : "로그인"}</button>{codexDevice && <span>인증 코드 <code>{codexDevice.userCode}</code></span>}{codexOAuth.configured && <button type="button" className="secondary" disabled={busy || !!codexDevice} onClick={() => void clearProviderCredential("openai-codex")}>로그아웃</button>}</div>{codexDevice && <p className="oauthDeviceUrl">열리지 않았다면 {codexDevice.url} 에서 코드를 입력하세요.</p>}</div>}
             <div className="modelSummary"><p><strong>{embeddingModel ? `${embeddingModel.provider}/${embeddingModel.model}` : "Embedding 모델 로드 중"}</strong><span>현재 Project Embedding {embeddingStatus?.current ?? 0}개 최신 · {embeddingStatus?.pending ?? 0}개 대기</span></p><button className="secondary" disabled={busy} onClick={() => void startModels()}>Ollama 시작</button><button disabled={busy || !status?.project.id || !embeddingModel?.model || (embeddingStatus?.pending ?? 0) === 0} onClick={() => void syncEmbeddings()}>현재 Project 동기화</button></div>
             <div className="modelRoles">{(modelState?.selected ?? []).map(selected => <form key={`${selected.role}-${selected.provider}-${selected.model}-${selected.contextTokens}-${selected.dimensions}`} onSubmit={event => void selectModel(event)}>
-              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>global · {selected.source}</small></label><div><Dropdown name="provider" ariaLabel={`${selected.role} provider`} defaultValue={selected.provider} options={providers.map(provider => ({ value: provider.id, label: provider.label }))} /><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 ID" required /><button className="secondary" disabled={busy}>선택</button></div>
+              <input type="hidden" name="role" value={selected.role} /><label htmlFor={`model-${selected.role}`}>{selected.role} <small>global · {selected.source}</small></label><div><Dropdown name="provider" ariaLabel={`${selected.role} provider`} defaultValue={selected.provider} options={providers.filter(provider => selected.role === "reconcile" || provider.id !== "openai-codex").map(provider => ({ value: provider.id, label: provider.id === "openai-codex" ? "ChatGPT Codex" : provider.label }))} /><input id={`model-${selected.role}`} name="model" defaultValue={selected.model || ""} placeholder="모델 ID" required /><button className="secondary" disabled={busy}>선택</button></div>
               <details className="modelAdvanced"><summary>고급 설정</summary><label><span>{selected.role === "embedding" ? "Embedding dimensions" : "Context window (tokens)"}</span>{selected.role === "embedding" ? <input className="modelParameter" name="dimensions" type="number" min="1" max="16384" defaultValue={selected.dimensions || 512} /> : <input className="modelParameter" name="contextTokens" type="number" min={selected.role === "reconcile" ? 8192 : 1024} max="1048576" defaultValue={selected.contextTokens || (selected.role === "gate" ? 8192 : 32768)} />}</label></details>
             </form>)}</div>
             <form className="installForm" onSubmit={event => void installModel(event)}><label htmlFor="install-model">모델 설치</label><div><input id="install-model" name="installModel" placeholder="예: qwen3:4b" required /><Dropdown name="installRole" ariaLabel="설치 후 사용할 역할" options={[{ value: "", label: "설치만" }, { value: "gate", label: "gate" }, { value: "reconcile", label: "reconcile" }, { value: "embedding", label: "embedding" }]} /><button disabled={busy}>설치</button></div></form>

@@ -480,8 +480,15 @@ func runModelProviderCommand(ctx context.Context, service *product.Service, argu
 		result, err := service.ClearProviderCredential(ctx, arguments[1])
 		return writeJSON(output, result, err)
 	}
+	if len(arguments) == 2 && arguments[0] == "login" && arguments[1] == "openai-codex" {
+		state, err := service.LoginCodexOAuth(ctx, output)
+		if err != nil {
+			return err
+		}
+		return writeJSON(output, state, nil)
+	}
 	if len(arguments) < 2 || arguments[0] != "configure" {
-		return errors.New("model provider requires status, configure, or clear-key")
+		return errors.New("model provider requires status, configure, login openai-codex, or clear-key")
 	}
 	provider := arguments[1]
 	flags := flag.NewFlagSet("model provider configure", flag.ContinueOnError)

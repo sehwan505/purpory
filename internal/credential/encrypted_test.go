@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +79,29 @@ func TestEncryptedReportsStoredCredentialWhenMasterKeyIsMissing(t *testing.T) {
 	}
 	if _, found, err := store.Get(ctx, "provider.openai.api-key"); err == nil || !found {
 		t.Fatalf("missing master key = found %v, error %v", found, err)
+	}
+}
+
+func TestEncryptedStoresLongOAuthTokenPair(t *testing.T) {
+	ctx := context.Background()
+	values := &memoryCiphertexts{values: map[string][]byte{}}
+	store, err := NewEncrypted(values, filepath.Join(t.TempDir(), "purpory.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := "provider.openai-codex.oauth"
+	tokenPair := strings.Repeat("token", 600)
+	if err := store.Set(ctx, account, tokenPair); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(values.values[account], []byte(tokenPair)) {
+		t.Fatal("OAuth tokens were stored in plaintext")
+	}
+	loaded, found, err := store.Get(ctx, account)
+	if err != nil || !found || loaded != tokenPair {
+		t.Fatalf("long OAuth credential failed to round-trip: found=%v err=%v", found, err)
+	}
+	if err := store.Set(ctx, account, strings.Repeat("x", maximumSecret+1)); err == nil {
+		t.Fatal("oversized OAuth credential was accepted")
 	}
 }
