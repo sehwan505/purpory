@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sehwan505/purpory/internal/agent"
+	"github.com/sehwan505/purpory/internal/codexoauth"
 	"github.com/sehwan505/purpory/internal/ollama"
 	"github.com/sehwan505/purpory/internal/openai"
 )
@@ -19,6 +21,7 @@ const (
 	providerOllama              = "ollama"
 	providerOpenAI              = "openai"
 	providerCodex               = "codex"
+	providerCodexOAuth          = "openai-codex"
 	providerClaude              = "claude"
 	defaultOpenAIURL            = "https://api.openai.com/v1"
 	openAIEndpointSetting       = "provider.openai.url"
@@ -129,8 +132,12 @@ func (s *Service) modelName(ctx context.Context, role string) (ModelSelection, e
 	providerOverride := strings.TrimSpace(os.Getenv(config.providerEnvironment))
 	modelOverride := strings.TrimSpace(os.Getenv(config.modelEnvironment))
 	if providerOverride != "" {
+		previousProvider := selected.Provider
 		selected.Provider = strings.ToLower(providerOverride)
 		if (selected.Provider == providerCodex || selected.Provider == providerClaude) && modelOverride == "" {
+			selected.Model = ""
+		}
+		if selected.Provider == providerCodexOAuth && previousProvider != providerCodexOAuth && modelOverride == "" {
 			selected.Model = ""
 		}
 		selected.Source = "environment"
@@ -162,8 +169,8 @@ func validateModelSelection(selected ModelSelection, requireModel bool) error {
 		return errors.New("select model: role must be gate, reconcile, or embedding")
 	}
 	if selected.Provider != providerOllama && selected.Provider != providerOpenAI {
-		if selected.Role != "reconcile" || selected.Provider != providerCodex && selected.Provider != providerClaude {
-			return errors.New("select model: provider must be ollama or openai, or codex or claude for reconcile")
+		if selected.Role != "reconcile" || selected.Provider != providerCodex && selected.Provider != providerClaude && selected.Provider != providerCodexOAuth {
+			return errors.New("select model: provider must be ollama or openai, or codex, openai-codex, or claude for reconcile")
 		}
 	}
 	if len(selected.Model) > 255 || requireModel && strings.TrimSpace(selected.Model) == "" && selected.Provider != providerCodex && selected.Provider != providerClaude {
@@ -184,6 +191,7 @@ func validateModelSelection(selected ModelSelection, requireModel bool) error {
 func (s *Service) ModelState(ctx context.Context) (ModelState, error) {
 	ollamaStatus := s.ollama.Status(ctx)
 	openAIState := s.openAIState(ctx)
+	codexOAuthState := s.codexOAuthState(ctx)
 	ollamaEndpointSource := "default"
 	if strings.TrimSpace(os.Getenv("PURPORY_OLLAMA_URL")) != "" {
 		ollamaEndpointSource = "environment"
@@ -193,6 +201,7 @@ func (s *Service) ModelState(ctx context.Context) (ModelState, error) {
 		Providers: []ProviderState{
 			{ID: providerOllama, Label: "Ollama", Configured: true, Available: ollamaStatus.Available, Endpoint: s.ollamaURL, EndpointSource: ollamaEndpointSource, CredentialSource: "none", Error: ollamaStatus.Error},
 			openAIState,
+			codexOAuthState,
 		},
 	}
 	for _, role := range []string{"gate", "reconcile", "embedding"} {
@@ -251,6 +260,8 @@ func (s *Service) generator(ctx context.Context, provider string) (structuredGen
 		return s.openAIClient(ctx)
 	case providerCodex, providerClaude:
 		return agent.New(provider)
+	case providerCodexOAuth:
+		return codexoauth.New(s.credentials), nil
 	default:
 		return nil, fmt.Errorf("configure model: unknown provider %q", provider)
 	}
@@ -327,8 +338,14 @@ func (s *Service) ConfigureProvider(ctx context.Context, provider, endpoint, api
 }
 
 func (s *Service) ClearProviderCredential(ctx context.Context, provider string) (ProviderState, error) {
+	if strings.ToLower(strings.TrimSpace(provider)) == providerCodexOAuth {
+		if err := codexoauth.New(s.credentials).Clear(ctx); err != nil {
+			return ProviderState{}, err
+		}
+		return s.codexOAuthState(ctx), nil
+	}
 	if strings.ToLower(strings.TrimSpace(provider)) != providerOpenAI {
-		return ProviderState{}, errors.New("clear provider credential: provider must be openai")
+		return ProviderState{}, errors.New("clear provider credential: provider must be openai or openai-codex")
 	}
 	if strings.TrimSpace(os.Getenv(openAICredentialEnvironment)) != "" {
 		return ProviderState{}, fmt.Errorf("clear provider credential: credential is controlled by %s", openAICredentialEnvironment)
@@ -338,6 +355,40 @@ func (s *Service) ClearProviderCredential(ctx context.Context, provider string) 
 	}
 	s.refreshGate(ctx)
 	return s.openAIState(ctx), nil
+}
+
+func (s *Service) LoginCodexOAuth(ctx context.Context, output io.Writer) (ProviderState, error) {
+	if err := codexoauth.New(s.credentials).Login(ctx, output); err != nil {
+		return ProviderState{}, err
+	}
+	return s.codexOAuthState(ctx), nil
+}
+
+func (s *Service) StartCodexOAuth(ctx context.Context) (codexoauth.DeviceCode, error) {
+	return codexoauth.New(s.credentials).Start(ctx)
+}
+
+func (s *Service) FinishCodexOAuth(ctx context.Context, device codexoauth.DeviceCode) (ProviderState, error) {
+	if err := codexoauth.New(s.credentials).Finish(ctx, device); err != nil {
+		return ProviderState{}, err
+	}
+	return s.codexOAuthState(ctx), nil
+}
+
+func (s *Service) codexOAuthState(ctx context.Context) ProviderState {
+	state := ProviderState{ID: providerCodexOAuth, Label: "ChatGPT Codex OAuth", Endpoint: "https://chatgpt.com/backend-api/codex", EndpointSource: "default", CredentialSource: "none"}
+	configured, err := codexoauth.New(s.credentials).Configured(ctx)
+	if err != nil {
+		state.Error = err.Error()
+		return state
+	}
+	state.Configured = configured
+	if configured {
+		state.CredentialSource = "database"
+	} else {
+		state.Error = "sign in from Settings or run `purpory model provider login openai-codex`"
+	}
+	return state
 }
 
 func (s *Service) openAIClient(ctx context.Context) (*openai.Client, error) {

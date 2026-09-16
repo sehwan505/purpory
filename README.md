@@ -115,6 +115,8 @@ purpory model select embedding openai text-embedding-3-small
 purpory embed                              # fill every missing intent/knowledge embedding
 purpory embed 100                          # optionally bound one backfill run
 purpory reconcile --executor codex         # process queued sessions with Codex
+purpory model provider login openai-codex  # separate ChatGPT device-code OAuth session
+purpory reconcile --executor openai-codex --model gpt-5.6-sol # without Codex CLI
 purpory reconcile --executor claude        # process queued sessions with Claude Code
 purpory integration codex install
 purpory integration claude install
@@ -130,8 +132,17 @@ hermes config set memory.provider purpory
 
 Run Hermes from a registered Project, or set `PURPORY_ROOT` when the Hermes
 process starts elsewhere. Hermes queues session-end transcripts without starting
-the reconciler; run `purpory reconcile --executor codex` (or `claude`) from its
-cron. See [`integrations/hermes`](integrations/hermes/README.md).
+the reconciler; run `purpory reconcile --executor codex`, `openai-codex`, or
+`claude` from its cron. See [`integrations/hermes`](integrations/hermes/README.md).
+
+`openai-codex` keeps its own encrypted OAuth tokens in Purpory's global database,
+separate from Codex CLI. It calls the ChatGPT Codex backend directly rather than
+the documented OpenAI Platform API, so that backend's compatibility is our
+responsibility. Sign in once with `purpory model provider login openai-codex`;
+the CLI opens the device page in your default browser and also prints the URL
+and code for headless environments. The desktop app's Settings page can also
+start the login and opens the browser immediately. Then select a reconcile model or pass
+`--model` to the cron command.
 
 Agent-driven graph changes use the explicitly invoked `purpory-curate` skill.
 For example, use `$purpory-curate connect the cache policy to its implementation`

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	product "github.com/sehwan505/purpory/internal/app"
+	"github.com/sehwan505/purpory/internal/codexoauth"
 	"github.com/sehwan505/purpory/internal/memory"
 	"github.com/sehwan505/purpory/internal/ollama"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
@@ -15,9 +17,11 @@ import (
 )
 
 type App struct {
-	ctx     context.Context
-	service *product.Service
-	mu      sync.RWMutex
+	ctx            context.Context
+	service        *product.Service
+	mu             sync.RWMutex
+	oauthPending   *codexoauth.DeviceCode
+	oauthFinishing bool
 }
 
 func NewApp(service *product.Service) *App {
@@ -194,6 +198,37 @@ func (a *App) ClearProviderCredential(provider string) (product.ProviderState, e
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.service.ClearProviderCredential(a.ctx, provider)
+}
+
+func (a *App) StartCodexOAuth() (codexoauth.DeviceCode, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.oauthPending != nil {
+		return codexoauth.DeviceCode{}, errors.New("Codex login is already waiting for approval")
+	}
+	device, err := a.service.StartCodexOAuth(a.ctx)
+	if err == nil {
+		a.oauthPending = &device
+	}
+	return device, err
+}
+
+func (a *App) FinishCodexOAuth() (product.ProviderState, error) {
+	a.mu.Lock()
+	if a.oauthPending == nil || a.oauthFinishing {
+		a.mu.Unlock()
+		return product.ProviderState{}, errors.New("Codex login has no pending device code")
+	}
+	device := *a.oauthPending
+	a.oauthFinishing = true
+	a.mu.Unlock()
+
+	state, err := a.service.FinishCodexOAuth(a.ctx, device)
+	a.mu.Lock()
+	a.oauthPending = nil
+	a.oauthFinishing = false
+	a.mu.Unlock()
+	return state, err
 }
 
 func (a *App) InstallModel(model, role string) (product.ModelSelection, error) {

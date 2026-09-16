@@ -342,6 +342,9 @@ func (s *Service) reconcileModel(ctx context.Context) (providerReconcileModel, e
 	if err != nil {
 		return providerReconcileModel{}, err
 	}
+	if selected.Provider == providerCodexOAuth && selected.Model == "" {
+		return providerReconcileModel{}, errors.New("configure openai-codex: select a reconcile model or pass --model")
+	}
 	generator, err := s.generator(ctx, selected.Provider)
 	if err != nil {
 		return providerReconcileModel{}, err

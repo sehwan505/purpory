@@ -17,7 +17,7 @@ import (
 const (
 	formatVersion = byte(1)
 	keySize       = 32
-	maximumSecret = 2_048
+	maximumSecret = 8_192
 )
 
 type ciphertextStore interface {
@@ -61,7 +61,7 @@ func (e *Encrypted) Get(ctx context.Context, account string) (string, bool, erro
 func (e *Encrypted) Set(ctx context.Context, account, value string) error {
 	account, value = strings.TrimSpace(account), strings.TrimSpace(value)
 	if account == "" || value == "" || len(value) > maximumSecret {
-		return errors.New("save credential: account and a value up to 2048 characters are required")
+		return errors.New("save credential: account and a value up to 8192 characters are required")
 	}
 	key, err := loadOrCreateKey(e.keyPath)
 	if err != nil {
