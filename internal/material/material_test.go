@@ -3,6 +3,7 @@ package material
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -59,5 +60,45 @@ func TestDiscoverAndDiff(t *testing.T) {
 func TestPathRejectsEscapes(t *testing.T) {
 	if _, err := Path(t.TempDir(), Material{URI: "file:../secret"}); err == nil {
 		t.Fatal("escaping material URI was accepted")
+	}
+}
+
+func TestDiscoverGitUsesGitIgnoreRules(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	root := t.TempDir()
+	if output, err := exec.Command("git", "init", "--quiet", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s: %v", output, err)
+	}
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".gitignore", "ignored.txt\ncache/\nnested/*.tmp\n!nested/keep.tmp\n")
+	write("README.md", "kept")
+	write("ignored.txt", "ignored")
+	write("cache/data.txt", "ignored")
+	write("nested/drop.tmp", "ignored")
+	write("nested/keep.tmp", "kept")
+
+	materials, err := DiscoverGit(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"file:.gitignore", "file:README.md", "file:nested/keep.tmp"}
+	if len(materials) != len(want) {
+		t.Fatalf("unexpected materials: %#v", materials)
+	}
+	for index := range want {
+		if materials[index].URI != want[index] {
+			t.Fatalf("material %d = %q, want %q", index, materials[index].URI, want[index])
+		}
 	}
 }

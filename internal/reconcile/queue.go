@@ -161,6 +161,9 @@ func Process(jobPath string, reconcile func(Job) error) error {
 	if err != nil {
 		return err
 	}
+	if job.Phase == PhaseFailed {
+		return nil
+	}
 	if err := SetPhase(jobPath, PhaseRunning, ""); err != nil {
 		return err
 	}
@@ -215,17 +218,26 @@ func Runs(projectID string, limit int) ([]Run, error) {
 	if projectID == "" {
 		return nil, errors.New("list reconciliations: project is required")
 	}
+	return runs(projectID, limit)
+}
+
+// Queue returns recent jobs across projects for queue administration.
+func Queue(limit int) ([]Run, error) {
+	return runs("", limit)
+}
+
+func runs(projectID string, limit int) ([]Run, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	pending, err := Pending()
+	pending, err := jobPaths()
 	if err != nil {
 		return nil, err
 	}
 	var runs []Run
 	for _, path := range pending {
 		job, err := LoadJob(path)
-		if err != nil || job.ProjectID != projectID {
+		if err != nil || projectID != "" && job.ProjectID != projectID {
 			continue
 		}
 		phase := job.Phase
@@ -249,7 +261,7 @@ func Runs(projectID string, limit int) ([]Run, error) {
 			continue
 		}
 		var completed completedJob
-		if json.Unmarshal(content, &completed) != nil || completed.Job.ProjectID != projectID {
+		if json.Unmarshal(content, &completed) != nil || projectID != "" && completed.Job.ProjectID != projectID {
 			continue
 		}
 		runs = append(runs, run(completed.Job, PhaseCompleted, completed.CompletedAt))
@@ -281,6 +293,22 @@ func validPhase(phase string) bool {
 }
 
 func Pending() ([]string, error) {
+	paths, err := jobPaths()
+	if err != nil {
+		return nil, err
+	}
+	result := paths[:0]
+	for _, path := range paths {
+		job, err := LoadJob(path)
+		if err == nil && job.Phase == PhaseFailed {
+			continue
+		}
+		result = append(result, path)
+	}
+	return result, nil
+}
+
+func jobPaths() ([]string, error) {
 	pending, err := queueDirectory("pending")
 	if err != nil {
 		return nil, err
@@ -296,6 +324,124 @@ func Pending() ([]string, error) {
 		}
 	}
 	return result, nil
+}
+
+// Retry moves one failed job back to the active queue.
+func Retry(id string) error {
+	path, err := pathForJob(id)
+	if err != nil {
+		return err
+	}
+	job, err := LoadJob(path)
+	if err != nil {
+		return err
+	}
+	if job.ID != id || job.Phase != PhaseFailed {
+		return errors.New("retry reconciliation job: job is not failed")
+	}
+	job.Phase, job.Detail, job.UpdatedAt = PhaseQueued, "", time.Now().Unix()
+	if err := atomicJSON(path, job); err != nil {
+		return err
+	}
+	return cleanup(strings.TrimSuffix(path, ".json") + ".error.json")
+}
+
+// Discard removes one failed job and its private transcript snapshot.
+func Discard(id string) error {
+	path, err := pathForJob(id)
+	if err != nil {
+		return err
+	}
+	job, err := LoadJob(path)
+	if err != nil {
+		return err
+	}
+	if job.ID != id || job.Phase != PhaseFailed {
+		return errors.New("discard reconciliation job: job is not failed")
+	}
+	return cleanup(job.TranscriptPath, strings.TrimSuffix(path, ".json")+".error.json", path+".lock", path)
+}
+
+func DiscardFailed() (int, error) {
+	paths, err := jobPaths()
+	if err != nil {
+		return 0, err
+	}
+	discarded := 0
+	for _, path := range paths {
+		job, err := LoadJob(path)
+		if err != nil || job.Phase != PhaseFailed {
+			continue
+		}
+		if err := Discard(job.ID); err != nil {
+			return discarded, err
+		}
+		discarded++
+	}
+	return discarded, nil
+}
+
+// PruneCompleted keeps the newest completed jobs for each project.
+func PruneCompleted(keep int) (int, error) {
+	if keep <= 0 {
+		return 0, errors.New("prune completed reconciliations: keep must be positive")
+	}
+	completed, err := queueDirectory("completed")
+	if err != nil {
+		return 0, err
+	}
+	paths, err := filepath.Glob(filepath.Join(completed, "*.json"))
+	if err != nil {
+		return 0, fmt.Errorf("prune completed reconciliations: %w", err)
+	}
+	type marker struct {
+		path string
+		at   int64
+	}
+	byProject := map[string][]marker{}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var completed completedJob
+		if json.Unmarshal(content, &completed) != nil || completed.Job.ProjectID == "" {
+			continue
+		}
+		byProject[completed.Job.ProjectID] = append(byProject[completed.Job.ProjectID], marker{path: path, at: completed.CompletedAt})
+	}
+	removed := 0
+	for _, markers := range byProject {
+		if len(markers) <= keep {
+			continue
+		}
+		sort.Slice(markers, func(i, j int) bool {
+			if markers[i].at != markers[j].at {
+				return markers[i].at > markers[j].at
+			}
+			return markers[i].path > markers[j].path
+		})
+		for _, marker := range markers[keep:] {
+			if err := os.Remove(marker.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return removed, fmt.Errorf("prune completed reconciliations: %w", err)
+			}
+			removed++
+		}
+	}
+	return removed, nil
+}
+
+func pathForJob(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	decoded, err := hex.DecodeString(id)
+	if err != nil || len(decoded) != sha256.Size || id != strings.ToLower(id) {
+		return "", errors.New("reconciliation job ID must be 64 lowercase hexadecimal characters")
+	}
+	pending, err := queueDirectory("pending")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(pending, id+".json"), nil
 }
 
 // Reject preserves an unreadable job while keeping it out of the retry queue.

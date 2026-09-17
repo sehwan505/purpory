@@ -66,8 +66,12 @@ func saveMemory(ctx context.Context, database databaseRunner, value memory.Memor
 		return SaveResult{}, fmt.Errorf("save memory: upsert: %w", err)
 	}
 	if currentKind != "" && memory.Kind(currentKind).NodeKind() != value.Kind.NodeKind() {
-		if _, err := database.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?`, value.ProjectID, memory.Kind(currentKind).NodeKind(), value.Key); err != nil {
+		oldNodeID := graph.ReferenceID(memory.Kind(currentKind).NodeKind(), value.Key)
+		if _, err := database.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND id = ?`, value.ProjectID, oldNodeID); err != nil {
 			return SaveResult{}, fmt.Errorf("save memory: replace graph kind: %w", err)
+		}
+		if _, err := database.ExecContext(ctx, `DELETE FROM embeddings WHERE project_id = ? AND node_id = ?`, value.ProjectID, oldNodeID); err != nil {
+			return SaveResult{}, fmt.Errorf("save memory: replace embedding kind: %w", err)
 		}
 	}
 	if err := upsertMemoryNode(ctx, database, value); err != nil {
@@ -108,8 +112,8 @@ func upsertMemoryNode(ctx context.Context, database databaseRunner, value memory
 }
 
 func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposals []MemoryProposal) ([]SaveResult, error) {
-	if strings.TrimSpace(sessionID) == "" || len(proposals) == 0 || len(proposals) > 20 {
-		return nil, errors.New("reconcile memory: session and 1-20 proposals are required")
+	if strings.TrimSpace(sessionID) == "" || len(proposals) == 0 {
+		return nil, errors.New("reconcile memory: session and proposals are required")
 	}
 	projectID := proposals[0].Memory.ProjectID
 	seen := map[string]bool{}
