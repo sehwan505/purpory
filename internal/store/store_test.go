@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +52,92 @@ func TestOpenReadOnly(t *testing.T) {
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Fatalf("missing database was created: %v", err)
+	}
+}
+
+func TestMaintainRemovesOnlyOrphanEmbeddings(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	current := project.Project{ID: "demo", Name: "Demo", Root: "/demo"}
+	if err := database.SaveProject(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	value := "Keep this memory."
+	entry, err := memory.New(current.ID, "intent.keep", memory.Decision, &value, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SaveMemory(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveEmbedding(ctx, current.ID, graph.ReferenceID(graph.KindIntent, entry.Key), entry.Hash, "test", []float64{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveEmbedding(ctx, current.ID, "knowledge:gone", "gone", "test", []float64{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveSession(ctx, current.ID, "", "hermes:history", "hermes", "ended"); err != nil {
+		t.Fatal(err)
+	}
+	navigation := make([]contextprepare.NavigationEvent, 105)
+	var reviewedVersionID int64
+	for index := range navigation {
+		updated := fmt.Sprintf("Keep this memory, revision %d.", index+1)
+		version, err := memory.New(current.ID, entry.Key, memory.Decision, &updated, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved, err := database.SaveMemory(ctx, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 {
+			reviewedVersionID = saved.VersionID
+		}
+		if _, err := database.db.ExecContext(ctx, `INSERT INTO reconciliation_events(project_id, session_id, changes_json) VALUES (?, ?, '{}')`, current.ID, "hermes:history"); err != nil {
+			t.Fatal(err)
+		}
+		navigation[index] = contextprepare.NavigationEvent{Action: "query", TargetNodeID: graph.ReferenceID(graph.KindIntent, entry.Key)}
+	}
+	if err := database.AppendNavigation(ctx, current.ID, "hermes:history", navigation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO needs_reviews(project_id, key, status, source_type, source_id, content_hash, reason, outcome, result_version_id, resolved_at)
+		VALUES (?, ?, 'resolved', 'test', 'history', 'reviewed', 'retain reviewed revision', 'keep', ?, unixepoch())
+	`, current.ID, entry.Key, reviewedVersionID); err != nil {
+		t.Fatal(err)
+	}
+
+	const historyLimit = 100
+	result, err := database.Maintain(ctx, historyLimit)
+	if err != nil || result.OrphanEmbeddings != 1 || result.PrunedMemoryVersions != 5 || result.PrunedReconciliationEvents != 5 || result.PrunedNavigationEvents != 5 || result.BytesBefore <= 0 || result.BytesAfter <= 0 {
+		t.Fatalf("maintenance = %#v, %v", result, err)
+	}
+	embeddings, err := database.Embeddings(ctx, current.ID, "test")
+	if err != nil || len(embeddings) != 1 || embeddings[0].NodeID != graph.ReferenceID(graph.KindIntent, entry.Key) {
+		t.Fatalf("embeddings after maintenance = %#v, %v", embeddings, err)
+	}
+	versions, err := database.MemoryVersions(ctx, current.ID, entry.Key)
+	if err != nil || len(versions) != historyLimit+1 || versions[0].Value == nil || *versions[0].Value != "Keep this memory, revision 105." || versions[len(versions)-1].Value == nil || *versions[len(versions)-1].Value != value {
+		t.Fatalf("versions after maintenance = %d, %v", len(versions), err)
+	}
+	reviewedFound := false
+	for _, version := range versions {
+		reviewedFound = reviewedFound || version.ID == reviewedVersionID
+	}
+	if !reviewedFound {
+		t.Fatal("reviewed memory version was pruned")
+	}
+	if events, err := database.ReconciliationEvents(ctx, current.ID); err != nil || len(events) != historyLimit {
+		t.Fatalf("reconciliation events after maintenance = %d, %v", len(events), err)
+	}
+	if events, err := database.Navigation(ctx, current.ID, "hermes:history", historyLimit); err != nil || len(events) != historyLimit {
+		t.Fatalf("navigation events after maintenance = %d, %v", len(events), err)
 	}
 }
 
@@ -575,6 +662,48 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 	events, err := database.ReconciliationEvents(ctx, current.ID)
 	if err != nil || len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].After.Value == nil || *events[0].Changes[0].After.Value != value || len(events[0].Changes[0].EvidenceRefs) != 1 || events[0].Changes[0].EvidenceRefs[0].EndByte != len(value) || len(events[0].Changes[0].ContextRefs) != 1 || events[0].Changes[0].ContextRefs[0].PartID != "A000001P001" || len(events[0].Links) != 2 || events[0].Links[0].Relation != graph.RelationRealizedBy || events[0].Links[1].Relation != graph.RelationDependsOn || events[0].Links[1].EvidenceIDs[0] != "U000001" || len(events[0].Links[1].EvidenceRefs) != 1 || len(events[0].Links[1].ContextRefs) != 1 {
 		t.Fatalf("reconciliation provenance missing: %#v %v", events, err)
+	}
+}
+
+func TestReconcileMemoriesKeepsLargeLinkedSessionAtomic(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	current := project.Project{ID: "demo", Name: "Demo", Root: "/demo"}
+	if err := database.SaveProject(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveSession(ctx, current.ID, "", "hermes:large", "hermes", "ended"); err != nil {
+		t.Fatal(err)
+	}
+
+	proposals := make([]MemoryProposal, 21)
+	for index := range proposals {
+		key := fmt.Sprintf("intent.large-%02d", index)
+		value := fmt.Sprintf("Large transcript intent %d.", index)
+		entry, err := memory.New(current.ID, key, memory.Decision, &value, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposals[index] = MemoryProposal{Memory: entry}
+	}
+	evidence := []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: "Large transcript intent 0.", EndByte: len("Large transcript intent 0.")}}
+	link := graph.Link{SourceKind: graph.KindIntent, SourceRef: proposals[0].Memory.Key, Relation: graph.RelationDependsOn, TargetKind: graph.KindIntent, TargetRef: proposals[20].Memory.Key}
+	proposals[0].EvidenceIDs = []string{"U000001"}
+	proposals[0].EvidenceRefs = evidence
+	proposals[0].Links = []graph.Link{link}
+	proposals[0].LinkEvidence = map[graph.Link][]memory.EvidenceRef{link: evidence}
+
+	results, err := database.ReconcileMemories(ctx, "hermes:large", proposals)
+	if err != nil || len(results) != len(proposals) {
+		t.Fatalf("large reconciliation = %d results, %v", len(results), err)
+	}
+	_, edges, err := database.Graph(ctx, current.ID)
+	if err != nil || len(edges) != 1 || edges[0].SourceID != graph.ReferenceID(graph.KindIntent, proposals[0].Memory.Key) || edges[0].TargetID != graph.ReferenceID(graph.KindIntent, proposals[20].Memory.Key) {
+		t.Fatalf("same-session link missing: %#v %v", edges, err)
 	}
 }
 

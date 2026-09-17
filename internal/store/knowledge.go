@@ -339,6 +339,15 @@ func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, material
 			return fmt.Errorf("replace knowledge: insert edge: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM embeddings
+		WHERE project_id = ? AND NOT EXISTS (
+			SELECT 1 FROM nodes
+			WHERE nodes.project_id = embeddings.project_id AND nodes.id = embeddings.node_id
+		)
+	`, projectID); err != nil {
+		return fmt.Errorf("replace knowledge: remove orphan embeddings: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("replace knowledge: commit: %w", err)
 	}

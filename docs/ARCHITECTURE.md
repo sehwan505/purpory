@@ -81,16 +81,19 @@ Directories are added only when their first behavior is implemented.
   A detached worker treats the transcript as untrusted, accepts only memory
   grounded in exact excerpts of explicit user statements, and may use only the
   exact assistant excerpt that a later user statement adopts as context. Both
-  excerpts retain their part ID and byte interval. It applies at most 20 memories
-  per atomic batch with optimistic concurrency and records an audit event. Failed
-  jobs remain available for retry.
+  excerpts retain their part ID and byte interval. It applies every candidate
+  from one session in one atomic transaction with optimistic concurrency and
+  records an audit event. Reconciliation reads the last committed Material
+  snapshot rather than running a project-wide update. Failed jobs are terminal
+  until an explicit retry or discard.
 - A Material may be a document, source file, note, media item, conversation,
   external reference, or a future input. Core retrieval never requires code,
   Git, a programming language, or a code graph.
 - `update` discovers one available View per assigned Resource, namespaces equal
   relative paths by Resource, reuses facts from unchanged Materials, resolves
   relationships across the combined Project snapshot, and commits Materials,
-  facts, claims, and relations in one SQLite transaction.
+  facts, claims, and relations in one SQLite transaction. Git Resources use
+  Git's standard ignore rules, including nested `.gitignore` files.
 - `nodes` and `edges` are the one physical project graph. `kind` identifies
   Intent, Material, Knowledge, and Reference; `subkind` carries adapter details.
   `owner` separates durable and observed lifecycles, while `state` keeps missing
@@ -119,6 +122,13 @@ Directories are added only when their first behavior is implemented.
   changes and the canonical graph remains free of Workspace topology.
 - Model assistance is optional. Structural indexing and stored-memory queries
   continue to work when every provider is absent.
+- Explicit `maintenance` bounds repeated operational history at 100 entries per
+  owning scope. Memory history keeps the original plus the 99 newest revisions;
+  revisions referenced by review outcomes are never pruned. Reconciliation,
+  navigation, and completed-job history keep the newest 100 per Project,
+  Session, and Project respectively. It also removes embeddings whose graph
+  nodes no longer exist and runs SQLite `VACUUM`. Normal node-removal paths
+  remove embedding orphans as part of their existing transaction.
 - Gate, reconciliation, and embedding are independent global role bindings. Each
   binding names a provider and model plus its relevant context or dimension
   limit. Provider adapters satisfy small interfaces owned by `app`; local model
@@ -180,5 +190,11 @@ needs completion or embeddings. A second persistence backend is not planned; it
 earns an interface only when a supported use case exists. A new Material format
 adds extraction behavior without changing discovery, storage, retrieval, or UI
 packages. Source-code formats may share language-aware resolution internally.
-Provider boundaries and the first-external-source adaptation path are defined in
-[Graph Lifecycle Plan](GRAPH_LIFECYCLE_PLAN.md#범용성-계약).
+
+Provider is not one shared abstraction. Workspace observers, Material sources,
+transcript decoders, and model adapters have independent contracts because they
+own different trust and lifecycle boundaries. A new Material source normalizes
+provider data into a stable URI, media type, change identity, and bounded content
+stream; its adapter owns authentication, pagination, retries, and URI decoding.
+The core never parses provider-specific URIs or grants an adapter authority to
+create durable Intent.

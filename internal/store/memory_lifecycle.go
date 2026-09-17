@@ -44,6 +44,9 @@ func deleteMemory(ctx context.Context, database databaseRunner, projectID, key s
 	if _, err := database.ExecContext(ctx, `DELETE FROM nodes WHERE project_id = ? AND id = ?`, projectID, graph.ReferenceID(kind.NodeKind(), key)); err != nil {
 		return false, fmt.Errorf("delete memory: graph node: %w", err)
 	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM embeddings WHERE project_id = ? AND node_id = ?`, projectID, graph.ReferenceID(kind.NodeKind(), key)); err != nil {
+		return false, fmt.Errorf("delete memory: embedding: %w", err)
+	}
 	if _, err := database.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND key = ?`, projectID, key); err != nil {
 		return false, fmt.Errorf("delete memory: record: %w", err)
 	}

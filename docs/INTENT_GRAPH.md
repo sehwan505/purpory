@@ -1,7 +1,6 @@
 # Intent-evidence memory graph
 
-단계별 구현과 지속 관리 계약은 [그래프 수명주기 계획](GRAPH_LIFECYCLE_PLAN.md)에
-정리되어 있다.
+전체 제품 경계와 지속 관리 계약은 [Architecture](ARCHITECTURE.md)에 정리되어 있다.
 
 ## Objective
 
@@ -23,7 +22,7 @@ that observed output can rewrite human intent.
    evidence. Rejected.
 4. Require manual links. This is precise but cannot support autonomous operation.
    Retained only as an override path through the durable link store.
-5. At session end, refresh observed Materials, reconcile explicit user intent,
+5. At session end, read the last committed Materials and reconcile explicit user intent,
    and let the reconciliation model select typed relationships only to bounded
    existing Intent candidates and transcript-mentioned targets from an
    existence-checked Material catalog.

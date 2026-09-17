@@ -33,7 +33,7 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 		return 0
 	}
 	if len(config.Args) > 0 && config.Args[0] == "reconcile" {
-		if err := runReconcileCommand(context.Background(), config.Args[1:]); err != nil {
+		if err := runReconcileCommand(context.Background(), config.Args[1:], output); err != nil {
 			fmt.Fprintf(errorOutput, "purpory: %v\n", err)
 			return 1
 		}
@@ -63,6 +63,21 @@ func Run(arguments []string, input io.Reader, output, errorOutput io.Writer) int
 	}
 	if len(config.Args) > 0 && config.Args[0] == "integration" {
 		if err := runIntegrationCommand(config.Args[1:], output); err != nil {
+			fmt.Fprintf(errorOutput, "purpory: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if len(config.Args) > 0 && config.Args[0] == "maintenance" {
+		if len(config.Args) != 1 {
+			fmt.Fprintln(errorOutput, "purpory: maintenance accepts no arguments")
+			return 2
+		}
+		result, err := product.Maintain(context.Background(), config.DBPath)
+		if err == nil {
+			err = writeJSON(output, result, nil)
+		}
+		if err != nil {
 			fmt.Fprintf(errorOutput, "purpory: %v\n", err)
 			return 1
 		}
@@ -124,13 +139,13 @@ func validateExpectedProject(config launch.Config) error {
 		return errors.New("--expect-project cannot be combined with --project or PURPORY_PROJECT_ID")
 	}
 	if len(config.Args) == 0 {
-		return errors.New("--expect-project requires knowledge, remember, query, or explain")
+		return errors.New("--expect-project requires remember, query, or explain")
 	}
 	switch config.Args[0] {
-	case "knowledge", "remember", "query", "explain":
+	case "remember", "query", "explain":
 		return nil
 	default:
-		return errors.New("--expect-project supports only knowledge, remember, query, and explain")
+		return errors.New("--expect-project supports only remember, query, and explain")
 	}
 }
 

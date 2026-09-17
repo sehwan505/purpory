@@ -118,6 +118,11 @@ purpory reconcile --executor codex         # process queued sessions with Codex
 purpory model provider login openai-codex  # separate ChatGPT device-code OAuth session
 purpory reconcile --executor openai-codex --model gpt-5.6-sol # without Codex CLI
 purpory reconcile --executor claude        # process queued sessions with Claude Code
+purpory reconcile list                     # inspect active, failed, and recent jobs
+purpory reconcile retry JOB_ID             # explicitly requeue one failed job
+purpory reconcile discard JOB_ID           # remove one failed job and its snapshot
+purpory reconcile discard --failed         # remove every failed job and snapshot
+purpory maintenance                        # prune bounded history/orphan vectors and VACUUM SQLite
 purpory integration codex install
 purpory integration claude install
 ```
@@ -167,15 +172,25 @@ the user's global Codex or Claude configuration. They preserve existing agent
 configuration while installing prompt and session-end hooks. Codex and Claude
 session-end snapshots are reconciled in a detached worker; Hermes defers them for
 an explicit cron-driven `reconcile` command. Only explicit user statements may
-become durable project memory. Failed jobs remain queued and are retried by the
-next run. Git repositories are observed as one Resource with all local
-worktrees represented as Views; non-Git folders use the same workspace model.
+become durable project memory. Reconciliation uses the last committed Material
+snapshot, so it never triggers a project-wide update. Failed jobs remain visible
+but are retried only with `reconcile retry`. Git repositories are observed as one
+Resource with all local worktrees represented as Views; indexing honors Git's
+standard ignore rules. Non-Git folders use the same workspace model.
 Codex requires reviewing the installed user hook once with `/hooks`.
 
 `purpory update` discovers all local Materials, fingerprints them, extracts only
 new or changed inputs, resolves project-wide relationships, and publishes the
 new knowledge snapshot atomically. The desktop reads committed state when opened
 or focused and only runs an update when the user explicitly requests one.
+
+Run `purpory maintenance` periodically after a regular `update`—weekly is a
+reasonable default, rather than after every reconcile. It keeps each memory's
+original version plus its 99 newest revisions (and any revision referenced by a
+review), the newest 100 reconciliation events per Project, the newest 100
+navigation events per Session, and the newest 100 completed reconcile markers
+per Project. It also deletes embeddings without a matching graph node and
+compacts SQLite with `VACUUM`.
 
 Data is stored in `~/.purpory/purpory.db`. Set `PURPORY_DATABASE` to use another
 database and `PURPORY_OLLAMA_URL` to use a non-default Ollama endpoint.

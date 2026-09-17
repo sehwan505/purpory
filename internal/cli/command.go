@@ -17,7 +17,7 @@ import (
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
 
-const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] [--expect-project ID] <setup|project|knowledge|remember|request|decision|review|prepare|query|explain|path|explore|embed|update|reconcile|model|integration|preflight|session-end|session|version>"
+const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] [--expect-project ID] <setup|project|remember|request|decision|review|prepare|query|explain|path|explore|embed|update|reconcile|maintenance|model|integration|preflight|session-end|session|version>"
 
 func runCLI(ctx context.Context, service *product.Service, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) == 0 {
@@ -25,8 +25,6 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 	}
 	command := arguments[0]
 	switch command {
-	case "knowledge":
-		return runKnowledgeCommand(ctx, service, arguments[1:], output)
 	case "remember":
 		flags := flag.NewFlagSet(command, flag.ContinueOnError)
 		flags.SetOutput(output)
@@ -517,50 +515,6 @@ func runModelProviderCommand(ctx context.Context, service *product.Service, argu
 	}
 	result, err := service.ConfigureProvider(ctx, provider, *endpoint, apiKey)
 	return writeJSON(output, result, err)
-}
-
-func runKnowledgeCommand(ctx context.Context, service *product.Service, arguments []string, output io.Writer) error {
-	if len(arguments) == 3 && arguments[0] == "set" {
-		value := arguments[2]
-		result, err := service.Remember(ctx, arguments[1], memory.Note, &value, nil)
-		return writeJSON(output, result, err)
-	}
-	if len(arguments) == 2 && arguments[0] == "get" {
-		result, err := service.Memory(ctx, arguments[1])
-		if err == nil && result.Kind != memory.Note {
-			return fmt.Errorf("knowledge %q does not exist", arguments[1])
-		}
-		return writeJSON(output, result, err)
-	}
-	if len(arguments) <= 2 && len(arguments) >= 1 && arguments[0] == "list" {
-		prefix := ""
-		if len(arguments) == 2 {
-			prefix = arguments[1]
-		}
-		values, err := service.Memories(ctx, prefix)
-		if err != nil {
-			return err
-		}
-		result := values[:0]
-		for _, value := range values {
-			if value.Kind == memory.Note {
-				result = append(result, value)
-			}
-		}
-		return writeJSON(output, result, nil)
-	}
-	if len(arguments) == 2 && arguments[0] == "delete" {
-		current, err := service.Memory(ctx, arguments[1])
-		if err != nil {
-			return err
-		}
-		if current.Kind != memory.Note {
-			return fmt.Errorf("knowledge %q does not exist", arguments[1])
-		}
-		result, err := service.DeleteMemory(ctx, arguments[1])
-		return writeJSON(output, result, err)
-	}
-	return errors.New("knowledge requires set KEY VALUE, get KEY, list [PREFIX], or delete KEY")
 }
 
 func readMemoryBatch(input io.Reader, path string) ([]memory.BatchChange, error) {

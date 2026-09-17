@@ -698,7 +698,12 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 			return UpdateResult{}, fmt.Errorf("update project: observe %q: %w", resource.Label, err)
 		}
 		observed = append(observed, currentWorkspace.Resources...)
-		discovered, err := material.Discover(ctx, root)
+		var discovered []material.Material
+		if resource.Provider == "git" {
+			discovered, err = material.DiscoverGit(ctx, root)
+		} else {
+			discovered, err = material.Discover(ctx, root)
+		}
 		if err != nil {
 			return UpdateResult{}, err
 		}

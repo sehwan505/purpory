@@ -233,12 +233,6 @@ func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job, report fu
 	if !hasUser {
 		return report(reconcile.PhaseCompleted, "저장할 사용자 근거 없음")
 	}
-	if err := report(reconcile.PhaseUpdating, "Material 최신화"); err != nil {
-		return err
-	}
-	if _, err := s.Update(ctx); err != nil {
-		return fmt.Errorf("refresh reconciliation materials: %w", err)
-	}
 	materials, err := s.store.Materials(ctx, s.project.ID)
 	if err != nil {
 		return err
@@ -278,12 +272,7 @@ func (s *Service) reconcileJob(ctx context.Context, job reconcile.Job, report fu
 				return err
 			}
 		}
-		for start := 0; start < len(connected); start += 20 {
-			end := min(start+20, len(connected))
-			if err = s.applyCandidates(ctx, job.SessionID, connected[start:end]); err != nil {
-				break
-			}
-		}
+		err = s.applyCandidates(ctx, job.SessionID, connected)
 		if err == nil {
 			return report(reconcile.PhaseCompleted, fmt.Sprintf("후보 %d개 처리 완료", len(connected)))
 		}

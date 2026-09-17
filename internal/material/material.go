@@ -2,6 +2,7 @@
 package material
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"mime"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -63,24 +65,15 @@ func Discover(ctx context.Context, root string) ([]Material, error) {
 		if entry.Type()&os.ModeSymlink != 0 || IgnorePath(root, path) {
 			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return fmt.Errorf("discover material %s: %w", path, err)
-		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {
 			return fmt.Errorf("discover material path: %w", err)
 		}
-		relative = filepath.ToSlash(relative)
-		hash, err := fileHash(ctx, path)
+		value, err := catalog(ctx, path, filepath.ToSlash(relative))
 		if err != nil {
-			return fmt.Errorf("discover material %s: %w", relative, err)
+			return err
 		}
-		uri := "file:" + relative
-		materials = append(materials, Material{
-			ID: stableID(uri), URI: uri, MediaType: mediaType(relative), Hash: hash,
-			Size: info.Size(), ModifiedAt: info.ModTime().Unix(),
-		})
+		materials = append(materials, value)
 		return nil
 	})
 	if err != nil {
@@ -88,6 +81,60 @@ func Discover(ctx context.Context, root string) ([]Material, error) {
 	}
 	sort.Slice(materials, func(i, j int) bool { return materials[i].URI < materials[j].URI })
 	return materials, nil
+}
+
+// DiscoverGit catalogs tracked and untracked files using Git's own ignore rules.
+// Git remains an optional adapter; ordinary folders continue to use Discover.
+func DiscoverGit(ctx context.Context, root string) ([]Material, error) {
+	command := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("discover git materials: %w", err)
+	}
+	var materials []Material
+	for _, encoded := range bytes.Split(output, []byte{0}) {
+		if len(encoded) == 0 {
+			continue
+		}
+		relative := filepath.ToSlash(string(encoded))
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if IgnorePath(root, path) {
+			continue
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue // A tracked file may have been deleted from the working tree.
+		}
+		if err != nil {
+			return nil, fmt.Errorf("discover material %s: %w", relative, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		value, err := catalog(ctx, path, relative)
+		if err != nil {
+			return nil, err
+		}
+		materials = append(materials, value)
+	}
+	sort.Slice(materials, func(i, j int) bool { return materials[i].URI < materials[j].URI })
+	return materials, nil
+}
+
+func catalog(ctx context.Context, path, relative string) (Material, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return Material{}, fmt.Errorf("discover material %s: %w", relative, err)
+	}
+	hash, err := fileHash(ctx, path)
+	if err != nil {
+		return Material{}, fmt.Errorf("discover material %s: %w", relative, err)
+	}
+	uri := "file:" + relative
+	return Material{
+		ID: stableID(uri), URI: uri, MediaType: mediaType(relative), Hash: hash,
+		Size: info.Size(), ModifiedAt: info.ModTime().Unix(),
+	}, nil
 }
 
 // Diff reports manifest changes and the materials that need extraction.

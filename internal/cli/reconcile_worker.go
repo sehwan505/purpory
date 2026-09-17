@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -12,8 +13,35 @@ import (
 	"github.com/sehwan505/purpory/internal/reconcile"
 )
 
-func runReconcileCommand(ctx context.Context, arguments []string) error {
+func runReconcileCommand(ctx context.Context, arguments []string, output io.Writer) error {
+	if len(arguments) > 0 {
+		switch arguments[0] {
+		case "list":
+			if len(arguments) != 1 {
+				return errors.New("reconcile list accepts no arguments")
+			}
+			jobs, err := reconcile.Queue(100)
+			return writeJSON(output, jobs, err)
+		case "retry":
+			if len(arguments) != 2 {
+				return errors.New("reconcile retry requires one job ID")
+			}
+			err := reconcile.Retry(arguments[1])
+			return writeJSON(output, map[string]string{"id": arguments[1], "phase": reconcile.PhaseQueued}, err)
+		case "discard":
+			if len(arguments) != 2 {
+				return errors.New("reconcile discard requires a job ID or --failed")
+			}
+			if arguments[1] == "--failed" {
+				count, err := reconcile.DiscardFailed()
+				return writeJSON(output, map[string]int{"discarded": count}, err)
+			}
+			err := reconcile.Discard(arguments[1])
+			return writeJSON(output, map[string]string{"id": arguments[1], "phase": "discarded"}, err)
+		}
+	}
 	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
+	flags.SetOutput(output)
 	executor := flags.String("executor", "", "codex, openai-codex, or claude")
 	model := flags.String("model", "", "optional executor model")
 	if err := flags.Parse(arguments); err != nil {
