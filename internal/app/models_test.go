@@ -12,6 +12,7 @@ import (
 
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
+	"github.com/sehwan505/purpory/internal/reconcile"
 )
 
 type memoryCredentials struct {
@@ -62,8 +63,11 @@ func TestOpenAIProviderDrivesEveryModelRole(t *testing.T) {
 				return
 			}
 			content := `{"action":"skip","query":null,"keywords":[],"reasonCode":"SELF_CONTAINED","clarification":null}`
-			if strings.Contains(body.Messages[len(body.Messages)-1].Content, "TRANSCRIPT") {
+			prompt := body.Messages[len(body.Messages)-1].Content
+			if strings.Contains(prompt, "TRANSCRIPT") {
 				content = `{"candidates":[]}`
+			} else if strings.Contains(prompt, "CANDIDATES") {
+				content = `{"selections":[{"key":"project.policy","removeKeys":[]}]}`
 			}
 			_ = json.NewEncoder(response).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
 		case "/v1/embeddings":
@@ -109,6 +113,10 @@ func TestOpenAIProviderDrivesEveryModelRole(t *testing.T) {
 	}
 	if candidates, err := model.Extract(ctx, "[U000001] hello"); err != nil || len(candidates) != 0 {
 		t.Fatalf("external reconcile = %#v, %v", candidates, err)
+	}
+	admittedKeys, err := model.Select(ctx, []reconcile.AdmissionRequest{{Candidate: reconcile.Candidate{Key: "project.policy", Kind: memory.Decision, Value: "Keep the durable policy."}}}, reconcile.MaximumNewMemories)
+	if err != nil || len(admittedKeys) != 1 || admittedKeys[0].Key != "project.policy" {
+		t.Fatalf("external reconcile admission = %#v, %v", admittedKeys, err)
 	}
 
 	value := "External embeddings are isolated by provider and dimensions."

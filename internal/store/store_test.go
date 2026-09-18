@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -165,7 +166,7 @@ func TestNavigationTrailPreservesOrderRepeatsAndSessionBoundary(t *testing.T) {
 	if err := database.AppendNavigation(ctx, current.ID, "codex:one", want); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AppendNavigation(ctx, current.ID, "codex:two", []contextprepare.NavigationEvent{{Action: "query", TargetNodeID: "intent:other"}}); err != nil {
+	if err := database.AppendNavigation(ctx, current.ID, "codex:two", []contextprepare.NavigationEvent{{Action: "query", TargetNodeID: "intent:other"}, {Action: "explain", TargetNodeID: "intent:one"}}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := database.Navigation(ctx, current.ID, "codex:one", 8)
@@ -174,6 +175,10 @@ func TestNavigationTrailPreservesOrderRepeatsAndSessionBoundary(t *testing.T) {
 	}
 	if len(got) != 3 || got[0].TargetNodeID != "intent:one" || got[1].TargetNodeID != "intent:two" || got[2].TargetNodeID != "intent:one" || got[0].ID <= got[1].ID {
 		t.Fatalf("unexpected newest-first trail: %#v", got)
+	}
+	usage, err := database.NodeUsage(ctx, current.ID)
+	if err != nil || usage["intent:one"].Count != 3 || usage["intent:one"].Sessions != 2 || usage["intent:one"].LastUsedAt == 0 {
+		t.Fatalf("unexpected node usage: %#v, %v", usage, err)
 	}
 }
 
@@ -660,8 +665,60 @@ func TestReconcileMemoriesIsAtomicAndAudited(t *testing.T) {
 		t.Fatalf("reconciliation graph link missing: %#v %#v %v", graphNodes, graphEdges, err)
 	}
 	events, err := database.ReconciliationEvents(ctx, current.ID)
-	if err != nil || len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].After.Value == nil || *events[0].Changes[0].After.Value != value || len(events[0].Changes[0].EvidenceRefs) != 1 || events[0].Changes[0].EvidenceRefs[0].EndByte != len(value) || len(events[0].Changes[0].ContextRefs) != 1 || events[0].Changes[0].ContextRefs[0].PartID != "A000001P001" || len(events[0].Links) != 2 || events[0].Links[0].Relation != graph.RelationRealizedBy || events[0].Links[1].Relation != graph.RelationDependsOn || events[0].Links[1].EvidenceIDs[0] != "U000001" || len(events[0].Links[1].EvidenceRefs) != 1 || len(events[0].Links[1].ContextRefs) != 1 {
+	if err != nil || len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].After == nil || events[0].Changes[0].After.Value == nil || *events[0].Changes[0].After.Value != value || len(events[0].Changes[0].EvidenceRefs) != 1 || events[0].Changes[0].EvidenceRefs[0].EndByte != len(value) || len(events[0].Changes[0].ContextRefs) != 1 || events[0].Changes[0].ContextRefs[0].PartID != "A000001P001" || len(events[0].Links) != 2 || events[0].Links[0].Relation != graph.RelationRealizedBy || events[0].Links[1].Relation != graph.RelationDependsOn || events[0].Links[1].EvidenceIDs[0] != "U000001" || len(events[0].Links[1].EvidenceRefs) != 1 || len(events[0].Links[1].ContextRefs) != 1 {
 		t.Fatalf("reconciliation provenance missing: %#v %v", events, err)
+	}
+}
+
+func TestReconcileMemoryChangesDeletesAtomicallyAndKeepsHistory(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	current := project.Project{ID: "demo", Name: "Demo", Root: "/demo"}
+	if err := database.SaveProject(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	oldValue := "Use the retired provider."
+	old, _ := memory.New(current.ID, "database.provider", memory.Decision, &oldValue, nil)
+	if _, err := database.SaveMemory(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	newValue := "Keep the replacement policy."
+	created, _ := memory.New(current.ID, "database.replacement", memory.Decision, &newValue, nil)
+	evidenceText := "Forget database.provider; it is no longer valid."
+	evidence := []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: evidenceText, EndByte: len(evidenceText)}}
+	deletion := MemoryDeletion{ProjectID: current.ID, Key: old.Key, ExpectedHash: old.Hash, EvidenceIDs: []string{"U000001"}, EvidenceRefs: evidence}
+
+	stale := deletion
+	stale.ExpectedHash = "stale"
+	if _, err := database.ReconcileMemoryChanges(ctx, "codex:delete", []MemoryProposal{{Memory: created}}, []MemoryDeletion{stale}); !errors.Is(err, ErrMemoryConflict) {
+		t.Fatalf("expected atomic deletion conflict, got %v", err)
+	}
+	if _, err := database.Memory(ctx, current.ID, created.Key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("conflicted proposal was committed: %v", err)
+	}
+
+	result, err := database.ReconcileMemoryChanges(ctx, "codex:delete", []MemoryProposal{{Memory: created}}, []MemoryDeletion{deletion})
+	if err != nil || result.Deleted != 1 || len(result.Saves) != 1 || result.Saves[0].Action != "created" {
+		t.Fatalf("atomic memory changes = %#v, %v", result, err)
+	}
+	if _, err := database.Memory(ctx, current.ID, old.Key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("forgotten memory still exists: %v", err)
+	}
+	versions, err := database.MemoryVersions(ctx, current.ID, old.Key)
+	if err != nil || len(versions) != 1 || versions[0].Hash != old.Hash {
+		t.Fatalf("deletion erased memory history: %#v, %v", versions, err)
+	}
+	events, err := database.ReconciliationEvents(ctx, current.ID)
+	if err != nil || len(events) != 1 || len(events[0].Changes) != 2 || events[0].Changes[1].Action != "deleted" || events[0].Changes[1].Before == nil || events[0].Changes[1].After != nil {
+		t.Fatalf("deletion audit missing: %#v, %v", events, err)
+	}
+	nodes, _, err := database.Graph(ctx, current.ID)
+	if err != nil || len(nodes) != 1 || nodes[0].Ref != created.Key {
+		t.Fatalf("deleted graph node remained: %#v, %v", nodes, err)
 	}
 }
 

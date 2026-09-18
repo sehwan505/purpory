@@ -45,6 +45,26 @@ type MemoryProposal struct {
 	ExpectedLinkStates map[graph.Link]string
 }
 
+type MemoryDeletion struct {
+	ProjectID    string
+	Key          string
+	ExpectedHash string
+	EvidenceIDs  []string
+	EvidenceRefs []memory.EvidenceRef
+	ContextRefs  []memory.ContextRef
+}
+
+type ReconcileResult struct {
+	Saves   []SaveResult
+	Deleted int
+}
+
+type NodeUsage struct {
+	Count      int
+	Sessions   int
+	LastUsedAt int64
+}
+
 func DefaultPath() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("PURPORY_DATABASE")); configured != "" {
 		return configured, nil

@@ -173,7 +173,14 @@ configuration while installing prompt and session-end hooks. Codex and Claude
 session-end snapshots are reconciled in a detached worker; Hermes defers them for
 an explicit cron-driven `reconcile` command. Only explicit user statements may
 become durable project memory. Reconciliation uses the last committed Material
-snapshot, so it never triggers a project-wide update. Failed jobs remain visible
+snapshot, so it never triggers a project-wide update. It admits only memories
+that can materially affect future work, preserves updates to existing keys, and
+creates at most 12 new durable memories per run. Each new candidate is compared
+with a bounded neighborhood balancing semantic locality with creation age and
+recent navigation usage; directly duplicated,
+subsumed, or superseded neighbors may be replaced in the same transaction while
+their versions and before-image audit remain available.
+Failed jobs remain visible
 but are retried only with `reconcile retry`. Git repositories are observed as one
 Resource with all local worktrees represented as Views; indexing honors Git's
 standard ignore rules. Non-Git folders use the same workspace model.

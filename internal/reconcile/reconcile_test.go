@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,12 @@ type materialModel struct {
 type contextModel struct{ candidate Candidate }
 
 type linkModel struct{ results []LinkResult }
+
+type selectFunc func(context.Context, []AdmissionRequest, int) ([]Selection, error)
+
+func (f selectFunc) Select(ctx context.Context, requests []AdmissionRequest, maximum int) ([]Selection, error) {
+	return f(ctx, requests, maximum)
+}
 
 func (m linkModel) Link(context.Context, []LinkRequest) ([]LinkResult, error) { return m.results, nil }
 
@@ -134,6 +141,97 @@ func TestTranscriptReconcilePreservesUserEvidenceAcrossChunks(t *testing.T) {
 	if len(messages) != 4 || len(messages[1].Parts) != 2 || messages[1].Parts[1].Kind != "attachment" || messages[1].Parts[1].Ref != "artifact-1" || messages[3].Role != "tool" || messages[3].Parts[0].Kind != "tool_result" || model.calls < 2 || len(candidates) != 1 || candidates[0].EvidenceIDs[0] != "U000001" || candidates[0].EvidenceIDs[len(candidates[0].EvidenceIDs)-1] != "U000003" {
 		t.Fatalf("reconcile lost transcript evidence: messages=%#v candidates=%#v calls=%d", messages, candidates, model.calls)
 	}
+}
+
+func TestAdmitBoundsNewMemoriesAcrossBatches(t *testing.T) {
+	candidates := make([]Candidate, 100)
+	for index := range candidates {
+		candidates[index] = Candidate{Key: fmt.Sprintf("policy.%03d", index), Kind: memory.Decision, Value: "durable policy"}
+	}
+	calls := 0
+	selector := selectFunc(func(_ context.Context, values []AdmissionRequest, maximum int) ([]Selection, error) {
+		calls++
+		selections := make([]Selection, 0, min(len(values), maximum))
+		for _, request := range values[:min(len(values), maximum)] {
+			selections = append(selections, Selection{Key: request.Candidate.Key})
+		}
+		return selections, nil
+	})
+	admitted, err := Admit(context.Background(), admissionRequests(candidates), selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(admitted) != MaximumNewMemories || calls < 2 {
+		t.Fatalf("admission = %d candidates in %d calls", len(admitted), calls)
+	}
+	for index, admission := range admitted {
+		if admission.Candidate.Key != candidates[index].Key {
+			t.Fatalf("admission changed candidate order: %#v", admitted)
+		}
+	}
+}
+
+func TestAdmitRejectsInvalidModelSelections(t *testing.T) {
+	candidates := make([]Candidate, MaximumNewMemories+1)
+	for index := range candidates {
+		candidates[index] = Candidate{Key: fmt.Sprintf("policy.%03d", index), Kind: memory.Decision, Value: "durable policy"}
+	}
+	tests := map[string][]Selection{
+		"unknown":   {{Key: "policy.missing"}},
+		"duplicate": {{Key: candidates[0].Key}, {Key: candidates[0].Key}},
+	}
+	for _, key := range candidateKeys(candidates) {
+		tests["excess"] = append(tests["excess"], Selection{Key: key})
+	}
+	for name, selected := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := Admit(context.Background(), admissionRequests(candidates), selectFunc(func(context.Context, []AdmissionRequest, int) ([]Selection, error) {
+				return selected, nil
+			}))
+			if err == nil {
+				t.Fatal("invalid admission was accepted")
+			}
+		})
+	}
+}
+
+func TestAdmitMayRejectEveryCandidate(t *testing.T) {
+	candidates := []Candidate{{Key: "task.completed", Kind: memory.Note, Value: "Tests passed."}}
+	admitted, err := Admit(context.Background(), admissionRequests(candidates), selectFunc(func(context.Context, []AdmissionRequest, int) ([]Selection, error) {
+		return nil, nil
+	}))
+	if err != nil || len(admitted) != 0 {
+		t.Fatalf("empty admission = %#v, %v", admitted, err)
+	}
+}
+
+func TestAdmitRejectsReplacementOutsideCandidateNeighborhood(t *testing.T) {
+	candidate := Candidate{Key: "database.policy", Kind: memory.Decision, Value: "Use the current database policy."}
+	nearbyValue := "Use the legacy database policy."
+	nearby, _ := memory.New("demo", "database.legacy", memory.Decision, &nearbyValue, nil)
+	request := AdmissionRequest{Candidate: candidate, Nearby: []Neighbor{{Memory: nearby}}}
+	selector := selectFunc(func(context.Context, []AdmissionRequest, int) ([]Selection, error) {
+		return []Selection{{Key: candidate.Key, RemoveKeys: []string{"database.unrelated"}}}, nil
+	})
+	if _, err := Admit(context.Background(), []AdmissionRequest{request}, selector); err == nil {
+		t.Fatal("replacement outside the candidate neighborhood was accepted")
+	}
+}
+
+func admissionRequests(candidates []Candidate) []AdmissionRequest {
+	requests := make([]AdmissionRequest, len(candidates))
+	for index, candidate := range candidates {
+		requests[index].Candidate = candidate
+	}
+	return requests
+}
+
+func candidateKeys(candidates []Candidate) []string {
+	keys := make([]string, len(candidates))
+	for index, candidate := range candidates {
+		keys[index] = candidate.Key
+	}
+	return keys
 }
 
 func TestTranscriptImplicitReplyUsesOnlyImmediatelyPreviousAssistant(t *testing.T) {

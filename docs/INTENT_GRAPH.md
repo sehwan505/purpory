@@ -22,10 +22,13 @@ that observed output can rewrite human intent.
    evidence. Rejected.
 4. Require manual links. This is precise but cannot support autonomous operation.
    Retained only as an override path through the durable link store.
-5. At session end, read the last committed Materials and reconcile explicit user intent,
-   and let the reconciliation model select typed relationships only to bounded
-   existing Intent candidates and transcript-mentioned targets from an
-   existence-checked Material catalog.
+5. At session end, read the last committed Materials and reconcile explicit user intent.
+   Admit only memories whose absence could materially harm future work, allow at
+   most 12 new durable keys per run, compact directly duplicated or superseded
+   memories in each candidate's bounded neighborhood, balance locality with
+   creation age and recent navigation usage, and let the model select typed
+   relationships only to bounded existing Intent candidates and transcript-mentioned
+   targets from an existence-checked Material catalog.
    Persist the memory node and durable edges in one transaction. Selected.
 
 The selected boundary has both forms of evidence available: explicit user
@@ -104,12 +107,17 @@ The engine must keep these checks runnable without a model or network:
 1. reconciliation commits a new Intent node and its Material edges atomically;
 2. unavailable model-proposed Material references are rejected;
 3. unsupported relation types and merely changed Materials are not linked;
-4. `update` preserves durable edges while targets disappear and reconnects them when
+4. reconciliation admits at most 12 new durable memories per run without
+   suppressing grounded updates to existing keys;
+5. reconciliation replaces only an admitted candidate's bounded duplicate or
+   superseded neighbors, preserves their versions and before-image audit, and
+   rolls back the whole change set on conflict;
+6. `update` preserves durable edges while targets disappear and reconnects them when
    targets return;
-5. Graph, Explain, and Path traverse Intent and observed evidence together;
-6. query and prepare use the same Typed PPR ranking, keep results within the
+7. Graph, Explain, and Path traverse Intent and observed evidence together;
+8. query and prepare use the same Typed PPR ranking, keep results within the
    token budget, and never include unopened node content;
-7. an unresolved durable target is visible rather than silently discarded;
-8. Workspace Sessions never project into the canonical graph;
-9. default `query`, `explain`, and `path` output stays within its character and
+9. an unresolved durable target is visible rather than silently discarded;
+10. Workspace Sessions never project into the canonical graph;
+11. default `query`, `explain`, and `path` output stays within its character and
    item budgets, omits unopened content, and preserves that boundary in JSON.

@@ -81,9 +81,19 @@ Directories are added only when their first behavior is implemented.
   A detached worker treats the transcript as untrusted, accepts only memory
   grounded in exact excerpts of explicit user statements, and may use only the
   exact assistant excerpt that a later user statement adopts as context. Both
-  excerpts retain their part ID and byte interval. It applies every candidate
-  from one session in one atomic transaction with optimistic concurrency and
-  records an audit event. Reconciliation reads the last committed Material
+  excerpts retain their part ID and byte interval. A separate admission pass
+  keeps only new candidates whose absence could materially harm future work.
+  Existing keys remain eligible for correction, while each run may create at most
+  12 new durable memories. Admission compares each new candidate with at most
+  eight existing memories: half favor topic-key locality and lexical overlap,
+  while the remainder favor older, less recently used neighbors. Usage is derived
+  from the retained navigation-event window, and creation/update times come from
+  the memory record; no mutable importance score is stored. A
+  selected candidate may replace only neighbors it directly duplicates, subsumes,
+  or supersedes; age, low usage, and omission never authorize deletion. Creation,
+  update, link changes, and replacement share one atomic transaction with
+  optimistic concurrency. Prior versions and the deleted before-image remain audited.
+  Reconciliation reads the last committed Material
   snapshot rather than running a project-wide update. Failed jobs are terminal
   until an explicit retry or discard.
 - A Material may be a document, source file, note, media item, conversation,

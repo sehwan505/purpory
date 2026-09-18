@@ -94,6 +94,36 @@ func (s *Store) Navigation(ctx context.Context, projectID, sessionID string, lim
 	return result, rows.Err()
 }
 
+func (s *Store) NodeUsage(ctx context.Context, projectID string) (map[string]NodeUsage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT node_id, count(*), count(DISTINCT session_id), max(created_at)
+		FROM (
+			SELECT source_node_id AS node_id, session_id, created_at
+			FROM navigation_events WHERE project_id = ? AND source_node_id != ''
+			UNION ALL
+			SELECT target_node_id AS node_id, session_id, created_at
+			FROM navigation_events WHERE project_id = ? AND target_node_id != ''
+		) GROUP BY node_id
+	`, projectID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("load node usage: %w", err)
+	}
+	defer rows.Close()
+	result := map[string]NodeUsage{}
+	for rows.Next() {
+		var nodeID string
+		var usage NodeUsage
+		if err := rows.Scan(&nodeID, &usage.Count, &usage.Sessions, &usage.LastUsedAt); err != nil {
+			return nil, fmt.Errorf("load node usage: scan: %w", err)
+		}
+		result[nodeID] = usage
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load node usage: %w", err)
+	}
+	return result, nil
+}
+
 func (s *Store) OpenContextRequestCount(ctx context.Context, projectID string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM context_requests WHERE project_id = ? AND status = 'open'`, projectID).Scan(&count)
