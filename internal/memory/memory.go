@@ -40,6 +40,7 @@ type Memory struct {
 	Value     *string `json:"value,omitempty"`
 	Source    *string `json:"source,omitempty"`
 	Hash      string  `json:"hash"`
+	CreatedAt string  `json:"createdAt"`
 	UpdatedAt string  `json:"updatedAt"`
 }
 
@@ -64,7 +65,7 @@ type ReconcileChange struct {
 	Key          string        `json:"key"`
 	Action       string        `json:"action"`
 	Before       *Memory       `json:"before,omitempty"`
-	After        Memory        `json:"after"`
+	After        *Memory       `json:"after,omitempty"`
 	VersionID    int64         `json:"versionId,omitempty"`
 	EvidenceIDs  []string      `json:"evidenceIds"`
 	EvidenceRefs []EvidenceRef `json:"evidenceRefs,omitempty"`

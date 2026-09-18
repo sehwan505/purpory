@@ -112,36 +112,47 @@ func upsertMemoryNode(ctx context.Context, database databaseRunner, value memory
 }
 
 func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposals []MemoryProposal) ([]SaveResult, error) {
-	if strings.TrimSpace(sessionID) == "" || len(proposals) == 0 {
-		return nil, errors.New("reconcile memory: session and proposals are required")
+	result, err := s.ReconcileMemoryChanges(ctx, sessionID, proposals, nil)
+	return result.Saves, err
+}
+
+func (s *Store) ReconcileMemoryChanges(ctx context.Context, sessionID string, proposals []MemoryProposal, deletions []MemoryDeletion) (ReconcileResult, error) {
+	if strings.TrimSpace(sessionID) == "" || len(proposals)+len(deletions) == 0 {
+		return ReconcileResult{}, errors.New("reconcile memory: session and changes are required")
 	}
-	projectID := proposals[0].Memory.ProjectID
+	projectID := ""
+	if len(proposals) > 0 {
+		projectID = proposals[0].Memory.ProjectID
+	} else {
+		projectID = deletions[0].ProjectID
+	}
 	seen := map[string]bool{}
+	deleting := map[string]bool{}
 	for proposalIndex := range proposals {
 		proposal := &proposals[proposalIndex]
 		if proposal.Memory.ProjectID != projectID || seen[proposal.Memory.Key] {
-			return nil, errors.New("reconcile memory: proposals must have one project and unique keys")
+			return ReconcileResult{}, errors.New("reconcile memory: changes must have one project and unique keys")
 		}
 		if (len(proposal.EvidenceIDs) > 0 || len(proposal.EvidenceRefs) > 0) && !sameEvidenceIDs(proposal.EvidenceIDs, proposal.EvidenceRefs) {
-			return nil, errors.New("reconcile memory: proposals require matching grounded user evidence")
+			return ReconcileResult{}, errors.New("reconcile memory: proposals require matching grounded user evidence")
 		}
 		if len(proposal.Links)+len(proposal.RetiredLinks) > 0 && len(proposal.EvidenceRefs) == 0 {
-			return nil, errors.New("reconcile memory: linked proposals require grounded user evidence")
+			return ReconcileResult{}, errors.New("reconcile memory: linked proposals require grounded user evidence")
 		}
 		if len(proposal.EvidenceRefs) > 16 {
-			return nil, errors.New("reconcile memory: at most 16 user excerpts are allowed")
+			return ReconcileResult{}, errors.New("reconcile memory: at most 16 user excerpts are allowed")
 		}
 		for _, ref := range proposal.EvidenceRefs {
 			if !validExcerpt(ref.MessageID, ref.PartID, ref.Quote, ref.StartByte, ref.EndByte) {
-				return nil, errors.New("reconcile memory: invalid user evidence excerpt")
+				return ReconcileResult{}, errors.New("reconcile memory: invalid user evidence excerpt")
 			}
 		}
 		if len(proposal.ContextRefs) > 16 || len(proposal.ContextRefs) > 0 && len(proposal.EvidenceRefs) == 0 {
-			return nil, errors.New("reconcile memory: assistant context requires user evidence and at most 16 excerpts")
+			return ReconcileResult{}, errors.New("reconcile memory: assistant context requires user evidence and at most 16 excerpts")
 		}
 		for _, ref := range proposal.ContextRefs {
 			if !validExcerpt(ref.MessageID, ref.PartID, ref.Quote, ref.StartByte, ref.EndByte) {
-				return nil, errors.New("reconcile memory: invalid assistant context excerpt")
+				return ReconcileResult{}, errors.New("reconcile memory: invalid assistant context excerpt")
 			}
 		}
 		normalizedEvidence := map[graph.Link][]memory.EvidenceRef{}
@@ -159,10 +170,10 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 			proposal.Links[linkIndex] = graph.NormalizeLink(proposal.Links[linkIndex])
 			link := proposal.Links[linkIndex]
 			if proposal.Memory.Kind != memory.Decision || !reconcileLinkOwnedBy(link, proposal.Memory.Key) {
-				return nil, errors.New("reconcile memory: links must connect their grounded intent with a supported semantic relation")
+				return ReconcileResult{}, errors.New("reconcile memory: links must connect their grounded intent with a supported semantic relation")
 			}
 			if link.TargetKind == graph.KindIntent && !evidenceSubset(proposal.LinkEvidence[link], proposal.EvidenceRefs) {
-				return nil, errors.New("reconcile memory: intent links require candidate-grounded user evidence")
+				return ReconcileResult{}, errors.New("reconcile memory: intent links require candidate-grounded user evidence")
 			}
 			operations[link] = true
 		}
@@ -170,18 +181,53 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 			proposal.RetiredLinks[linkIndex] = graph.NormalizeLink(proposal.RetiredLinks[linkIndex])
 			link := proposal.RetiredLinks[linkIndex]
 			if operations[link] || proposal.Memory.Kind != memory.Decision || link.TargetKind != graph.KindIntent || !reconcileLinkOwnedBy(link, proposal.Memory.Key) || !evidenceSubset(proposal.RetirementEvidence[link], proposal.EvidenceRefs) {
-				return nil, errors.New("reconcile memory: retirements must target an existing grounded intent relation")
+				return ReconcileResult{}, errors.New("reconcile memory: retirements must target an existing grounded intent relation")
 			}
 		}
 		seen[proposal.Memory.Key] = true
 	}
+	for _, deletion := range deletions {
+		if deletion.ProjectID != projectID || seen[deletion.Key] {
+			return ReconcileResult{}, errors.New("reconcile memory: changes must have one project and unique keys")
+		}
+		if _, err := memory.ValidateKey(deletion.Key); err != nil || strings.TrimSpace(deletion.ExpectedHash) == "" {
+			return ReconcileResult{}, errors.New("reconcile memory: deletions require a valid key and expected hash")
+		}
+		if len(deletion.EvidenceRefs) == 0 || !sameEvidenceIDs(deletion.EvidenceIDs, deletion.EvidenceRefs) {
+			return ReconcileResult{}, errors.New("reconcile memory: deletions require matching grounded user evidence")
+		}
+		if len(deletion.EvidenceRefs) > 16 || len(deletion.ContextRefs) > 16 {
+			return ReconcileResult{}, errors.New("reconcile memory: at most 16 evidence and context excerpts are allowed")
+		}
+		for _, ref := range deletion.EvidenceRefs {
+			if !validExcerpt(ref.MessageID, ref.PartID, ref.Quote, ref.StartByte, ref.EndByte) {
+				return ReconcileResult{}, errors.New("reconcile memory: invalid user evidence excerpt")
+			}
+		}
+		for _, ref := range deletion.ContextRefs {
+			if !validExcerpt(ref.MessageID, ref.PartID, ref.Quote, ref.StartByte, ref.EndByte) {
+				return ReconcileResult{}, errors.New("reconcile memory: invalid assistant context excerpt")
+			}
+		}
+		seen[deletion.Key] = true
+		deleting[deletion.Key] = true
+	}
+	for _, proposal := range proposals {
+		for _, links := range [][]graph.Link{proposal.Links, proposal.RetiredLinks} {
+			for _, link := range links {
+				if link.SourceKind == graph.KindIntent && deleting[link.SourceRef] || link.TargetKind == graph.KindIntent && deleting[link.TargetRef] {
+					return ReconcileResult{}, errors.New("reconcile memory: links cannot reference a memory deleted in the same change set")
+				}
+			}
+		}
+	}
 	connection, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile memory: connection: %w", err)
+		return ReconcileResult{}, fmt.Errorf("reconcile memory: connection: %w", err)
 	}
 	defer connection.Close()
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, fmt.Errorf("reconcile memory: begin: %w", err)
+		return ReconcileResult{}, fmt.Errorf("reconcile memory: begin: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -196,9 +242,20 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		case errors.Is(err, sql.ErrNoRows) && proposal.ExpectedHash == nil:
 		case err == nil && proposal.ExpectedHash != nil && current == *proposal.ExpectedHash:
 		case err != nil && !errors.Is(err, sql.ErrNoRows):
-			return nil, fmt.Errorf("reconcile memory: load current: %w", err)
+			return ReconcileResult{}, fmt.Errorf("reconcile memory: load current: %w", err)
 		default:
-			return nil, ErrMemoryConflict
+			return ReconcileResult{}, ErrMemoryConflict
+		}
+	}
+	for _, deletion := range deletions {
+		var current string
+		err := connection.QueryRowContext(ctx, "SELECT content_hash FROM memories WHERE project_id = ? AND key = ?", projectID, deletion.Key).Scan(&current)
+		switch {
+		case err == nil && current == deletion.ExpectedHash:
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			return ReconcileResult{}, fmt.Errorf("reconcile memory: load deletion target: %w", err)
+		default:
+			return ReconcileResult{}, ErrMemoryConflict
 		}
 	}
 	for _, proposal := range proposals {
@@ -207,10 +264,10 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 				if expected, tracked := proposal.ExpectedLinkStates[link]; tracked {
 					current, err := graphLinkState(ctx, connection, projectID, link)
 					if err != nil {
-						return nil, fmt.Errorf("reconcile memory: load link state: %w", err)
+						return ReconcileResult{}, fmt.Errorf("reconcile memory: load link state: %w", err)
 					}
 					if current != expected {
-						return nil, ErrMemoryConflict
+						return ReconcileResult{}, ErrMemoryConflict
 					}
 				}
 				for _, endpoint := range []struct{ kind, ref string }{{link.SourceKind, link.SourceRef}, {link.TargetKind, link.TargetRef}} {
@@ -220,10 +277,10 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 					var state string
 					err := connection.QueryRowContext(ctx, `SELECT state FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?`, projectID, endpoint.kind, endpoint.ref).Scan(&state)
 					if errors.Is(err, sql.ErrNoRows) || err == nil && state != graph.StateActive {
-						return nil, ErrMemoryConflict
+						return ReconcileResult{}, ErrMemoryConflict
 					}
 					if err != nil {
-						return nil, fmt.Errorf("reconcile memory: load intent endpoint: %w", err)
+						return ReconcileResult{}, fmt.Errorf("reconcile memory: load intent endpoint: %w", err)
 					}
 				}
 			}
@@ -231,10 +288,10 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		for _, link := range proposal.RetiredLinks {
 			state, err := graphLinkState(ctx, connection, projectID, link)
 			if err != nil {
-				return nil, fmt.Errorf("reconcile memory: load retirement state: %w", err)
+				return ReconcileResult{}, fmt.Errorf("reconcile memory: load retirement state: %w", err)
 			}
 			if state != graph.StateActive {
-				return nil, ErrMemoryConflict
+				return ReconcileResult{}, ErrMemoryConflict
 			}
 		}
 	}
@@ -257,20 +314,21 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 			}
 			previous = &before
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("reconcile memory: load audit state: %w", err)
+			return ReconcileResult{}, fmt.Errorf("reconcile memory: load audit state: %w", err)
 		}
 		result, err := saveMemory(ctx, connection, proposal.Memory)
 		if err != nil {
-			return nil, err
+			return ReconcileResult{}, err
 		}
 		results = append(results, result)
 		if result.Action != "unchanged" {
-			changes = append(changes, memory.ReconcileChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: proposal.Memory, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs, EvidenceRefs: proposal.EvidenceRefs, ContextRefs: proposal.ContextRefs})
+			after := proposal.Memory
+			changes = append(changes, memory.ReconcileChange{Key: proposal.Memory.Key, Action: result.Action, Before: previous, After: &after, VersionID: result.VersionID, EvidenceIDs: proposal.EvidenceIDs, EvidenceRefs: proposal.EvidenceRefs, ContextRefs: proposal.ContextRefs})
 		}
 		for _, link := range proposal.Links {
 			action, err := saveGraphLink(ctx, connection, projectID, link, "reconcile:"+sessionID)
 			if err != nil {
-				return nil, fmt.Errorf("reconcile memory: save link: %w", err)
+				return ReconcileResult{}, fmt.Errorf("reconcile memory: save link: %w", err)
 			}
 			if action != "" {
 				evidenceRefs := proposal.LinkEvidence[link]
@@ -283,7 +341,7 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 		for _, link := range proposal.RetiredLinks {
 			retired, err := retireGraphLink(ctx, connection, projectID, link)
 			if err != nil {
-				return nil, fmt.Errorf("reconcile memory: retire link: %w", err)
+				return ReconcileResult{}, fmt.Errorf("reconcile memory: retire link: %w", err)
 			}
 			if retired {
 				evidenceRefs := proposal.RetirementEvidence[link]
@@ -291,20 +349,45 @@ func (s *Store) ReconcileMemories(ctx context.Context, sessionID string, proposa
 			}
 		}
 	}
+	deleted := 0
+	for _, deletion := range deletions {
+		var before memory.Memory
+		var value, source sql.NullString
+		if err := connection.QueryRowContext(ctx, `SELECT project_id, key, kind, value, source, content_hash FROM memories WHERE project_id = ? AND key = ?`, projectID, deletion.Key).Scan(
+			&before.ProjectID, &before.Key, &before.Kind, &value, &source, &before.Hash,
+		); err != nil {
+			return ReconcileResult{}, fmt.Errorf("reconcile memory: load deletion audit state: %w", err)
+		}
+		if value.Valid {
+			before.Value = &value.String
+		}
+		if source.Valid {
+			before.Source = &source.String
+		}
+		removed, err := deleteMemory(ctx, connection, projectID, deletion.Key)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+		if !removed {
+			return ReconcileResult{}, ErrMemoryConflict
+		}
+		deleted++
+		changes = append(changes, memory.ReconcileChange{Key: deletion.Key, Action: "deleted", Before: &before, EvidenceIDs: deletion.EvidenceIDs, EvidenceRefs: deletion.EvidenceRefs, ContextRefs: deletion.ContextRefs})
+	}
 	if len(changes) > 0 || len(links) > 0 {
 		encoded, err := json.Marshal(map[string]any{"changes": changes, "links": links})
 		if err != nil {
-			return nil, fmt.Errorf("reconcile memory: encode audit: %w", err)
+			return ReconcileResult{}, fmt.Errorf("reconcile memory: encode audit: %w", err)
 		}
 		if _, err := connection.ExecContext(ctx, `INSERT INTO reconciliation_events(project_id, session_id, changes_json) VALUES (?, ?, ?)`, projectID, sessionID, string(encoded)); err != nil {
-			return nil, fmt.Errorf("reconcile memory: record audit: %w", err)
+			return ReconcileResult{}, fmt.Errorf("reconcile memory: record audit: %w", err)
 		}
 	}
 	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, fmt.Errorf("reconcile memory: commit: %w", err)
+		return ReconcileResult{}, fmt.Errorf("reconcile memory: commit: %w", err)
 	}
 	committed = true
-	return results, nil
+	return ReconcileResult{Saves: results, Deleted: deleted}, nil
 }
 
 func validExcerpt(messageID, partID, quote string, start, end int) bool {
@@ -411,16 +494,17 @@ func (s *Store) ReconciliationEvents(ctx context.Context, projectID string) ([]m
 
 func (s *Store) Memory(ctx context.Context, projectID, key string) (memory.Memory, error) {
 	var value memory.Memory
-	var timestamp int64
+	var created, timestamp int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT project_id, key, kind, value, source, content_hash, updated_at
+		SELECT project_id, key, kind, value, source, content_hash, created_at, updated_at
 		FROM memories WHERE project_id = ? AND key = ?
 	`, projectID, key).Scan(
-		&value.ProjectID, &value.Key, &value.Kind, &value.Value, &value.Source, &value.Hash, &timestamp,
+		&value.ProjectID, &value.Key, &value.Kind, &value.Value, &value.Source, &value.Hash, &created, &timestamp,
 	)
 	if err != nil {
 		return memory.Memory{}, fmt.Errorf("load memory: %w", err)
 	}
+	value.CreatedAt = time.Unix(created, 0).UTC().Format(time.RFC3339)
 	value.UpdatedAt = time.Unix(timestamp, 0).UTC().Format(time.RFC3339)
 	return value, nil
 }
@@ -449,7 +533,7 @@ func (s *Store) MemoryVersions(ctx context.Context, projectID, key string) ([]me
 
 func (s *Store) Memories(ctx context.Context, projectID, prefix string) ([]memory.Memory, error) {
 	query := `
-		SELECT project_id, key, kind, value, source, content_hash, updated_at
+		SELECT project_id, key, kind, value, source, content_hash, created_at, updated_at
 		FROM memories WHERE project_id = ?`
 	args := []any{projectID}
 	if prefix != "" {
@@ -465,12 +549,13 @@ func (s *Store) Memories(ctx context.Context, projectID, prefix string) ([]memor
 	var values []memory.Memory
 	for rows.Next() {
 		var value memory.Memory
-		var timestamp int64
+		var created, timestamp int64
 		if err := rows.Scan(
-			&value.ProjectID, &value.Key, &value.Kind, &value.Value, &value.Source, &value.Hash, &timestamp,
+			&value.ProjectID, &value.Key, &value.Kind, &value.Value, &value.Source, &value.Hash, &created, &timestamp,
 		); err != nil {
 			return nil, fmt.Errorf("list memories: scan: %w", err)
 		}
+		value.CreatedAt = time.Unix(created, 0).UTC().Format(time.RFC3339)
 		value.UpdatedAt = time.Unix(timestamp, 0).UTC().Format(time.RFC3339)
 		values = append(values, value)
 	}

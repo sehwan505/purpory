@@ -17,6 +17,15 @@ import (
 
 const maximumMessageBytes = 16 << 20
 
+// MaximumNewMemories bounds durable graph growth from one reconciliation run.
+const MaximumNewMemories = 12
+
+// MaximumReplacements bounds cleanup caused by one admitted memory.
+const MaximumReplacements = 4
+
+// ponytail: fixed batches fit the default context; size them by tokens if smaller reconcile contexts become common.
+const admissionBatchSize = 20
+
 var errInvalidCandidate = errors.New("invalid reconciliation candidate")
 
 type Event struct {
@@ -50,6 +59,28 @@ type Candidate struct {
 	IntentLinks        []IntentLink         `json:"intentLinks,omitempty"`
 	RetiredIntentLinks []IntentLink         `json:"retiredIntentLinks,omitempty"`
 	SourceIDs          []string             `json:"sourceIds,omitempty"`
+}
+
+type AdmissionRequest struct {
+	Candidate Candidate
+	Nearby    []Neighbor
+}
+
+type Neighbor struct {
+	Memory     memory.Memory
+	Uses       int
+	Sessions   int
+	LastUsedAt int64
+}
+
+type Selection struct {
+	Key        string   `json:"key"`
+	RemoveKeys []string `json:"removeKeys"`
+}
+
+type Admission struct {
+	Candidate Candidate
+	Remove    []memory.Memory
 }
 
 type MaterialLink struct {
@@ -86,6 +117,10 @@ type Model interface {
 	ContextTokens() int
 	Extract(context.Context, string) ([]Candidate, error)
 	Consolidate(context.Context, []Candidate) (Candidate, error)
+}
+
+type Selector interface {
+	Select(context.Context, []AdmissionRequest, int) ([]Selection, error)
 }
 
 type Linker interface {
@@ -221,6 +256,87 @@ func Propose(ctx context.Context, messages []Event, model Model, materialRefs []
 		result = append(result, candidate)
 	}
 	return result, nil
+}
+
+// Admit keeps only the new memories worth promoting and identifies nearby memories they replace.
+func Admit(ctx context.Context, requests []AdmissionRequest, selector Selector) ([]Admission, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	if selector == nil {
+		return nil, errors.New("admit reconciliation candidates: selector is required")
+	}
+	seen := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		candidate := request.Candidate
+		if candidate.Key == "" || seen[candidate.Key] {
+			return nil, errors.New("admit reconciliation candidates: candidates require unique keys")
+		}
+		seen[candidate.Key] = true
+	}
+
+	pool := append([]AdmissionRequest(nil), requests...)
+	for {
+		var next []AdmissionRequest
+		selectedAdmissions := map[string]Admission{}
+		removedBySelection := map[string]bool{}
+		for start := 0; start < len(pool); start += admissionBatchSize {
+			end := min(start+admissionBatchSize, len(pool))
+			batch := pool[start:end]
+			selections, err := selector.Select(ctx, batch, MaximumNewMemories)
+			if err != nil {
+				return nil, fmt.Errorf("admit reconciliation candidates: select: %w", err)
+			}
+			if len(selections) > MaximumNewMemories {
+				return nil, errors.New("admit reconciliation candidates: selection exceeds new memory limit")
+			}
+			available := make(map[string]AdmissionRequest, len(batch))
+			for _, request := range batch {
+				available[request.Candidate.Key] = request
+			}
+			for _, selection := range selections {
+				request, found := available[selection.Key]
+				if !found || selectedAdmissions[selection.Key].Candidate.Key != "" || len(selection.RemoveKeys) > MaximumReplacements {
+					return nil, errors.New("admit reconciliation candidates: selection contains an unavailable or duplicate key")
+				}
+				neighbors := make(map[string]memory.Memory, len(request.Nearby))
+				for _, neighbor := range request.Nearby {
+					neighbors[neighbor.Memory.Key] = neighbor.Memory
+				}
+				removed := map[string]bool{}
+				var remove []memory.Memory
+				for _, key := range selection.RemoveKeys {
+					entry, found := neighbors[key]
+					if !found || key == selection.Key || seen[key] || removed[key] || removedBySelection[key] {
+						return nil, errors.New("admit reconciliation candidates: replacement is unavailable, duplicated, or proposed in the same session")
+					}
+					removed[key] = true
+					removedBySelection[key] = true
+					remove = append(remove, entry)
+				}
+				selectedAdmissions[selection.Key] = Admission{Candidate: request.Candidate, Remove: remove}
+			}
+			for _, request := range batch {
+				if selectedAdmissions[request.Candidate.Key].Candidate.Key != "" {
+					next = append(next, request)
+				}
+			}
+		}
+		if len(pool) <= MaximumNewMemories {
+			result := make([]Admission, 0, len(next))
+			for _, request := range next {
+				result = append(result, selectedAdmissions[request.Candidate.Key])
+			}
+			return result, nil
+		}
+		if len(next) >= len(pool) {
+			return nil, errors.New("admit reconciliation candidates: selection did not reduce candidates")
+		}
+		pool = next
+		if len(pool) == 0 {
+			return nil, nil
+		}
+	}
 }
 
 // Connect adds only grounded, bounded links to existing or same-batch Intents.
@@ -612,26 +728,33 @@ func validate(candidate Candidate, allowedEvidence map[string]userEvidence, allo
 	if err := validateCore(candidate, allowedMaterials); err != nil {
 		return err
 	}
-	for _, evidence := range candidate.EvidenceIDs {
+	return validateGrounding(candidate.EvidenceIDs, candidate.EvidenceRefs, candidate.ContextRefs, allowedEvidence, allowedContext)
+}
+
+func validateGrounding(evidenceIDs []string, evidenceRefs []memory.EvidenceRef, contextRefs []memory.ContextRef, allowedEvidence map[string]userEvidence, allowedContext map[string]contextPart) error {
+	if len(evidenceRefs) == 0 || len(evidenceIDs) == 0 {
+		return invalidCandidate("change has no user evidence", nil)
+	}
+	for _, evidence := range evidenceIDs {
 		if allowedEvidence[evidence].sequence == 0 {
 			return invalidCandidate("candidate cites non-user evidence", nil)
 		}
 	}
-	if len(candidate.EvidenceRefs) > 16 {
+	if len(evidenceRefs) > 16 {
 		return invalidCandidate("candidate cites more than 16 user excerpts", nil)
 	}
 	explicitEvidence := false
-	for _, evidence := range candidate.EvidenceIDs {
+	for _, evidence := range evidenceIDs {
 		user := allowedEvidence[evidence]
 		explicitEvidence = explicitEvidence || user.kind == "choice" || !vagueApproval(user.text)
 	}
 	if !explicitEvidence {
 		return invalidCandidate("candidate cites only ambiguous approval", nil)
 	}
-	if len(candidate.ContextRefs) > 16 {
+	if len(contextRefs) > 16 {
 		return invalidCandidate("candidate cites more than 16 assistant excerpts", nil)
 	}
-	for _, ref := range candidate.ContextRefs {
+	for _, ref := range contextRefs {
 		part, found := allowedContext[ref.PartID]
 		quote := strings.TrimSpace(ref.Quote)
 		if !found || part.messageID != ref.MessageID {
@@ -641,7 +764,7 @@ func validate(candidate Candidate, allowedEvidence map[string]userEvidence, allo
 			return invalidCandidate("candidate assistant quote is not an exact excerpt", nil)
 		}
 		approved := false
-		for _, evidence := range candidate.EvidenceIDs {
+		for _, evidence := range evidenceIDs {
 			user := allowedEvidence[evidence]
 			approved = approved || user.sequence > part.sequence && user.replyToID == part.messageID && (user.kind == "choice" || !vagueApproval(user.text))
 		}
