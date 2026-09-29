@@ -283,19 +283,46 @@ func TestTranscriptNormalizesStructuredUserChoice(t *testing.T) {
 }
 
 func TestTranscriptNormalizesCodexFunctionChoice(t *testing.T) {
-	records := []map[string]any{
-		{"type": "response_item", "payload": map[string]any{
-			"type": "function_call", "name": "request_user_input", "call_id": "choice-1",
-			"arguments": map[string]any{"questions": []any{map[string]any{"question": "Database?", "options": []any{map[string]any{"label": "SQLite"}, map[string]any{"label": "PostgreSQL"}}}}},
-		}},
-		{"type": "response_item", "payload": map[string]any{"type": "function_call_output", "call_id": "choice-1", "output": "PostgreSQL"}},
+	tests := []struct {
+		name, callType, outputType, toolName string
+		arguments, output                    any
+	}{
+		{
+			name: "function call", callType: "function_call", outputType: "function_call_output", toolName: "request_user_input",
+			arguments: map[string]any{"questions": []any{map[string]any{"question": "Database?", "options": []any{map[string]any{"label": "SQLite"}, map[string]any{"label": "PostgreSQL"}}}}},
+			output:    "PostgreSQL",
+		},
+		{
+			name: "async JSON strings", callType: "function_call", outputType: "function_call_output", toolName: "request_user_input_async",
+			arguments: `{"questions":[{"question":"Database?","options":[{"label":"SQLite"},{"label":"PostgreSQL"}]}]}`,
+			output:    `{"answers":{"database":"PostgreSQL"}}`,
+		},
+		{
+			name: "custom tool call", callType: "custom_tool_call", outputType: "custom_tool_call_output", toolName: "request_user_input",
+			arguments: `{"questions":[{"question":"Database?","options":[{"label":"SQLite"},{"label":"PostgreSQL"}]}]}`,
+			output:    `{"answers":{"database":"PostgreSQL"}}`,
+		},
 	}
-	messages, err := ReadTranscript(writeTranscript(t, records))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 2 || messages[0].Role != "assistant" || messages[0].Kind != "choice" || messages[1].Role != "user" || messages[1].Kind != "choice" || messages[1].ReplyToID != messages[0].ID {
-		t.Fatalf("Codex function choice was not normalized: %#v", messages)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			call := map[string]any{"type": test.callType, "name": test.toolName, "call_id": "choice-1"}
+			if test.callType == "custom_tool_call" {
+				call["input"] = test.arguments
+			} else {
+				call["arguments"] = test.arguments
+			}
+			records := []map[string]any{
+				{"type": "response_item", "payload": call},
+				{"type": "response_item", "payload": map[string]any{"type": test.outputType, "call_id": "choice-1", "output": test.output}},
+			}
+			messages, err := ReadTranscript(writeTranscript(t, records))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 2 || messages[0].Role != "assistant" || messages[0].Kind != "choice" || messages[1].Role != "user" || messages[1].Kind != "choice" || messages[1].ReplyToID != messages[0].ID || !strings.Contains(messages[0].Text, "PostgreSQL") || messages[1].Text != "PostgreSQL" {
+				t.Fatalf("Codex function choice was not normalized: %#v", messages)
+			}
+		})
 	}
 }
 

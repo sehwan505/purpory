@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -156,6 +157,7 @@ func ReadTranscript(path string) ([]Event, error) {
 				for index := range decoded.parts {
 					if decoded.parts[index].Kind == "tool_result" {
 						decoded.parts[index].Kind = "choice"
+						decoded.parts[index].Text = choiceAnswer(decoded.parts[index].Text)
 					}
 				}
 			} else {
@@ -1038,7 +1040,7 @@ func decodeMessage(record map[string]any) decodedMessage {
 				role = "assistant"
 			case "system", "system_message":
 				role = "system"
-			case "tool", "tool_result", "function_call_output":
+			case "tool", "tool_result", "function_call_output", "custom_tool_call_output":
 				role = "tool"
 			}
 		}
@@ -1114,7 +1116,7 @@ func decodeParts(value any) []Part {
 	case map[string]any:
 		kind := strings.ToLower(firstString(typed, "type"))
 		switch kind {
-		case "tool_use", "tool_call", "function_call":
+		case "tool_use", "tool_call", "function_call", "custom_tool_call":
 			name := firstString(typed, "name")
 			ref := firstString(typed, "id", "call_id")
 			input := typed["input"]
@@ -1126,7 +1128,7 @@ func decodeParts(value any) []Part {
 				parts = append(parts, choices(input)...)
 			}
 			return parts
-		case "tool_result", "function_call_output":
+		case "tool_result", "function_call_output", "custom_tool_call_output":
 			return []Part{{Kind: "tool_result", Ref: firstString(typed, "tool_use_id", "call_id", "id"), Text: boundedText(textValue(firstValue(typed, "content", "text", "output", "result")), 4096)}}
 		case "image", "image_url", "document", "file", "attachment":
 			return []Part{{Kind: "attachment", Name: firstString(typed, "name", "filename"), Ref: firstString(typed, "file_id", "url", "uri", "path", "id")}}
@@ -1145,6 +1147,12 @@ func decodeParts(value any) []Part {
 }
 
 func choices(value any) []Part {
+	if raw, ok := value.(string); ok {
+		var decoded any
+		if json.Unmarshal([]byte(boundedText(raw, 4096)), &decoded) == nil {
+			value = decoded
+		}
+	}
 	var result []Part
 	var walk func(any)
 	walk = func(raw any) {
@@ -1182,6 +1190,48 @@ func choices(value any) []Part {
 	}
 	walk(value)
 	return result
+}
+
+func choiceAnswer(value string) string {
+	var decoded any
+	if json.Unmarshal([]byte(value), &decoded) != nil {
+		return strings.TrimSpace(value)
+	}
+	return choiceAnswerValue(decoded)
+}
+
+func choiceAnswerValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		var values []string
+		for _, item := range typed {
+			if text := choiceAnswerValue(item); text != "" {
+				values = append(values, text)
+			}
+		}
+		return strings.Join(values, "\n")
+	case map[string]any:
+		for _, key := range []string{"answers", "answer", "selected", "value", "label", "text", "response", "responses", "result", "output"} {
+			if text := choiceAnswerValue(typed[key]); text != "" {
+				return text
+			}
+		}
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		var values []string
+		for _, key := range keys {
+			if text := choiceAnswerValue(typed[key]); text != "" {
+				values = append(values, text)
+			}
+		}
+		return strings.Join(values, "\n")
+	}
+	return ""
 }
 
 func textValue(value any) string {
@@ -1238,7 +1288,7 @@ func firstValue(value map[string]any, keys ...string) any {
 
 func choiceTool(name string) bool {
 	name = strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(name))
-	return name == "askuserquestion" || name == "requestuserinput"
+	return name == "askuserquestion" || name == "requestuserinput" || name == "requestuserinputasync"
 }
 
 func rolePrefix(role string) string {

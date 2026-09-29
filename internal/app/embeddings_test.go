@@ -44,8 +44,9 @@ func useEmbeddingServer(t *testing.T) {
 	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
 }
 
-func useSelectiveEmbeddingServer(t *testing.T) {
+func useSelectiveEmbeddingServer(t *testing.T) <-chan []string {
 	t.Helper()
+	requests := make(chan []string, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		var body struct {
 			Input []string `json:"input"`
@@ -54,11 +55,12 @@ func useSelectiveEmbeddingServer(t *testing.T) {
 			http.Error(response, err.Error(), http.StatusBadRequest)
 			return
 		}
+		requests <- body.Input
 		vectors := make([][]float64, len(body.Input))
 		for index, input := range body.Input {
 			vectors[index] = make([]float64, embeddingDimensions)
 			switch {
-			case input == "fallback-marker":
+			case input == semanticQueryInstruction+"fallback-marker":
 				vectors[index][0] = 1
 			case strings.Contains(input, "Dense-only"):
 				vectors[index][0] = 0.5
@@ -71,6 +73,7 @@ func useSelectiveEmbeddingServer(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("PURPORY_OLLAMA_URL", server.URL)
+	return requests
 }
 
 func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
@@ -143,7 +146,7 @@ func TestQueryFallsBackWhenSemanticSearchTimesOut(t *testing.T) {
 }
 
 func TestPrepareCombinesSemanticAndExactSeeds(t *testing.T) {
-	useSelectiveEmbeddingServer(t)
+	requests := useSelectiveEmbeddingServer(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
@@ -156,17 +159,25 @@ func TestPrepareCombinesSemanticAndExactSeeds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := service.SelectModel(ctx, "embedding", "qwen3-embedding:test"); err != nil {
+	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.SyncEmbeddings(ctx, 0); err != nil {
 		t.Fatal(err)
+	}
+	for _, input := range <-requests {
+		if strings.HasPrefix(input, "Instruct:") {
+			t.Fatalf("document embedding was instructed: %q", input)
+		}
 	}
 	query := "fallback-marker"
 	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	result, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "hybrid", WorkingDirectory: root, TokenBudget: 512})
 	if err != nil || result.Hints == nil || len(result.Hints.Nodes) != 2 || result.Hints.Nodes[0].ID != "knowledge:knowledge.exact" || result.Hints.Nodes[0].Match != "exact-seed" || result.Hints.Nodes[1].ID != "knowledge:knowledge.dense" || result.Hints.Nodes[1].Match != "semantic-seed" {
 		t.Fatalf("semantic and exact seeds were not combined: %#v %v", result, err)
+	}
+	if input := <-requests; len(input) != 1 || input[0] != semanticQueryInstruction+query {
+		t.Fatalf("query embedding input = %#v", input)
 	}
 }
 
