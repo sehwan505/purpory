@@ -18,6 +18,8 @@ const embeddingDimensions = 512
 
 const semanticQueryTimeout = 2 * time.Second
 
+const semanticQueryInstruction = "Instruct: Given a project-context search query, retrieve relevant project intent or knowledge that answers the query\nQuery: "
+
 type EmbeddingSyncResult struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
@@ -194,7 +196,11 @@ func (s *Service) semanticMatchesBatch(ctx context.Context, queries []string, no
 	if err != nil {
 		return nil, err
 	}
-	vectors, err := provider.Embed(queryContext, selected.Model, queries, selected.Dimensions)
+	instructed := make([]string, len(queries))
+	for index, query := range queries {
+		instructed[index] = semanticQueryInstruction + query
+	}
+	vectors, err := provider.Embed(queryContext, selected.Model, instructed, selected.Dimensions)
 	if err != nil {
 		return make([][]semanticMatch, len(queries)), nil // ponytail: dense retrieval is optional; exact and graph retrieval remain available.
 	}
