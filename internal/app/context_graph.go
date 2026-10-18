@@ -43,7 +43,10 @@ func newContextGraph(memories []memory.Memory, nodes []graph.Node, edges []graph
 		if leftIntent != rightIntent {
 			return leftIntent
 		}
-		return result.nodes[i].Label < result.nodes[j].Label
+		if result.nodes[i].Label != result.nodes[j].Label {
+			return result.nodes[i].Label < result.nodes[j].Label
+		}
+		return result.nodes[i].ID < result.nodes[j].ID
 	})
 	return result
 }
@@ -176,7 +179,17 @@ func (g contextGraph) explanation(node graph.Node) graph.Explanation {
 		}
 	}
 	sort.Slice(result.Connections, func(i, j int) bool {
-		return result.Connections[i].Direction+result.Connections[i].Relation+result.Connections[i].Node.Label < result.Connections[j].Direction+result.Connections[j].Relation+result.Connections[j].Node.Label
+		left, right := result.Connections[i], result.Connections[j]
+		if left.Direction != right.Direction {
+			return left.Direction < right.Direction
+		}
+		if left.Relation != right.Relation {
+			return left.Relation < right.Relation
+		}
+		if left.Node.Label != right.Node.Label {
+			return left.Node.Label < right.Node.Label
+		}
+		return left.Node.ID < right.Node.ID
 	})
 	if parent := topicParent(node.Path); parent != "" {
 		result.Paths = g.branches(parent, 12)

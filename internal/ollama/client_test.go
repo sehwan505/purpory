@@ -2,7 +2,6 @@ package ollama
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,14 +16,6 @@ func TestClient(t *testing.T) {
 			fmt.Fprint(response, `{"version":"0.11.0"}`)
 		case "/api/tags":
 			fmt.Fprint(response, `{"models":[{"name":"qwen3:4b","size":42,"modifiedAt":"today"}]}`)
-		case "/api/chat":
-			var body map[string]any
-			_ = json.NewDecoder(request.Body).Decode(&body)
-			if body["format"] != nil {
-				fmt.Fprint(response, `{"message":{"role":"assistant","content":"{\"answer\":\"hello\"}"}}`)
-			} else {
-				fmt.Fprint(response, `{"message":{"role":"assistant","content":"hello"}}`)
-			}
 		case "/api/pull":
 			fmt.Fprint(response, `{"status":"success"}`)
 		case "/api/embed":
@@ -47,16 +38,6 @@ func TestClient(t *testing.T) {
 	models, err := client.Models(context.Background())
 	if err != nil || len(models) != 1 || models[0].Name != "qwen3:4b" {
 		t.Fatalf("unexpected models: %#v, %v", models, err)
-	}
-	answer, err := client.Chat(context.Background(), "qwen3:4b", "hi")
-	if err != nil || answer != "hello" {
-		t.Fatalf("unexpected answer: %q, %v", answer, err)
-	}
-	var structured struct {
-		Answer string `json:"answer"`
-	}
-	if err := client.ChatJSON(context.Background(), "qwen3:4b", "system", "hi", map[string]any{"type": "object"}, &structured, 8192, time.Second); err != nil || structured.Answer != "hello" {
-		t.Fatalf("unexpected structured answer: %#v, %v", structured, err)
 	}
 	if err := client.Pull(context.Background(), "qwen3:4b"); err != nil {
 		t.Fatal(err)

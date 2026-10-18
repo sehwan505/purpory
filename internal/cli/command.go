@@ -17,7 +17,7 @@ import (
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 )
 
-const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] [--expect-project ID] <setup|project|remember|request|decision|review|prepare|query|explain|path|explore|embed|update|reconcile|maintenance|model|integration|preflight|session-end|session|version>"
+const usage = "usage: purpory [--root PATH] [--db PATH] [--project ID] [--expect-project ID] <setup|project|remember|review|prepare|query|explain|path|explore|embed|update|maintenance|model|integration|preflight|session-end|session|version>"
 
 func runCLI(ctx context.Context, service *product.Service, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) == 0 {
@@ -37,7 +37,6 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		confirm := flags.Bool("confirm", false, "confirm a memory is current")
 		batch := flags.String("batch", "", "preview or apply a JSON batch file (- for stdin)")
 		apply := flags.Bool("apply", false, "apply a batch after optimistic-hash validation")
-		session := flags.String("session", "", "reconciliation session ID")
 		prefix := flags.String("prefix", "", "key prefix")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
@@ -64,11 +63,11 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			if err != nil {
 				return err
 			}
-			result, err := service.ReconcileMemoryBatch(ctx, changes, *apply, *session)
+			result, err := service.MemoryBatch(ctx, changes, *apply)
 			return writeJSON(output, result, err)
 		}
-		if *apply || *session != "" {
-			return errors.New("remember --apply and --session require --batch")
+		if *apply {
+			return errors.New("remember --apply requires --batch")
 		}
 		if *prefix != "" {
 			return errors.New("remember --prefix requires --list")
@@ -98,58 +97,6 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 		result, err := service.Remember(ctx, flags.Arg(0), memory.Kind(*kind), valuePointer, sourcePointer)
 		return writeJSON(output, result, err)
-	case "request":
-		if len(arguments) == 2 && arguments[1] == "list" {
-			result, err := service.ContextRequests(ctx, "")
-			return writeJSON(output, result, err)
-		}
-		if len(arguments) == 3 && arguments[1] == "list" {
-			result, err := service.ContextRequests(ctx, arguments[2])
-			return writeJSON(output, result, err)
-		}
-		if len(arguments) == 4 && arguments[1] == "resolve" {
-			id, err := strconv.ParseInt(arguments[2], 10, 64)
-			if err != nil || id <= 0 {
-				return errors.New("request resolve requires a positive request ID")
-			}
-			result, err := service.ResolveContextRequest(ctx, id, arguments[3])
-			return writeJSON(output, result, err)
-		}
-		return errors.New("request requires list [open|resolved] or resolve ID KEY")
-	case "decision":
-		if len(arguments) == 2 && arguments[1] == "list" {
-			result, err := service.ContextDecisions(ctx, 100)
-			return writeJSON(output, result, err)
-		}
-		if len(arguments) >= 4 && arguments[1] == "feedback" {
-			id, err := strconv.ParseInt(arguments[2], 10, 64)
-			if err != nil || id <= 0 {
-				return errors.New("decision feedback requires a positive decision ID")
-			}
-			feedback := contextprepare.Feedback{DecisionID: id, Verdict: arguments[3]}
-			flags := flag.NewFlagSet("decision feedback", flag.ContinueOnError)
-			flags.SetOutput(output)
-			expectedAction := flags.String("expected-action", "", "skip, retrieve, or ask")
-			note := flags.String("note", "", "feedback note")
-			var keys stringList
-			flags.Var(&keys, "key", "expected memory key (repeatable)")
-			if err := flags.Parse(arguments[4:]); err != nil {
-				return err
-			}
-			if flags.NArg() != 0 {
-				return errors.New("decision feedback accepts no extra arguments")
-			}
-			if *expectedAction != "" {
-				feedback.ExpectedAction = expectedAction
-			}
-			if *note != "" {
-				feedback.Note = note
-			}
-			feedback.ExpectedKeys = keys
-			result, err := service.ContextFeedback(ctx, feedback)
-			return writeJSON(output, result, err)
-		}
-		return errors.New("decision requires list or feedback ID VERDICT")
 	case "review":
 		if len(arguments) >= 2 && arguments[1] == "list" {
 			status := ""
@@ -239,27 +186,19 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 	case "prepare":
 		flags := flag.NewFlagSet(command, flag.ContinueOnError)
 		flags.SetOutput(output)
-		var paths stringList
-		flags.Var(&paths, "path", "active project path (repeatable)")
 		cwd := flags.String("cwd", "", "active working directory")
 		session := flags.String("session", "", "agent session ID")
 		budget := flags.Int("budget", 2_000, "context token budget")
 		jsonOutput := flags.Bool("json", false, "write the full result as JSON")
-		retainInput := flags.Bool("retain-input", false, "retain request text in the decision audit")
-		noRetainInput := flags.Bool("no-retain-input", false, "store only the request hash")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 1 {
 			return errors.New("prepare requires one message")
 		}
-		if *retainInput && *noRetainInput {
-			return errors.New("prepare --retain-input and --no-retain-input cannot be combined")
-		}
-		retain := !*noRetainInput
 		result, err := service.PrepareContext(ctx, contextprepare.Request{
 			Message: flags.Arg(0), SessionID: *session, WorkingDirectory: *cwd,
-			ActivePaths: paths, TokenBudget: *budget, RetainInput: retain,
+			TokenBudget: *budget,
 		})
 		if err != nil {
 			return err
@@ -270,11 +209,6 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		switch result.Action {
 		case "retrieve":
 			_, err = fmt.Fprintln(output, contextprepare.RenderHintMap(result.Hints))
-			return err
-		case "ask":
-			if result.Clarification != nil {
-				_, err = fmt.Fprintln(output, *result.Clarification)
-			}
 			return err
 		default:
 			return nil
@@ -356,7 +290,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		return err
 	case "model":
 		if len(arguments) < 2 {
-			return errors.New("model requires status, list, run, install, select, or start")
+			return errors.New("model requires status, list, install, select, or start")
 		}
 		switch arguments[1] {
 		case "status":
@@ -365,16 +299,6 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		case "list":
 			result, err := service.Models(ctx)
 			return writeJSON(output, result, err)
-		case "run":
-			if len(arguments) != 4 {
-				return errors.New("model run requires a model and prompt")
-			}
-			result, err := service.RunModel(ctx, arguments[2], arguments[3])
-			if err != nil {
-				return err
-			}
-			_, err = fmt.Fprintln(output, result)
-			return err
 		case "start":
 			wait := 10 * time.Second
 			if len(arguments) == 3 {
@@ -400,7 +324,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 				return writeJSON(output, result, err)
 			}
 			if len(arguments) == 5 {
-				result, err := service.SelectModelProvider(ctx, arguments[2], arguments[3], arguments[4], 0, 0)
+				result, err := service.SelectModelProvider(ctx, arguments[2], arguments[3], arguments[4], 0)
 				return writeJSON(output, result, err)
 			}
 			return errors.New("model select requires a role, optional provider, and model")
@@ -417,7 +341,7 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 			result, err := service.InstallModel(ctx, arguments[2], role)
 			return writeJSON(output, result, err)
 		default:
-			return errors.New("model requires status, list, run, install, select, provider, or start")
+			return errors.New("model requires status, list, install, select, provider, or start")
 		}
 	case "preflight":
 		if len(arguments) != 2 {
@@ -425,17 +349,10 @@ func runCLI(ctx context.Context, service *product.Service, arguments []string, i
 		}
 		return runPreflight(ctx, service, arguments[1], input, output)
 	case "session-end":
-		if len(arguments) < 2 || len(arguments) > 3 || len(arguments) == 3 && arguments[2] != "--defer" {
-			return errors.New("session-end requires codex, claude, or hermes and optional --defer")
+		if len(arguments) != 2 {
+			return errors.New("session-end requires codex, claude, or hermes")
 		}
-		_, err := runSessionEnd(ctx, service, arguments[1], input)
-		if err != nil {
-			return err
-		}
-		if len(arguments) == 3 {
-			return nil
-		}
-		return startReconciliation()
+		return runSessionEnd(ctx, service, arguments[1], input)
 	case "session":
 		if len(arguments) < 3 || len(arguments) > 4 {
 			return errors.New("session requires start or end, an ID, and optionally an agent")
@@ -478,15 +395,8 @@ func runModelProviderCommand(ctx context.Context, service *product.Service, argu
 		result, err := service.ClearProviderCredential(ctx, arguments[1])
 		return writeJSON(output, result, err)
 	}
-	if len(arguments) == 2 && arguments[0] == "login" && arguments[1] == "openai-codex" {
-		state, err := service.LoginCodexOAuth(ctx, output)
-		if err != nil {
-			return err
-		}
-		return writeJSON(output, state, nil)
-	}
 	if len(arguments) < 2 || arguments[0] != "configure" {
-		return errors.New("model provider requires status, configure, login openai-codex, or clear-key")
+		return errors.New("model provider requires status, configure , or clear-key")
 	}
 	provider := arguments[1]
 	flags := flag.NewFlagSet("model provider configure", flag.ContinueOnError)

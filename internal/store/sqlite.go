@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sehwan505/purpory/internal/graph"
-	"github.com/sehwan505/purpory/internal/memory"
 	_ "modernc.org/sqlite"
 )
 
@@ -22,47 +20,13 @@ import (
 var migrations embed.FS
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 type SaveResult struct {
 	Action    string `json:"action"`
 	VersionID int64  `json:"versionId"`
-}
-
-var ErrMemoryConflict = errors.New("reconcile memory: concurrent change")
-
-type MemoryProposal struct {
-	Memory             memory.Memory
-	ExpectedHash       *string
-	EvidenceIDs        []string
-	EvidenceRefs       []memory.EvidenceRef
-	ContextRefs        []memory.ContextRef
-	Links              []graph.Link
-	LinkEvidence       map[graph.Link][]memory.EvidenceRef
-	RetiredLinks       []graph.Link
-	RetirementEvidence map[graph.Link][]memory.EvidenceRef
-	ExpectedLinkStates map[graph.Link]string
-}
-
-type MemoryDeletion struct {
-	ProjectID    string
-	Key          string
-	ExpectedHash string
-	EvidenceIDs  []string
-	EvidenceRefs []memory.EvidenceRef
-	ContextRefs  []memory.ContextRef
-}
-
-type ReconcileResult struct {
-	Saves   []SaveResult
-	Deleted int
-}
-
-type NodeUsage struct {
-	Count      int
-	Sessions   int
-	LastUsedAt int64
 }
 
 func DefaultPath() (string, error) {
@@ -89,7 +53,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, path: path}
 	if err := store.configure(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -181,6 +145,25 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		if applied {
 			continue
+		}
+		if version == 27 {
+			var populated bool
+			if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM projects) OR EXISTS(SELECT 1 FROM settings) OR EXISTS(SELECT 1 FROM provider_credentials)").Scan(&populated); err != nil {
+				return err
+			}
+			if populated {
+				backup, err := os.CreateTemp(filepath.Dir(s.path), filepath.Base(s.path)+".before-027-*.bak")
+				if err != nil {
+					return fmt.Errorf("create migration backup: %w", err)
+				}
+				if err := backup.Close(); err != nil {
+					return fmt.Errorf("close migration backup: %w", err)
+				}
+				if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", backup.Name()); err != nil {
+					_ = os.Remove(backup.Name())
+					return fmt.Errorf("backup store before migration 27: %w", err)
+				}
+			}
 		}
 		script, err := migrations.ReadFile("migrations/" + entry.Name())
 		if err != nil {

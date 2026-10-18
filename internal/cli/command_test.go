@@ -57,27 +57,8 @@ func TestUpdateJSON(t *testing.T) {
 	}
 }
 
-func TestReconcileExecutorOverrideIsScoped(t *testing.T) {
-	t.Setenv("PURPORY_RECONCILE_DIR", filepath.Join(t.TempDir(), "reconcile"))
-	t.Setenv("PURPORY_RECONCILE_PROVIDER", "ollama")
-	t.Setenv("PURPORY_RECONCILE_MODEL", "local-model")
-	if err := runReconcileCommand(context.Background(), []string{"--executor", "codex"}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	if os.Getenv("PURPORY_RECONCILE_PROVIDER") != "ollama" || os.Getenv("PURPORY_RECONCILE_MODEL") != "local-model" {
-		t.Fatal("reconcile executor override leaked into the process")
-	}
-	if err := runReconcileCommand(context.Background(), []string{"--executor", "openai-codex", "--model", "gpt-5.6-sol"}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	if os.Getenv("PURPORY_RECONCILE_PROVIDER") != "ollama" || os.Getenv("PURPORY_RECONCILE_MODEL") != "local-model" {
-		t.Fatal("OAuth executor override leaked into the process")
-	}
-}
-
 func TestMaintenanceRunsWithoutProject(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "purpory.db")
-	t.Setenv("PURPORY_RECONCILE_DIR", filepath.Join(t.TempDir(), "reconcile"))
 	var output, errorOutput bytes.Buffer
 	if code := Run([]string{"--db", database, "maintenance"}, strings.NewReader(""), &output, &errorOutput); code != 0 {
 		t.Fatalf("maintenance failed: %s", errorOutput.String())
@@ -180,7 +161,7 @@ func TestPrepareCLIOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	arguments := []string{"prepare", "--session", "cli", "--budget", "512", "--path", "internal/store", "--json", "--no-retain-input", "decision.database"}
+	arguments := []string{"prepare", "--budget", "512", "--json", "decision.database"}
 	if err := runCLI(context.Background(), service, arguments, bytes.NewReader(nil), &output); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +169,7 @@ func TestPrepareCLIOptions(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "retrieve" || result.Hints == nil || len(result.Hints.Nodes) == 0 || result.DecisionID == 0 {
+	if result.Action != "retrieve" || result.Hints == nil || len(result.Hints.Nodes) == 0 {
 		t.Fatalf("unexpected prepare result: %#v", result)
 	}
 }
@@ -337,7 +318,7 @@ func TestMemoryLifecycleCLI(t *testing.T) {
 	changes := []memory.BatchChange{{Key: "knowledge.demo", Kind: memory.Note, Value: &next, ExpectedHash: &values[0].Hash, ExpectedHashSet: true}}
 	encoded, _ := json.Marshal(changes)
 	var output bytes.Buffer
-	if err := runCLI(ctx, service, []string{"remember", "--batch", "-", "--apply", "--session", "cli"}, bytes.NewReader(encoded), &output); err != nil {
+	if err := runCLI(ctx, service, []string{"remember", "--batch", "-", "--apply"}, bytes.NewReader(encoded), &output); err != nil {
 		t.Fatal(err)
 	}
 	var result memory.BatchResult

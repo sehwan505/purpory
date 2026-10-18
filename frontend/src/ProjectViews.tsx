@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
-import type { app, graph, memory, prepare, project, reconcile } from "../wailsjs/go/models";
+import type { app, graph, memory, project } from "../wailsjs/go/models";
 import { Dropdown } from "./Dropdown";
 
-export type Page = "overview" | "workspace" | "reconcile" | "graph" | "projects" | "settings";
+export type Page = "overview" | "workspace" | "graph" | "projects" | "settings";
 type GraphPosition = { x: number; y: number; vx: number; vy: number };
 
 export function ProjectPicker({ current, projects, busy, onSelect, onManage }: {
@@ -39,7 +39,6 @@ export function NavIcon({ page }: { page: Page }) {
   const paths: Record<Page, string> = {
     overview: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
     workspace: "M4 5h6l2 2h8v12H4z",
-    reconcile: "M20 7h-5V2M4 17h5v5M18 12a7 7 0 0 0-12-5l-2 2M6 12a7 7 0 0 0 12 5l2-2",
     graph: "M6 5a2 2 0 1 0 0 .01M18 7a2 2 0 1 0 0 .01M8 18a2 2 0 1 0 0 .01M16 16a2 2 0 1 0 0 .01M7.7 6.1l8.6.8M7 6.8l1 9.3m2-1 6-6",
     projects: "M4 5h16v14H4zM8 9h8M8 13h5",
     settings: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4",
@@ -422,132 +421,28 @@ function ProjectDeleteDialog({ project, busy, onCancel, onConfirm }: {
   </dialog>;
 }
 
-export function ReconciliationQueue({ runs, events }: { runs: reconcile.Run[]; events: memory.ReconcileEvent[] }) {
-  const [tab, setTab] = useState<"board" | "detail">("board");
-  const [selectedID, setSelectedID] = useState("");
-  const working = runs.filter(run => !["queued", "completed", "failed"].includes(run.phase));
-  const waiting = runs.filter(run => run.phase === "queued").sort((left, right) => Date.parse(left.queuedAt) - Date.parse(right.queuedAt));
-  const history = runs.filter(run => run.phase === "completed" || run.phase === "failed").sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-  const selected = runs.find(run => run.id === selectedID) ?? runs[0];
-  const openDetail = (run: reconcile.Run) => { setSelectedID(run.id); setTab("detail"); };
-  return <section className="reconcileQueue">
-    <div className="reconcileTabs" role="tablist" aria-label="Reconcile 보기"><button type="button" role="tab" aria-selected={tab === "board"} onClick={() => setTab("board")}>Board <b>{runs.length}</b></button><button type="button" role="tab" aria-selected={tab === "detail"} disabled={!selected} onClick={() => setTab("detail")}>Session Detail</button></div>
-    {tab === "detail" && selected ? <ReconciliationDetail runs={runs} run={selected} events={events.filter(event => event.sessionId === selected.sessionId)} onSelect={setSelectedID} /> : <div className="queueBoard">
-    <section className="panel queueColumn queuedColumn">
-      <header className="queueColumnHeader"><QueueStageIcon stage="queued" /><div><small>STEP 1</small><h2>Queued</h2><p>먼저 등록된 작업부터 처리합니다.</p></div><b>{waiting.length}</b></header>
-      {waiting.length === 0 ? <p className="empty">대기 중인 작업이 없습니다.</p> : <div className="queueList">{waiting.map((run, index) => <QueueRun key={run.id} run={run} position={index + 1} onSelect={() => openDetail(run)} />)}</div>}
-    </section>
-    <span className="queueFlowArrow" aria-hidden="true">→</span>
-    <section className="panel queueColumn processingColumn">
-      <header className="queueColumnHeader"><QueueStageIcon stage="processing" /><div><small>STEP 2</small><h2>Processing</h2><p>현재 Worker의 처리 단계입니다.</p></div><b>{working.length}</b></header>
-      {working.length === 0 ? <p className="empty">Worker가 처리 중인 작업이 없습니다.</p> : <div className="queueList">{working.map(run => <QueueRun key={run.id} run={run} onSelect={() => openDetail(run)} />)}</div>}
-    </section>
-    <span className="queueFlowArrow" aria-hidden="true">→</span>
-    <section className="panel queueColumn doneColumn">
-      <header className="queueColumnHeader"><QueueStageIcon stage="done" /><div><small>STEP 3</small><h2>Done</h2><p>최근 완료 또는 실패한 작업입니다.</p></div><b>{history.length}</b></header>
-      {history.length === 0 ? <p className="empty">처리 기록이 없습니다.</p> : <div className="queueList">{history.map(run => <QueueRun key={run.id} run={run} onSelect={() => openDetail(run)} />)}</div>}
-    </section>
-    </div>}
-  </section>;
-}
-
-function ReconciliationDetail({ runs, run, events, onSelect }: { runs: reconcile.Run[]; run: reconcile.Run; events: memory.ReconcileEvent[]; onSelect: (id: string) => void }) {
-  const changes = events.flatMap(event => event.changes ?? []);
-  const links = events.flatMap(event => event.links ?? []);
-  return <section className="panel reconcileDetail">
-    <header className="reconcileDetailHeader"><div><p className="eyebrow">RECONCILE SESSION</p><h2>{run.agent} · {reconciliationLabel(run.phase)}</h2><p title={run.cwd}>{run.cwd}</p></div><Dropdown value={run.id} onChange={onSelect} ariaLabel="Reconcile session 선택" options={runs.map(item => ({ value: item.id, label: `${item.agent} · ${relativeTime(item.updatedAt)} · ${compactPath(item.cwd)}` }))} /></header>
-    <div className="reconcileDetailMeta"><span>Session <code>{run.sessionId}</code></span><span>등록 {relativeTime(run.queuedAt)}</span><span>갱신 {relativeTime(run.updatedAt)}</span><span>{run.detail || "진행 정보 없음"}</span></div>
-    <div className="reconcileResultGrid">
-      <section><div className="reconcileResultTitle"><div><p className="eyebrow">VALUES</p><h3>추가·변경·삭제된 값</h3></div><b>{changes.length}</b></div>
-        {changes.length === 0 ? <p className="empty">이 세션에서 적용된 값이 없습니다.</p> : <div className="reconcileChangeList">{changes.map((change, index) => <article key={`${change.versionId}-${change.key}-${index}`}><header><span className={`reconcileAction ${change.action}`}>{change.action === "created" ? "추가" : change.action === "deleted" ? "삭제" : "변경"}</span><strong>{change.key}</strong><small>{change.after?.kind ?? change.before?.kind}</small></header>{change.before && <div className="reconcileBefore"><span>{change.action === "deleted" ? "삭제된 값" : "이전"}</span><p>{memoryContent(change.before)}</p></div>}{change.after && <div className="reconcileAfter"><span>{change.before ? "현재" : "값"}</span><p>{memoryContent(change.after)}</p></div>}<Evidence ids={change.evidenceIds} /></article>)}</div>}
-      </section>
-      <section><div className="reconcileResultTitle"><div><p className="eyebrow">LINKS</p><h3>생성된 연결</h3></div><b>{links.length}</b></div>
-        {links.length === 0 ? <p className="empty">이 세션에서 생성된 연결이 없습니다.</p> : <div className="reconcileLinkList">{links.map((link, index) => <article key={`${link.sourceKind}-${link.sourceRef}-${link.relation}-${link.targetRef}-${index}`}><div><small>{link.sourceKind}</small><strong>{link.sourceRef}</strong></div><span><b>{link.relation}</b>→</span><div><small>{link.targetKind}</small><strong>{link.targetRef}</strong></div><Evidence ids={link.evidenceIds} /></article>)}</div>}
-      </section>
-    </div>
-  </section>;
-}
-
-function Evidence({ ids = [] }: { ids?: string[] }) {
-  return ids.length > 0 ? <div className="reconcileEvidence"><span>근거</span>{ids.map(id => <code key={id}>{id}</code>)}</div> : null;
-}
-
-function memoryContent(item: memory.Memory) {
-  return item.value ?? item.source ?? "내용 없음";
-}
-
-function QueueStageIcon({ stage }: { stage: "queued" | "processing" | "done" }) {
-  const paths = {
-    queued: "M12 3a9 9 0 1 0 9 9M12 7v5l3 2",
-    processing: "M20 7h-5V2M4 17h5v5M18 12a7 7 0 0 0-12-5l-2 2M6 12a7 7 0 0 0 12 5l2-2",
-    done: "m5 12 4 4L19 6",
-  };
-  return <span className={`queueStageIcon ${stage}`} aria-hidden="true"><svg viewBox="0 0 24 24"><path d={paths[stage]} /></svg></span>;
-}
-
-const reconciliationPhases = ["running", "reading", "updating", "proposing", "applying"];
-
-function QueueRun({ run, position, onSelect }: { run: reconcile.Run; position?: number; onSelect: () => void }) {
-  const phase = reconciliationPhases.indexOf(run.phase);
-  const marker = position ?? (run.phase === "completed" ? "✓" : run.phase === "failed" ? "!" : "●");
-  return <button type="button" className={`queueRun ${run.phase}`} aria-label={`${run.agent} Reconcile 상세 보기`} onClick={onSelect}>
-    <b className="queuePosition" aria-label={position ? `대기 순서 ${position}` : undefined}>{marker}</b>
-    <div className="queueRunBody">
-      <div className="queueRunHead"><span>{run.agent} · {run.reason || "session end"}</span><b>{reconciliationLabel(run.phase)}</b></div>
-      <strong title={run.cwd}>{compactPath(run.cwd)}</strong>
-      <p>{run.detail || "진행 정보 대기 중"}</p>
-      <span className="queueRunMeta"><span>Session · 등록 {relativeTime(run.queuedAt)} · 갱신 {relativeTime(run.updatedAt)}</span><code title={run.sessionId}>{run.sessionId}</code></span>
-      {phase >= 0 && <div className="queueProgress" aria-label={`현재 단계 ${reconciliationLabel(run.phase)}`}>{reconciliationPhases.map((value, index) => <i key={value} className={index <= phase ? "reached" : ""} />)}</div>}
-    </div>
-  </button>;
-}
-
-export function WorkspaceAttention({ requests, reviews, memories, busy, onResolveRequest, onResolveReview, onChangeReview, onOpenMemory }: {
-  requests: prepare.ContextRequest[];
+export function WorkspaceAttention({ reviews, memories, busy, onResolveReview, onChangeReview, onOpenMemory }: {
   reviews: memory.Review[];
   memories: memory.Memory[];
   busy: boolean;
-  onResolveRequest: (event: FormEvent<HTMLFormElement>, id: number) => void;
   onResolveReview: (id: number) => void;
   onChangeReview: (event: FormEvent<HTMLFormElement>, review: memory.Review) => void;
   onOpenMemory: (key: string) => void;
 }) {
   return <section className="panel operationsPanel">
-    <div className="sectionTitle"><div><p className="eyebrow">ATTENTION</p><h2>확인이 필요한 항목</h2></div><span>{requests.length + reviews.length}</span></div>
-    <div className="operationsGrid compactOperations">
-      <section className="operationCard"><div className="cardTitle"><div><p className="eyebrow">REQUESTS</p><h3>Context 요청</h3></div><strong>{requests.length}</strong></div>
-        {requests.length === 0 ? <p className="empty">열린 Context 요청이 없습니다.</p> : <div className="operationList">{requests.map(request => <article key={request.id}>
-          <div className="itemMeta"><span>#{request.id} · {relativeTime(request.createdAt)}</span><span>{request.sessionId}</span></div><p>{request.need}</p>
-          <form className="inlineForm" onSubmit={event => onResolveRequest(event, request.id)}><Dropdown name="memory" ariaLabel="해결 근거" defaultValue="" required options={[{ value: "", label: "해결 근거 선택", disabled: true }, ...memories.map(item => ({ value: item.key, label: item.key }))]} /><button disabled={busy || memories.length === 0}>해결</button></form>
-        </article>)}</div>}
-      </section>
-      <section className="operationCard"><div className="cardTitle"><div><p className="eyebrow">NEEDS REVIEW</p><h3>메모리 검토</h3></div><strong>{reviews.length}</strong></div>
-        {reviews.length === 0 ? <p className="empty">검토할 메모리가 없습니다.</p> : <div className="operationList">{reviews.map(review => <article key={review.id}>
-          <div className="itemMeta"><span>{review.sourceType} · {relativeTime(review.createdAt)}</span><span>#{review.id}</span></div><strong>{review.key}</strong><p>{review.reason}</p><small>{review.sourceId}</small>
-          <div className="itemActions"><button className="secondary" disabled={busy} onClick={() => onResolveReview(review.id)}>현재 내용 유지</button><button className="textButton" onClick={() => onOpenMemory(review.key)}>Graph에서 확인</button></div>
-          <details className="reviewChange"><summary>내용 수정 후 해결</summary><form onSubmit={event => onChangeReview(event, review)}><div className="dropdownField"><label htmlFor={`review-kind-${review.id}`}>종류</label><Dropdown id={`review-kind-${review.id}`} name="kind" defaultValue={memories.find(item => item.key === review.key)?.kind || "note"} options={[{ value: "note", label: "지식" }, { value: "decision", label: "결정" }, { value: "reference", label: "참조" }]} /></div><label>새 내용<textarea name="value" defaultValue={memories.find(item => item.key === review.key)?.value || ""} required /></label><button disabled={busy}>수정 적용</button></form></details>
-        </article>)}</div>}
-      </section>
-    </div>
+    <div className="sectionTitle"><div><p className="eyebrow">NEEDS REVIEW</p><h2>메모리 검토</h2></div><span>{reviews.length}개</span></div>
+    {reviews.length === 0 ? <p className="empty">검토할 메모리가 없습니다.</p> : <div className="operationList">{reviews.map(review => <article key={review.id}>
+      <div className="itemMeta"><span>{review.sourceType} · {relativeTime(review.createdAt)}</span><span>#{review.id}</span></div><strong>{review.key}</strong><p>{review.reason}</p><small>{review.sourceId}</small>
+      <div className="itemActions"><button className="secondary" disabled={busy} onClick={() => onResolveReview(review.id)}>현재 내용 유지</button><button className="textButton" onClick={() => onOpenMemory(review.key)}>Graph에서 확인</button></div>
+      <details className="reviewChange"><summary>내용 수정 후 해결</summary><form onSubmit={event => onChangeReview(event, review)}><div className="dropdownField"><label htmlFor={`review-kind-${review.id}`}>종류</label><Dropdown id={`review-kind-${review.id}`} name="kind" defaultValue={memories.find(item => item.key === review.key)?.kind || "note"} options={[{ value: "note", label: "지식" }, { value: "decision", label: "결정" }, { value: "reference", label: "참조" }]} /></div><label>새 내용<textarea name="value" defaultValue={memories.find(item => item.key === review.key)?.value || ""} required /></label><button disabled={busy}>수정 적용</button></form></details>
+    </article>)}</div>}
   </section>;
 }
 
-export function WorkspaceHistory({ requests, reviews, decisions, busy, onFeedback }: {
-  requests: prepare.ContextRequest[];
-  reviews: memory.Review[];
-  decisions: prepare.Decision[];
-  busy: boolean;
-  onFeedback: (event: FormEvent<HTMLFormElement>, id: number) => void;
-}) {
+export function WorkspaceHistory({ reviews }: { reviews: memory.Review[] }) {
   return <section className="panel operationsPanel">
-    <div className="sectionTitle"><div><p className="eyebrow">ACTIVITY HISTORY</p><h2>요청·검토·Prepare 기록</h2></div><span>{requests.length + reviews.length + decisions.length}</span></div>
-    <div className="operationsGrid">
-      <section className="operationCard"><div className="cardTitle"><h3>해결된 Context 요청</h3><strong>{requests.length}</strong></div><div className="operationList">{requests.length === 0 ? <p className="empty">해결 기록이 없습니다.</p> : requests.map(item => <article key={item.id}><div className="itemMeta"><span>#{item.id}</span><span>{relativeTime(item.resolvedAt || item.createdAt)}</span></div><p>{item.need}</p><strong>{item.resolvedKey || "근거 없음"}</strong></article>)}</div></section>
-      <section className="operationCard"><div className="cardTitle"><h3>완료된 메모리 검토</h3><strong>{reviews.length}</strong></div><div className="operationList">{reviews.length === 0 ? <p className="empty">검토 기록이 없습니다.</p> : reviews.map(item => <article key={item.id}><div className="itemMeta"><span>#{item.id} · {item.outcome}</span><span>{relativeTime(item.resolvedAt || item.createdAt)}</span></div><strong>{item.key}</strong><p>{item.reason}</p></article>)}</div></section>
-      <section className="operationCard auditCard"><div className="cardTitle"><h3>최근 Prepare 판단</h3><strong>{decisions.length}</strong></div>
-        {decisions.length === 0 ? <p className="empty">판단 기록이 없습니다.</p> : <div className="auditList">{decisions.map(decision => <details key={decision.id}><summary><span className={`action ${decision.finalAction}`}>{decision.finalAction}</span><strong>{decision.inputText || `입력 해시 ${decision.inputHash.slice(0, 12)}`}</strong><small>{relativeTime(decision.createdAt)}</small></summary><div className="auditBody"><p>{decision.proposal.reasonCode} · {(decision.hints?.nodes ?? []).map(item => item.path || item.id).join(", ") || "힌트 없음"}</p><form className="feedbackForm" onSubmit={event => onFeedback(event, decision.id)}><div className="dropdownField"><label htmlFor={`decision-verdict-${decision.id}`}>판단 평가</label><Dropdown id={`decision-verdict-${decision.id}`} name="verdict" defaultValue={decision.feedback?.verdict || "correct"} options={[{ value: "correct", label: "맞음" }, { value: "incorrect", label: "수정 필요" }]} /></div><div className="dropdownField"><label htmlFor={`decision-action-${decision.id}`}>기대한 동작</label><Dropdown id={`decision-action-${decision.id}`} name="expectedAction" defaultValue={decision.feedback?.expectedAction || ""} options={[{ value: "", label: "해당 없음" }, { value: "skip", label: "skip" }, { value: "retrieve", label: "retrieve" }, { value: "ask", label: "ask" }]} /></div><label>기대한 메모리 키<input name="expectedKeys" defaultValue={decision.feedback?.expectedKeys?.join(", ") || ""} /></label><label>메모<input name="note" defaultValue={decision.feedback?.note || ""} /></label><button disabled={busy}>피드백 저장</button></form></div></details>)}</div>}
-      </section>
-    </div>
+    <div className="sectionTitle"><div><p className="eyebrow">REVIEW HISTORY</p><h2>완료된 메모리 검토</h2></div><span>{reviews.length}개</span></div>
+    {reviews.length === 0 ? <p className="empty">검토 기록이 없습니다.</p> : <div className="operationList">{reviews.map(item => <article key={item.id}><div className="itemMeta"><span>#{item.id} · {item.outcome === "keep" ? "현재 내용 유지" : item.outcome === "change" ? "내용 수정" : item.outcome}</span><span>{relativeTime(item.resolvedAt || item.createdAt)}</span></div><strong>{item.key}</strong><p>{item.reason}</p></article>)}</div>}
   </section>;
 }
 
@@ -595,15 +490,6 @@ function SessionCard({ session }: { session: project.Session }) {
   return <div className={`sessionNode ${session.status}`}><span>{session.agent} · {session.status}</span><strong>{session.id}</strong><small>{relativeTime(session.updatedAt)} · {items.length}개 Context 전달</small>
     {items.length > 0 && <details><summary>전달된 Context 보기</summary><ul>{items.map((item, index) => <li key={`${item.key}-${item.valueHash}-${index}`}><b>{item.label || item.key}</b><span>{item.kind || "context"}</span>{item.preview && <p>{item.preview}</p>}</li>)}</ul></details>}
   </div>;
-}
-
-export function reconciliationLabel(phase: string) {
-  const labels: Record<string, string> = {
-    queued: "Reconcile 대기", running: "Reconcile 시작", reading: "Transcript 확인",
-    updating: "Material 최신화", proposing: "의도 후보 추출", applying: "메모리 반영",
-    completed: "Reconcile 완료", failed: "Reconcile 실패",
-  };
-  return labels[phase] ?? phase;
 }
 
 export function relativeTime(value: string) {

@@ -6,13 +6,12 @@ import (
 )
 
 type MaintenanceResult struct {
-	OrphanEmbeddings           int64 `json:"orphanEmbeddings"`
-	PrunedMemoryVersions       int64 `json:"prunedMemoryVersions"`
-	PrunedReconciliationEvents int64 `json:"prunedReconciliationEvents"`
-	PrunedNavigationEvents     int64 `json:"prunedNavigationEvents"`
-	BytesBefore                int64 `json:"bytesBefore"`
-	BytesAfter                 int64 `json:"bytesAfter"`
-	BytesReclaimed             int64 `json:"bytesReclaimed"`
+	OrphanEmbeddings       int64 `json:"orphanEmbeddings"`
+	PrunedMemoryVersions   int64 `json:"prunedMemoryVersions"`
+	PrunedNavigationEvents int64 `json:"prunedNavigationEvents"`
+	BytesBefore            int64 `json:"bytesBefore"`
+	BytesAfter             int64 `json:"bytesAfter"`
+	BytesReclaimed         int64 `json:"bytesReclaimed"`
 }
 
 // Maintain bounds repeated history, removes orphan vectors, and compacts SQLite.
@@ -63,17 +62,6 @@ func (s *Store) Maintain(ctx context.Context, keep int) (MaintenanceResult, erro
 				SELECT result_version_id FROM needs_reviews WHERE result_version_id IS NOT NULL
 			)
 		`, keep-1)
-	if err != nil {
-		return MaintenanceResult{}, err
-	}
-	result.PrunedReconciliationEvents, err = remove("reconciliation events", `
-			DELETE FROM reconciliation_events WHERE id IN (
-				SELECT id FROM (
-					SELECT id, row_number() OVER (PARTITION BY project_id ORDER BY id DESC) AS position
-					FROM reconciliation_events
-				) WHERE position > ?
-			)
-		`, keep)
 	if err != nil {
 		return MaintenanceResult{}, err
 	}

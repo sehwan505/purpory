@@ -21,12 +21,6 @@ func (f fixedObserver) Observe(context.Context, string) (project.Workspace, erro
 	return f.workspace, nil
 }
 
-type fixedGate struct{ proposal contextprepare.Proposal }
-
-func (f fixedGate) Propose(context.Context, contextprepare.Request) (contextprepare.ProviderResult, error) {
-	return contextprepare.ProviderResult{Proposal: f.proposal, ModelID: "stub/qwen", Revision: "test", LatencyMS: 7}, nil
-}
-
 func openTestService(t *testing.T, root, database, id string) *Service {
 	t.Helper()
 	if _, err := RegisterProject(context.Background(), root, database, id, ""); err != nil {
@@ -102,7 +96,7 @@ func TestSelectProjectSwitchesWorkspaceWithoutMixingProjectData(t *testing.T) {
 	if _, err := service.Remember(ctx, "intent.first", memory.Decision, &value, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.SelectModel(ctx, "reconcile", "global-reconcile"); err != nil {
+	if _, err := service.SelectModel(ctx, "embedding", "global-embed"); err != nil {
 		t.Fatal(err)
 	}
 	projects, err := service.Projects(ctx)
@@ -126,7 +120,7 @@ func TestSelectProjectSwitchesWorkspaceWithoutMixingProjectData(t *testing.T) {
 		t.Fatalf("project memory leaked across selection: %#v %v", memories, err)
 	}
 	models, err := service.ModelState(ctx)
-	if err != nil || models.Models[1].Model != "global-reconcile" || models.Models[1].Source != "setting" {
+	if err != nil || models.Models[0].Model != "global-embed" || models.Models[0].Source != "setting" {
 		t.Fatalf("global settings did not survive Project selection: %#v %v", models, err)
 	}
 }
@@ -273,16 +267,14 @@ func TestWorkspaceObserverKeepsCoreDomainNeutral(t *testing.T) {
 	}
 }
 
-func TestPrepareReturnsAndAuditsHintMap(t *testing.T) {
+func TestPrepareReturnsHintMap(t *testing.T) {
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
 	value := "PostgreSQL is the transactional source of truth."
 	if _, err := service.Remember(context.Background(), "decision.database", memory.Decision, &value, nil); err != nil {
 		t.Fatal(err)
 	}
-	query := "database decision"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, Keywords: []string{"PostgreSQL"}, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
-	request := contextprepare.Request{Message: "Which database did we choose?", SessionID: "codex:one", WorkingDirectory: root, TokenBudget: 512, RetainInput: true}
+	request := contextprepare.Request{Message: "database", SessionID: "codex:one", WorkingDirectory: root, TokenBudget: 512}
 
 	result, err := service.PrepareContext(context.Background(), request)
 	if err != nil {
@@ -294,29 +286,7 @@ func TestPrepareReturnsAndAuditsHintMap(t *testing.T) {
 	if rendered := contextprepare.RenderHintMap(result.Hints); strings.Contains(rendered, value) || !strings.Contains(rendered, "purpory explain") {
 		t.Fatalf("hint leaked content or was not navigable: %q", rendered)
 	}
-	decisions, err := service.store.PrepareDecisions(context.Background(), "demo", 10)
-	if err != nil || len(decisions) != 1 || decisions[0].InputText == nil || *decisions[0].InputText != request.Message || decisions[0].Hints == nil {
-		t.Fatalf("decision audit missing: %#v %v", decisions, err)
-	}
-}
 
-func TestPrepareDeduplicatesAsk(t *testing.T) {
-	root := t.TempDir()
-	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
-	missing := "missing deployment policy"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &missing, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
-	request := contextprepare.Request{Message: "How do we deploy?", SessionID: "agent", WorkingDirectory: root, TokenBudget: 512}
-	first, err := service.PrepareContext(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := service.PrepareContext(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Action != "ask" || first.RequestID == nil || second.RequestID == nil || *first.RequestID != *second.RequestID || first.Clarification == nil {
-		t.Fatalf("missing context request was not deduplicated: %#v %#v", first, second)
-	}
 }
 
 func TestPrepareHintMapUsesTypedPPRRankingAndBudget(t *testing.T) {
@@ -351,7 +321,7 @@ func TestPrepareHintMapPrioritizesRecentGraphNeighbor(t *testing.T) {
 	}
 }
 
-func TestPrepareDoesNotForceActivePathEvidence(t *testing.T) {
+func TestPrepareSkipsMissingEvidence(t *testing.T) {
 	root := t.TempDir()
 	service := openTestService(t, root, filepath.Join(t.TempDir(), "context.db"), "demo")
 	source := "@repo/src/auth"
@@ -359,15 +329,14 @@ func TestPrepareDoesNotForceActivePathEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := "unrelated"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	result, err := service.PrepareContext(context.Background(), contextprepare.Request{
 		Message: query, SessionID: "agent", WorkingDirectory: root,
-		ActivePaths: []string{filepath.Join(root, "src", "auth", "service.go")}, TokenBudget: 512,
+		TokenBudget: 512,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "ask" || result.Hints != nil {
+	if result.Action != "skip" || result.Hints != nil {
 		t.Fatalf("active path forced invalid evidence: %#v", result)
 	}
 }

@@ -3,16 +3,12 @@ package app
 import (
 	"context"
 
-	"github.com/sehwan505/purpory/internal/reconcile"
 	"github.com/sehwan505/purpory/internal/store"
 )
 
 const maintenanceHistoryLimit = 100
 
-type MaintenanceResult struct {
-	store.MaintenanceResult
-	PrunedCompletedReconciliations int `json:"prunedCompletedReconciliations"`
-}
+type MaintenanceResult = store.MaintenanceResult
 
 // Maintain prunes global history and compacts the database.
 func Maintain(ctx context.Context, databasePath string) (MaintenanceResult, error) {
@@ -28,9 +24,5 @@ func Maintain(ctx context.Context, databasePath string) (MaintenanceResult, erro
 	if closeErr != nil {
 		return MaintenanceResult{}, closeErr
 	}
-	pruned, err := reconcile.PruneCompleted(maintenanceHistoryLimit)
-	if err != nil {
-		return MaintenanceResult{}, err
-	}
-	return MaintenanceResult{MaintenanceResult: stored, PrunedCompletedReconciliations: pruned}, nil
+	return stored, nil
 }

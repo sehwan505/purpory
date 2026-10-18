@@ -146,7 +146,7 @@ func TestUnregisteredAgentHookIsNoOp(t *testing.T) {
 	root := t.TempDir()
 	database := filepath.Join(t.TempDir(), "purpory.db")
 	payload, _ := json.Marshal(map[string]string{
-		"hook_event_name": "UserPromptSubmit", "prompt": "hello", "session_id": "one", "cwd": root,
+		"hook_event_name": "UserPromptSubmit", "prompt": "context", "session_id": "one", "cwd": root,
 	})
 	var output, errorOutput bytes.Buffer
 	if code := Run([]string{"--root", root, "--db", database, "preflight", "codex"}, bytes.NewReader(payload), &output, &errorOutput); code != 0 {
@@ -180,10 +180,10 @@ func TestAgentHookUsesPayloadWorkingDirectory(t *testing.T) {
 		}
 	}
 	payload, _ := json.Marshal(map[string]string{
-		"hook_event_name": "UserPromptSubmit", "prompt": "hello", "session_id": "one", "cwd": secondRoot,
+		"hook_event_name": "SessionEnd", "prompt": "hello", "session_id": "one", "cwd": secondRoot,
 	})
 	var output, errorOutput bytes.Buffer
-	if code := Run([]string{"--root", firstRoot, "--db", database, "preflight", "codex"}, bytes.NewReader(payload), &output, &errorOutput); code != 0 {
+	if code := Run([]string{"--root", firstRoot, "--db", database, "session-end", "codex"}, bytes.NewReader(payload), &output, &errorOutput); code != 0 {
 		t.Fatalf("hook failed: %s", errorOutput.String())
 	}
 	for root, want := range map[string]int{firstRoot: 0, secondRoot: 1} {
@@ -191,10 +191,10 @@ func TestAgentHookUsesPayloadWorkingDirectory(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		decisions, err := service.ContextDecisions(context.Background(), 10)
+		workspace, err := service.Workspace(context.Background())
 		service.Close()
-		if err != nil || len(decisions) != want {
-			t.Fatalf("decisions for %s = %d, want %d: %v", root, len(decisions), want, err)
+		if err != nil || len(workspace.Resources[0].Views[0].Sessions) != want {
+			t.Fatalf("decisions for %s = %d, want %d: %v", root, len(workspace.Resources[0].Views[0].Sessions), want, err)
 		}
 	}
 }

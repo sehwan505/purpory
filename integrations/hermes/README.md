@@ -17,22 +17,7 @@ export PURPORY_ROOT=/path/to/project
 ```
 
 If `purpory` is not on `PATH`, set `PURPORY_EXECUTABLE` to the executable path.
-The provider supplies progressive `query`, `explain`, and `path` tools, injects
-bounded preflight hints, and queues the user/assistant transcript at the real
-Hermes session boundary. Reconcile queued sessions from cron with a locally
-authenticated agent CLI or Purpory's independent Codex OAuth provider:
-
-```sh
-purpory reconcile --executor codex
-# or
-purpory reconcile --executor claude
-# or, after purpory model provider login openai-codex
-purpory reconcile --executor openai-codex --model gpt-5.6-sol
-```
-
-The command uses Purpory's existing evidence-grounded validation and atomic
-write path. For OAuth, select a global reconcile model or pass `--model MODEL`.
-For Codex/Claude CLI, add `--model MODEL` only when their configured default
-should not be used.
-It deliberately does not mirror Hermes's agent-authored `MEMORY.md` writes into
-Purpory durable memory.
+The provider supplies progressive `query`, `explain`, and `path` tools and
+bounded preflight hints. At the real Hermes session boundary it only marks the
+Session as ended. It never serializes or queues messages, starts inference, or
+mirrors agent-authored MEMORY.md writes into durable Purpory memory.

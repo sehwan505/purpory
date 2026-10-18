@@ -1,7 +1,6 @@
 package prepare
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"unicode/utf8"
@@ -9,8 +8,6 @@ import (
 
 const (
 	SchemaVersion   = 1
-	ContextVersion  = 2
-	PromptVersion   = "purpory-gate-v6"
 	MinTokenBudget  = 128
 	MaxTokenBudget  = 32_768
 	MaxMessageChars = 1_048_576
@@ -18,40 +15,17 @@ const (
 )
 
 type Request struct {
-	Message          string   `json:"message"`
-	SessionID        string   `json:"sessionId"`
-	ProjectID        string   `json:"project"`
-	WorkingDirectory string   `json:"workingDirectory"`
-	ActivePaths      []string `json:"activePaths"`
-	TokenBudget      int      `json:"tokenBudget"`
-	RetainInput      bool     `json:"retainInput"`
-	OpenedNodes      []string `json:"openedNodes"`
-	Catalog          Catalog  `json:"contextCatalog"`
+	Message          string `json:"message"`
+	SessionID        string `json:"sessionId"`
+	ProjectID        string `json:"project"`
+	WorkingDirectory string `json:"workingDirectory"`
+	TokenBudget      int    `json:"tokenBudget"`
 }
 
-type Provider interface {
-	Propose(context.Context, Request) (ProviderResult, error)
-}
-
-type ProviderResult struct {
-	Proposal  Proposal
-	ModelID   string
-	Revision  string
-	LatencyMS int
-}
-
-type Proposal struct {
+type Result struct {
+	SchemaVersion int      `json:"schemaVersion"`
 	Action        string   `json:"action"`
-	Query         *string  `json:"query"`
-	Keywords      []string `json:"keywords"`
-	ReasonCode    string   `json:"reasonCode"`
-	Clarification *string  `json:"clarification"`
-}
-
-type Model struct {
-	ID        *string `json:"id"`
-	Revision  *string `json:"revision"`
-	LatencyMS *int    `json:"latencyMs"`
+	Hints         *HintMap `json:"hints,omitempty"`
 }
 
 type HintMap struct {
@@ -77,99 +51,11 @@ type HintEdge struct {
 	Relation string `json:"relation"`
 }
 
-type Counts struct {
-	Human        int `json:"human"`
-	Nodes        int `json:"material"`
-	Resource     int `json:"resource"`
-	OpenedCount  int `json:"openedNodes"`
-	OpenRequests int `json:"openRequests"`
-}
-
-type NamespaceCount struct {
-	Name  string `json:"name"`
-	Count int    `json:"count"`
-}
-
-type Catalog struct {
-	SchemaVersion   int              `json:"schemaVersion"`
-	ProjectID       string           `json:"project"`
-	Counts          Counts           `json:"counts"`
-	TopicNamespaces []NamespaceCount `json:"topicNamespaces"`
-	NodeKinds       []NamespaceCount `json:"materialTypes"`
-}
-
-type Result struct {
-	SchemaVersion int      `json:"schemaVersion"`
-	DecisionID    int64    `json:"decisionId"`
-	Action        string   `json:"action"`
-	Proposal      Proposal `json:"proposal"`
-	RequestID     *int64   `json:"requestId"`
-	Clarification *string  `json:"clarification"`
-	Model         Model    `json:"model"`
-	Fallback      *string  `json:"fallback"`
-	Hints         *HintMap `json:"hints,omitempty"`
-}
-
-type DecisionRecord struct {
-	ProjectID string
-	SessionID string
-	InputHash string
-	InputText *string
-	Proposal  Proposal
-	Action    string
-	Hints     *HintMap
-	RequestID *int64
-	Model     Model
-	Fallback  *string
-}
-
-type ContextRequest struct {
-	ID          int64   `json:"id"`
-	SessionID   string  `json:"sessionId"`
-	ProjectID   string  `json:"project"`
-	Need        string  `json:"need"`
-	Status      string  `json:"status"`
-	ResolvedKey *string `json:"resolvedKey"`
-	CreatedAt   string  `json:"createdAt"`
-	ResolvedAt  string  `json:"resolvedAt,omitempty"`
-}
-
-type Feedback struct {
-	DecisionID     int64    `json:"decisionId"`
-	Verdict        string   `json:"verdict"`
-	ExpectedAction *string  `json:"expectedAction"`
-	ExpectedKeys   []string `json:"expectedKeys"`
-	Note           *string  `json:"note"`
-	CreatedAt      string   `json:"createdAt,omitempty"`
-}
-
-type Decision struct {
-	ID            int64     `json:"id"`
-	SessionID     string    `json:"sessionId"`
-	ProjectID     string    `json:"project"`
-	InputHash     string    `json:"inputHash"`
-	InputText     *string   `json:"inputText"`
-	Proposal      Proposal  `json:"proposal"`
-	FinalAction   string    `json:"finalAction"`
-	Hints         *HintMap  `json:"hints,omitempty"`
-	RequestID     *int64    `json:"requestId"`
-	ModelID       *string   `json:"modelId"`
-	ModelRevision *string   `json:"modelRevision"`
-	PromptVersion string    `json:"promptVersion"`
-	LatencyMS     *int      `json:"latencyMs"`
-	Fallback      *string   `json:"fallbackReason"`
-	CreatedAt     string    `json:"createdAt"`
-	Feedback      *Feedback `json:"feedback,omitempty"`
-}
-
-// NavigationEvent is an append-only observation of how a session explored the graph.
-// It is a retrieval signal, never evidence for a durable graph relation.
 type NavigationEvent struct {
 	ID           int64  `json:"id"`
 	Action       string `json:"action"`
 	SourceNodeID string `json:"sourceNodeId,omitempty"`
 	TargetNodeID string `json:"targetNodeId,omitempty"`
-	DecisionID   *int64 `json:"decisionId,omitempty"`
 	CreatedAt    string `json:"createdAt,omitempty"`
 }
 
@@ -189,81 +75,6 @@ func ValidateRequest(value Request) (Request, error) {
 	}
 	if value.TokenBudget < MinTokenBudget || value.TokenBudget > MaxTokenBudget {
 		return Request{}, errors.New("prepare context: token budget must be between 128 and 32768")
-	}
-	if len(value.ActivePaths) > 32 {
-		return Request{}, errors.New("prepare context: active paths cannot contain more than 32 items")
-	}
-	seen := map[string]bool{}
-	paths := value.ActivePaths[:0]
-	for _, path := range value.ActivePaths {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			continue
-		}
-		if len(path) > 1024 {
-			return Request{}, errors.New("prepare context: active path exceeds 1024 characters")
-		}
-		if !seen[path] {
-			seen[path] = true
-			paths = append(paths, path)
-		}
-	}
-	value.ActivePaths = paths
-	return value, nil
-}
-
-func ValidateProposal(value Proposal) (Proposal, error) {
-	value.Action = strings.ToLower(strings.TrimSpace(value.Action))
-	if value.Action != "skip" && value.Action != "search" && value.Action != "ask" {
-		return Proposal{}, errors.New("prepare context: proposal action must be skip, search, or ask")
-	}
-	if value.Query != nil {
-		query := strings.TrimSpace(*value.Query)
-		if query == "" || utf8.RuneCountInString(query) > MaxQueryChars {
-			return Proposal{}, errors.New("prepare context: proposal query is invalid")
-		}
-		value.Query = &query
-	}
-	if value.Action == "search" && value.Query == nil {
-		return Proposal{}, errors.New("prepare context: search proposal requires a query")
-	}
-	if value.Action == "skip" && value.Query != nil {
-		return Proposal{}, errors.New("prepare context: skip proposal cannot include a query")
-	}
-	if value.Action == "ask" && (value.Clarification == nil || strings.TrimSpace(*value.Clarification) == "") {
-		return Proposal{}, errors.New("prepare context: ask proposal requires clarification")
-	}
-	if value.Clarification != nil {
-		clarification := strings.TrimSpace(*value.Clarification)
-		if utf8.RuneCountInString(clarification) > 2_048 {
-			return Proposal{}, errors.New("prepare context: proposal clarification is too long")
-		}
-		value.Clarification = &clarification
-	}
-	if len(value.Keywords) > 8 {
-		return Proposal{}, errors.New("prepare context: proposal cannot contain more than 8 keywords")
-	}
-	seen := map[string]bool{}
-	keywords := make([]string, 0, len(value.Keywords))
-	for _, keyword := range value.Keywords {
-		keyword = strings.TrimSpace(keyword)
-		if keyword == "" || utf8.RuneCountInString(keyword) > 128 {
-			return Proposal{}, errors.New("prepare context: proposal keyword is invalid")
-		}
-		if !seen[keyword] {
-			seen[keyword] = true
-			keywords = append(keywords, keyword)
-		}
-	}
-	value.Keywords = keywords
-	allowedReasons := map[string]bool{
-		"SELF_CONTAINED": true, "CONTEXT_SEARCH_REQUIRED": true, "PRIOR_DECISION_REFERENCED": true,
-		"PROJECT_CONTEXT_REQUIRED": true, "SESSION_HISTORY_REQUIRED": true, "CODE_CONTEXT_REQUIRED": true,
-		"USER_INPUT_REQUIRED": true, "AMBIGUOUS_REQUEST": true, "GATE_UNAVAILABLE": true,
-	}
-	value.ReasonCode = strings.ToUpper(strings.TrimSpace(value.ReasonCode))
-	if !allowedReasons[value.ReasonCode] {
-		return Proposal{}, errors.New("prepare context: proposal reason code is invalid")
 	}
 	return value, nil
 }

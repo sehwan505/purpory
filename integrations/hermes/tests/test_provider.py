@@ -63,38 +63,16 @@ class ProviderTest(unittest.TestCase):
             self.assertEqual(result, {"result": "node"})
             self.assertEqual(run.call_args.args[0], ["explain", "--", "knowledge:one"])
 
-    def test_session_end_passes_openai_jsonl_and_removes_temporary_file(self):
-        captured = {}
-
-        def run(arguments, input_text=None, *, timeout=30):
-            payload = json.loads(input_text)
-            captured["arguments"] = arguments
-            captured["payload"] = payload
-            captured["records"] = [
-                json.loads(line)
-                for line in Path(payload["transcript_path"]).read_text().splitlines()
-            ]
-            return ""
-
-        with patch.object(self.provider, "_run", side_effect=run):
-            self.provider.on_session_end(
-                [
-                    {"role": "system", "content": "ignore"},
-                    {"role": "user", "content": "Remember SQLite."},
-                    {"role": "assistant", "content": "Understood."},
-                ]
-            )
-
-        self.assertEqual(captured["arguments"], ["session-end", "hermes", "--defer"])
-        self.assertEqual(captured["payload"]["session_id"], "session-1")
-        self.assertEqual(
-            captured["records"],
-            [
-                {"role": "user", "content": "Remember SQLite."},
-                {"role": "assistant", "content": "Understood."},
-            ],
-        )
-        self.assertFalse(Path(captured["payload"]["transcript_path"]).exists())
+    def test_session_end_records_status_without_a_transcript(self):
+        with patch.object(self.provider, "_run", return_value="") as run:
+            self.provider.on_session_end([{"role": "user", "content": "Remember SQLite."}])
+            self.assertEqual(run.call_args.args[0], ["session-end", "hermes"])
+            self.assertEqual(json.loads(run.call_args.args[1]), {
+                "hook_event_name": "SessionEnd",
+                "session_id": "session-1",
+                "cwd": str(Path(self.root.name).resolve()),
+            })
+        self.assertEqual(list(Path(self.home.name).iterdir()), [])
 
 
 if __name__ == "__main__":

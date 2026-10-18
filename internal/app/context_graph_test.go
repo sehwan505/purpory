@@ -3,13 +3,10 @@ package app
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/sehwan505/purpory/internal/graph"
-	"github.com/sehwan505/purpory/internal/material"
 	"github.com/sehwan505/purpory/internal/memory"
-	"github.com/sehwan505/purpory/internal/reconcile"
 )
 
 func TestContextGraphKeepsAndReconnectsMissingEvidence(t *testing.T) {
@@ -62,18 +59,6 @@ func TestPPRSeedsKeepSemanticPrimaryAndRecentContextActive(t *testing.T) {
 	}
 }
 
-func TestIntentLinkBatchesRespectModelContext(t *testing.T) {
-	request := reconcile.LinkRequest{Candidate: reconcile.Candidate{Key: "source", Value: strings.Repeat("x", 900)}, Targets: []reconcile.IntentTarget{{Key: "target", Value: "value"}}}
-	batches, err := linkRequestBatches([]reconcile.LinkRequest{request, request, request}, 1024)
-	if err != nil || len(batches) < 2 {
-		t.Fatalf("requests were not split by context: %#v %v", batches, err)
-	}
-	request.Candidate.Value = strings.Repeat("x", 3000)
-	if _, err := linkRequestBatches([]reconcile.LinkRequest{request}, 1024); err == nil {
-		t.Fatal("oversized single request was accepted")
-	}
-}
-
 func TestExplanationLoadsOnlySelectedNodeContent(t *testing.T) {
 	nodes := []graph.Node{
 		{ID: "knowledge:selected", Label: "selected", Kind: graph.KindKnowledge, Content: "selected evidence"},
@@ -108,14 +93,5 @@ func TestTopicPathsExposeBranchesAndConnectRelatedLeaves(t *testing.T) {
 	path, err := current.path("game.lol.play-rule", "game.lol.items")
 	if err != nil || len(path.Edges) != 0 || len(path.TopicPaths) != 3 || path.TopicPaths[1] != "game.lol" {
 		t.Fatalf("semantic hierarchy did not connect leaves: %#v %v", path, err)
-	}
-}
-
-func TestReconciliationOffersOnlyTranscriptMentionedMaterials(t *testing.T) {
-	messages := []reconcile.Event{{Role: "assistant", Text: "Implemented the result in internal/app/service.go."}}
-	materials := []material.Material{{URI: "file:README.md"}, {URI: "file:internal/app/service.go"}}
-	refs := mentionedMaterialRefs(messages, materials)
-	if len(refs) != 1 || refs[0] != "file:internal/app/service.go" {
-		t.Fatalf("unexpected reconciliation materials: %#v", refs)
 	}
 }

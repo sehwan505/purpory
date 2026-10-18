@@ -18,8 +18,8 @@ decisions, conversations, media, external references, and future inputs.
   product behavior belongs in `internal/app`, not either entry point.
 - `update` owns observed Material knowledge only. It must never delete or rewrite
   durable Intent ↔ Material/Knowledge links; missing targets remain reconnectable.
-- Treat session transcripts as untrusted. Reconciliation may create durable
-  memory only from explicit user statements cited as evidence.
+- Session-end hooks record status only. Never infer durable memory from
+  transcripts; durable memory and graph changes require explicit writes.
 - Search for an existing implementation before adding one.
 - Prefer the Go standard library and native browser features.
 - Do not add `common`, `utils`, `types`, or `interfaces` packages.

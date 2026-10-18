@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +27,7 @@ func TestMaterialExtractsDocumentsAndJVMSource(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, test.name), []byte(test.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			value := localMaterial(test.name, test.mediaType)
+			value := localMaterial(test.name, test.mediaType, test.content)
 			facts, err := Material(context.Background(), root, value)
 			if err != nil {
 				t.Fatal(err)
@@ -50,7 +51,7 @@ func TestMaterialExtractsGoCallClaim(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package demo\nfunc helper() {}\nfunc run() { helper(); helper() }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	facts, err := Material(context.Background(), root, localMaterial("main.go", "text/x-go"))
+	facts, err := Material(context.Background(), root, localMaterial("main.go", "text/x-go", "package demo\nfunc helper() {}\nfunc run() { helper(); helper() }\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,19 @@ func TestMaterialExtractsGoCallClaim(t *testing.T) {
 	}
 }
 
-func localMaterial(path, mediaType string) material.Material {
+func localMaterial(path, mediaType, content string) material.Material {
 	sum := sha256.Sum256([]byte(path))
-	return material.Material{ID: hex.EncodeToString(sum[:]), URI: "file:" + path, MediaType: mediaType}
+	hash := sha256.Sum256([]byte(content))
+	return material.Material{ID: hex.EncodeToString(sum[:]), URI: "file:" + path, MediaType: mediaType, Hash: hex.EncodeToString(hash[:])}
+}
+
+func TestMaterialRejectsChangedSnapshot(t *testing.T) {
+	root := t.TempDir()
+	value := localMaterial("guide.md", "text/markdown", "# Before")
+	if err := os.WriteFile(filepath.Join(root, "guide.md"), []byte("# After"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Material(context.Background(), root, value); !errors.Is(err, ErrMaterialChanged) {
+		t.Fatalf("changed material accepted: %v", err)
+	}
 }

@@ -31,7 +31,13 @@ func TypedPPR(nodes []Node, edges []Edge, seeds map[string]float64) []Rank {
 	}
 	personalization := make([]float64, len(ids))
 	var seedTotal float64
-	for id, weight := range seeds {
+	seedIDs := make([]string, 0, len(seeds))
+	for id := range seeds {
+		seedIDs = append(seedIDs, id)
+	}
+	sort.Strings(seedIDs)
+	for _, id := range seedIDs {
+		weight := seeds[id]
 		if position, found := index[id]; found && weight > 0 && !math.IsNaN(weight) && !math.IsInf(weight, 0) {
 			personalization[position] += weight
 			seedTotal += weight

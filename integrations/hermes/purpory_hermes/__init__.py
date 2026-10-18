@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +70,6 @@ class PurporyMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._bin = ""
         self._root = ""
-        self._hermes_home = ""
         self._session_id = ""
         self._primary = True
         self._recalled = False
@@ -92,7 +90,6 @@ class PurporyMemoryProvider(MemoryProvider):
             raise RuntimeError(self.unavailable_reason())
         self._bin = executable
         self._root = str(Path(os.environ.get("PURPORY_ROOT", os.getcwd())).resolve())
-        self._hermes_home = str(Path(kwargs["hermes_home"]).resolve())
         self._session_id = session_id
         self._primary = kwargs.get("agent_context", "primary") == "primary"
 
@@ -149,32 +146,12 @@ class PurporyMemoryProvider(MemoryProvider):
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self._primary or not self._session_id:
             return
-        records = [
-            {"role": message.get("role"), "content": message.get("content")}
-            for message in messages
-            if message.get("role") in {"user", "assistant"} and message.get("content")
-        ]
-        if not any(record["role"] == "user" for record in records):
-            return
-        path = ""
-        try:
-            with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", suffix=".jsonl", dir=self._hermes_home, delete=False
-            ) as transcript:
-                path = transcript.name
-                for record in records:
-                    transcript.write(json.dumps(record, ensure_ascii=False) + "\n")
-            payload = {
-                "hook_event_name": "SessionEnd",
-                "session_id": self._session_id,
-                "cwd": self._root,
-                "transcript_path": path,
-                "reason": "hermes-session-end",
-            }
-            self._run(["session-end", "hermes", "--defer"], json.dumps(payload), timeout=15)
-        finally:
-            if path:
-                Path(path).unlink(missing_ok=True)
+        payload = {
+            "hook_event_name": "SessionEnd",
+            "session_id": self._session_id,
+            "cwd": self._root,
+        }
+        self._run(["session-end", "hermes"], json.dumps(payload), timeout=15)
 
     def on_session_switch(
         self,

@@ -387,7 +387,7 @@ func loadEdgeSnapshot(ctx context.Context, database databaseRunner, projectID, s
 func incidentEdges(ctx context.Context, tx *sql.Tx, projectID, nodeID string) ([]edgeSnapshot, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT source_id, target_id, relation, owner, provenance, state FROM edges
-		WHERE project_id = ? AND (source_id = ? OR target_id = ?)
+		WHERE project_id = ? AND (source_id = ? OR target_id = ?) ORDER BY source_id, target_id, relation
 	`, projectID, nodeID, nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("load agent memory edges: %w", err)

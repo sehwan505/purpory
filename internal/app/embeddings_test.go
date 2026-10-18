@@ -14,8 +14,6 @@ import (
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
-	"github.com/sehwan505/purpory/internal/reconcile"
-	"github.com/sehwan505/purpory/internal/store"
 )
 
 func useEmbeddingServer(t *testing.T) {
@@ -102,7 +100,6 @@ func TestEmbeddingBackfillAndSemanticRanking(t *testing.T) {
 	if len(found.Matches) != 1 || len(found.Matches[0].Signals) != 2 || found.Matches[0].Signals[0].Kind != "typed-ppr" || found.Matches[0].Signals[0].Score == 0 || found.Matches[0].Signals[1].Kind != "semantic-seed" {
 		t.Fatalf("semantic graph match was not explainable: %#v", found.Matches)
 	}
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PRIOR_DECISION_REFERENCED"}}
 	prepared, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "semantic", WorkingDirectory: root, TokenBudget: 512})
 	if err != nil || prepared.Hints == nil || len(prepared.Hints.Nodes) != 1 || prepared.Hints.Nodes[0].Path != "decision.auth" {
 		t.Fatalf("semantic memory was not retrieved: %#v %v", prepared, err)
@@ -171,126 +168,12 @@ func TestPrepareCombinesSemanticAndExactSeeds(t *testing.T) {
 		}
 	}
 	query := "fallback-marker"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	result, err := service.PrepareContext(ctx, contextprepare.Request{Message: query, SessionID: "hybrid", WorkingDirectory: root, TokenBudget: 512})
 	if err != nil || result.Hints == nil || len(result.Hints.Nodes) != 2 || result.Hints.Nodes[0].ID != "knowledge:knowledge.exact" || result.Hints.Nodes[0].Match != "exact-seed" || result.Hints.Nodes[1].ID != "knowledge:knowledge.dense" || result.Hints.Nodes[1].Match != "semantic-seed" {
 		t.Fatalf("semantic and exact seeds were not combined: %#v %v", result, err)
 	}
 	if input := <-requests; len(input) != 1 || input[0] != semanticQueryInstruction+query {
 		t.Fatalf("query embedding input = %#v", input)
-	}
-}
-
-func TestReconcileEmbedsIntentAndKnowledgeWithGlobalModel(t *testing.T) {
-	useEmbeddingServer(t)
-	ctx := context.Background()
-	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
-	selected, err := service.SelectModel(ctx, "embedding", "tiny-embed")
-	if err != nil || selected.Source != "setting" {
-		t.Fatalf("global model was not selected: %#v %v", selected, err)
-	}
-	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
-		t.Fatalf("selecting the locked model should be idempotent: %v", err)
-	}
-	if changed, err := service.SelectModel(ctx, "embedding", "other-embed"); err != nil || changed.Model != "other-embed" {
-		t.Fatalf("global embedding model did not change: %#v %v", changed, err)
-	}
-	if _, err := service.SelectModel(ctx, "embedding", "tiny-embed"); err != nil {
-		t.Fatal(err)
-	}
-
-	candidates := []reconcile.Candidate{
-		{Key: "intent.database", Kind: memory.Decision, Value: "Use SQLite.", EvidenceIDs: []string{"U000001"}, EvidenceRefs: []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: "Use SQLite.", EndByte: len("Use SQLite.")}}},
-		{Key: "knowledge.index", Kind: memory.Note, Value: "The index is rebuilt incrementally.", EvidenceIDs: []string{"U000002"}, EvidenceRefs: []memory.EvidenceRef{{MessageID: "U000002", PartID: "U000002P001", Quote: "The index is rebuilt incrementally.", EndByte: len("The index is rebuilt incrementally.")}}},
-	}
-	if err := service.applyCandidates(ctx, "reconcile:test", candidates); err != nil {
-		t.Fatalf("reconciliation failed: %v", err)
-	}
-	embeddings, err := service.store.Embeddings(ctx, "demo", "tiny-embed")
-	if err != nil || len(embeddings) != 2 {
-		t.Fatalf("reconciled embeddings missing: %#v %v", embeddings, err)
-	}
-	ids := map[string]bool{}
-	for _, item := range embeddings {
-		ids[item.NodeID] = true
-	}
-	if !ids["intent:intent.database"] || !ids["knowledge:knowledge.index"] {
-		t.Fatalf("intent and knowledge were not both embedded: %#v", ids)
-	}
-}
-
-func TestIntentLinkRequestsUseLocalCandidatesWithoutEmbedding(t *testing.T) {
-	ctx := context.Background()
-	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
-	value := "Mobile release requires offline support."
-	if _, err := service.Remember(ctx, "platform.offline", memory.Decision, &value, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.store.SaveLink(ctx, "demo", graph.Link{SourceKind: graph.KindIntent, SourceRef: "release.mobile", Relation: graph.RelationDependsOn, TargetKind: graph.KindIntent, TargetRef: "platform.offline"}); err != nil {
-		t.Fatal(err)
-	}
-	candidates := []reconcile.Candidate{
-		{Key: "release.mobile", Kind: memory.Decision, Value: "The mobile release depends on offline support."},
-		{Key: "release.signed", Kind: memory.Decision, Value: "Release artifacts must be signed."},
-	}
-	requests, err := service.intentLinkRequests(ctx, candidates)
-	if err != nil || len(requests) != 2 {
-		t.Fatalf("intent candidates were not built locally: %#v %v", requests, err)
-	}
-	targets := map[string]bool{}
-	for _, target := range requests[0].Targets {
-		targets[target.Key] = true
-	}
-	if !targets["platform.offline"] || !targets["release.signed"] {
-		t.Fatalf("existing and same-batch intents were not retrieved: %#v", requests[0].Targets)
-	}
-	if len(requests[0].Existing) != 1 || requests[0].Existing[0].Relation != graph.RelationDependsOn || requests[0].Existing[0].TargetRef != "platform.offline" {
-		t.Fatalf("existing relation was not offered for explicit retirement: %#v", requests[0].Existing)
-	}
-	if requests[0].ExpectedStates[graph.RelationDependsOn+"\x00platform.offline"] != graph.StateActive {
-		t.Fatalf("Pass B did not retain its edge snapshot: %#v", requests[0].ExpectedStates)
-	}
-}
-
-func TestIntentLinkRequestsUseSharedEvidenceAndNavigationWithoutPersistingThem(t *testing.T) {
-	ctx := context.Background()
-	service := openTestService(t, t.TempDir(), filepath.Join(t.TempDir(), "purpory.db"), "demo")
-	for key, value := range map[string]string{
-		"intent.shared":  "Uses the shared design document.",
-		"intent.visited": "Recently explored decision.",
-	} {
-		value := value
-		if _, err := service.Remember(ctx, key, memory.Decision, &value, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := service.store.SaveLink(ctx, "demo", graph.Link{SourceKind: graph.KindIntent, SourceRef: "intent.shared", Relation: graph.RelationAppliesTo, TargetKind: graph.KindMaterial, TargetRef: "file:shared.md"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.SaveSession(ctx, "codex:candidates", "codex", "active"); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.store.AppendNavigation(ctx, "demo", "codex:candidates", []contextprepare.NavigationEvent{{Action: "explain", TargetNodeID: "intent:intent.visited"}}); err != nil {
-		t.Fatal(err)
-	}
-	candidates := []reconcile.Candidate{{
-		Key: "intent.new", Kind: memory.Decision, Value: "A new unrelated decision.",
-		MaterialLinks: []reconcile.MaterialLink{{Relation: graph.RelationAppliesTo, MaterialRef: "file:shared.md"}},
-	}}
-	requests, err := service.intentLinkRequests(ctx, candidates, "codex:candidates")
-	if err != nil || len(requests) != 1 {
-		t.Fatalf("intent candidates missing: %#v %v", requests, err)
-	}
-	targets := map[string]bool{}
-	for _, target := range requests[0].Targets {
-		targets[target.Key] = true
-	}
-	if !targets["intent.shared"] || !targets["intent.visited"] {
-		t.Fatalf("shared evidence and navigation were not candidate signals: %#v", requests[0].Targets)
-	}
-	_, edges, err := service.store.Graph(ctx, "demo")
-	if err != nil || len(edges) != 1 {
-		t.Fatalf("retrieval signals leaked into canonical edges: %#v %v", edges, err)
 	}
 }
 
@@ -358,12 +241,10 @@ func TestHintExplorationUsesPathsAndSkipsOnlyOpenedNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.store.ReconcileMemories(ctx, "codex:explore", []store.MemoryProposal{{
-		Memory: entry, EvidenceIDs: []string{"U000001"}, EvidenceRefs: []memory.EvidenceRef{{MessageID: "U000001", PartID: "U000001P001", Quote: value, EndByte: len(value)}}, Links: []graph.Link{{
-			SourceKind: graph.KindIntent, SourceRef: entry.Key, Relation: graph.RelationRealizedBy,
-			TargetKind: graph.KindMaterial, TargetRef: "file:guide.md",
-		}},
-	}}); err != nil {
+	if _, err := service.store.SaveMemory(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.store.SaveLink(ctx, "demo", graph.Link{SourceKind: graph.KindIntent, SourceRef: entry.Key, Relation: graph.RelationRealizedBy, TargetKind: graph.KindMaterial, TargetRef: "file:guide.md"}); err != nil {
 		t.Fatal(err)
 	}
 	for key, value := range map[string]string{
@@ -382,7 +263,6 @@ func TestHintExplorationUsesPathsAndSkipsOnlyOpenedNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := "롤 플레이 규칙"
-	service.gate = fixedGate{contextprepare.Proposal{Action: "search", Query: &query, ReasonCode: "PROJECT_CONTEXT_REQUIRED"}}
 	request := contextprepare.Request{Message: query, SessionID: "codex:explore", WorkingDirectory: root, TokenBudget: 512}
 	first, err := service.PrepareContext(ctx, request)
 	if err != nil || first.Hints == nil || len(first.Hints.Nodes) == 0 || len(first.Hints.Nodes) > 3 {

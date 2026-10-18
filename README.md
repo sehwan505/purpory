@@ -100,28 +100,14 @@ purpory explain game.lol.play-rule game.lol.items       # load selected evidence
 purpory path "game.lol.play-rule" "file:docs/rules.md" # inspect relationships
 purpory query --json "database decision"                # machine-readable navigation result
 purpory prepare "How does project update work?"
-purpory prepare --session agent-1 --path internal/app --budget 2000 --json "How does project update work?"
-purpory request list open
-purpory request resolve 12 decision.database
-purpory decision list
-purpory decision feedback 42 incorrect --expected-action retrieve --key decision.database
+purpory prepare --session agent-1 --budget 2000 --json "How does project update work?"
 purpory review list open
 purpory model status
 purpory model start
 purpory model install qwen3-embedding:0.6b embedding
-purpory model select gate qwen3:4b
-purpory model select reconcile openai gpt-4.1-mini
 purpory model select embedding openai text-embedding-3-small
 purpory embed                              # fill every missing intent/knowledge embedding
 purpory embed 100                          # optionally bound one backfill run
-purpory reconcile --executor codex         # process queued sessions with Codex
-purpory model provider login openai-codex  # separate ChatGPT device-code OAuth session
-purpory reconcile --executor openai-codex --model gpt-5.6-sol # without Codex CLI
-purpory reconcile --executor claude        # process queued sessions with Claude Code
-purpory reconcile list                     # inspect active, failed, and recent jobs
-purpory reconcile retry JOB_ID             # explicitly requeue one failed job
-purpory reconcile discard JOB_ID           # remove one failed job and its snapshot
-purpory reconcile discard --failed         # remove every failed job and snapshot
 purpory maintenance                        # prune bounded history/orphan vectors and VACUUM SQLite
 purpory integration codex install
 purpory integration claude install
@@ -136,18 +122,9 @@ hermes config set memory.provider purpory
 ```
 
 Run Hermes from a registered Project, or set `PURPORY_ROOT` when the Hermes
-process starts elsewhere. Hermes queues session-end transcripts without starting
-the reconciler; run `purpory reconcile --executor codex`, `openai-codex`, or
-`claude` from its cron. See [`integrations/hermes`](integrations/hermes/README.md).
-
-`openai-codex` keeps its own encrypted OAuth tokens in Purpory's global database,
-separate from Codex CLI. It calls the ChatGPT Codex backend directly rather than
-the documented OpenAI Platform API, so that backend's compatibility is our
-responsibility. Sign in once with `purpory model provider login openai-codex`;
-the CLI opens the device page in your default browser and also prints the URL
-and code for headless environments. The desktop app's Settings page can also
-start the login and opens the browser immediately. Then select a reconcile model or pass
-`--model` to the cron command.
+process starts elsewhere. Session end records the Session status only.
+Transcripts are never read or queued.
+See [the Hermes adapter](integrations/hermes/README.md).
 
 Agent-driven graph changes use the explicitly invoked `purpory-curate` skill.
 For example, use `$purpory-curate connect the cache policy to its implementation`
@@ -169,19 +146,9 @@ becomes available again if the same ID is registered later.
 
 The integration commands run without a registered Project and install once in
 the user's global Codex or Claude configuration. They preserve existing agent
-configuration while installing prompt and session-end hooks. Codex and Claude
-session-end snapshots are reconciled in a detached worker; Hermes defers them for
-an explicit cron-driven `reconcile` command. Only explicit user statements may
-become durable project memory. Reconciliation uses the last committed Material
-snapshot, so it never triggers a project-wide update. It admits only memories
-that can materially affect future work, preserves updates to existing keys, and
-creates at most 12 new durable memories per run. Each new candidate is compared
-with a bounded neighborhood balancing semantic locality with creation age and
-recent navigation usage; directly duplicated,
-subsumed, or superseded neighbors may be replaced in the same transaction while
-their versions and before-image audit remain available.
-Failed jobs remain visible
-but are retried only with `reconcile retry`. Git repositories are observed as one
+configuration while installing prompt and session-end hooks. Session-end hooks
+only mark Sessions as ended. Memories and durable links change through explicit
+writes. Git repositories are observed as one
 Resource with all local worktrees represented as Views; indexing honors Git's
 standard ignore rules. Non-Git folders use the same workspace model.
 Codex requires reviewing the installed user hook once with `/hooks`.
@@ -191,22 +158,18 @@ new or changed inputs, resolves project-wide relationships, and publishes the
 new knowledge snapshot atomically. The desktop reads committed state when opened
 or focused and only runs an update when the user explicitly requests one.
 
-Run `purpory maintenance` periodically after a regular `update`—weekly is a
-reasonable default, rather than after every reconcile. It keeps each memory's
-original version plus its 99 newest revisions (and any revision referenced by a
-review), the newest 100 reconciliation events per Project, the newest 100
-navigation events per Session, and the newest 100 completed reconcile markers
-per Project. It also deletes embeddings without a matching graph node and
-compacts SQLite with `VACUUM`.
+Run `purpory maintenance` periodically after updates. It preserves each memory's
+original version plus its 99 newest revisions and any revision referenced by a
+review, retains the newest 100 navigation events per Session, removes orphan
+embeddings, and compacts SQLite.
 
 Data is stored in `~/.purpory/purpory.db`. Set `PURPORY_DATABASE` to use another
 database and `PURPORY_OLLAMA_URL` to use a non-default Ollama endpoint.
-`prepare` works deterministically without a model. Gate, reconciliation, and
-embedding each select an independent `provider + model` binding. A model-only
-CLI selection remains shorthand for Ollama; pass `openai` between the role and
-model to use an OpenAI-compatible API. The same choice can be made with
-`PURPORY_GATE_PROVIDER`, `PURPORY_RECONCILE_PROVIDER`, and
-`PURPORY_EMBEDDING_PROVIDER` alongside the existing role model variables.
+`prepare` directly retrieves context using exact matches, optional embeddings,
+Typed PPR ranking, session navigation, and token budgeting. Empty retrieval and
+greetings return `skip`; there is no model classification or generated question.
+With a fixed project snapshot, session state, and embedding response, retrieval
+is deterministic.
 
 Configure an OpenAI-compatible API in Global Settings, or from the CLI without
 putting its secret in shell history:
@@ -223,21 +186,23 @@ local encryption key is written beside the database as `purpory.db.key` with
 mode `0600` where supported. Back up both files for recovery, but treat the key
 file as a secret. Secrets never appear in command output. Environment
 variables `PURPORY_OPENAI_API_KEY` and `PURPORY_OPENAI_BASE_URL` override saved
-values; remote endpoints must use HTTPS. Selecting an external provider sends
-that role's input to the configured service: gate sends the request catalog,
-reconciliation sends transcript evidence, and embedding sends knowledge or
-query text. Purpory never silently falls back between providers.
+values; remote endpoints must use HTTPS. Selecting an external embedding provider sends knowledge and query text to that
+service. The only model role is `embedding`; choose Ollama or an OpenAI-compatible
+provider. Dimensions default to 512 and can be set through
+`PURPORY_EMBEDDING_DIMENSIONS`. Provider and model can be overridden with
+`PURPORY_EMBEDDING_PROVIDER` and `PURPORY_EMBEDDING_MODEL`.
 
-Reconciliation defaults to 32,768 context tokens and embedding defaults to 512
-dimensions. Configure them in Global Settings or with
-`PURPORY_RECONCILE_CONTEXT_TOKENS`, `PURPORY_GATE_CONTEXT_TOKENS`, and
-`PURPORY_EMBEDDING_DIMENSIONS`. Provider, model, and dimensions identify stored
-vectors, so changing any of them makes the affected Project nodes pending until
-the next explicit `purpory embed`. Later durable writes refresh vectors for the
-selected binding immediately. Query and prepare rank semantic, exact, and
-recently opened seeds with direction-aware Typed PPR. Agent preflight returns at
-most three content-free signposts; CLI `query` returns five by default. See the
-[retrieval contract](docs/INTENT_GRAPH.md#retrieval) for weights and progression.
+Vectors are isolated by provider, model, and dimensions. Changing the binding
+makes nodes pending until an explicit `purpory embed`. Explicit memory writes
+refresh vectors for the selected binding. Embedding timeout/fallback behavior
+is unchanged.
+
+Existing databases migrate automatically. Before removing model-decision tables
+and credentials, migration 27 saves a database-only backup at
+`purpory.db.before-027-*.bak` beside the database; retain the sibling encryption
+key to recover encrypted credentials. Durable memories, versions, graph links,
+sessions, reviews, navigation, and embeddings are preserved. Historical migration
+files remain solely to upgrade existing databases; removed commands have no aliases.
 
 Run the model-free first-value and retrieval-budget checks with:
 

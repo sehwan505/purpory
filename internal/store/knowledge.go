@@ -110,46 +110,6 @@ func validateLink(link graph.Link) error {
 	return nil
 }
 
-func (s *Store) LinkStates(ctx context.Context, projectID string) (map[graph.Link]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source.kind, source.ref, edge.relation, target.kind, target.ref, edge.state
-		FROM edges edge
-		JOIN nodes source ON source.project_id = edge.project_id AND source.id = edge.source_id
-		JOIN nodes target ON target.project_id = edge.project_id AND target.id = edge.target_id
-		WHERE edge.project_id = ?
-	`, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("load link states: %w", err)
-	}
-	defer rows.Close()
-	result := map[graph.Link]string{}
-	for rows.Next() {
-		var link graph.Link
-		var state string
-		if err := rows.Scan(&link.SourceKind, &link.SourceRef, &link.Relation, &link.TargetKind, &link.TargetRef, &state); err != nil {
-			return nil, fmt.Errorf("load link states: scan: %w", err)
-		}
-		result[link] = state
-	}
-	return result, rows.Err()
-}
-
-func graphLinkState(ctx context.Context, database databaseRunner, projectID string, link graph.Link) (string, error) {
-	link = graph.NormalizeLink(link)
-	var state string
-	err := database.QueryRowContext(ctx, `
-		SELECT edge.state FROM edges edge
-		JOIN nodes source ON source.project_id = edge.project_id AND source.id = edge.source_id
-		JOIN nodes target ON target.project_id = edge.project_id AND target.id = edge.target_id
-		WHERE edge.project_id = ? AND source.kind = ? AND source.ref = ?
-		  AND target.kind = ? AND target.ref = ? AND edge.relation = ?
-	`, projectID, link.SourceKind, link.SourceRef, link.TargetKind, link.TargetRef, link.Relation).Scan(&state)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return state, err
-}
-
 func saveGraphLink(ctx context.Context, database databaseRunner, projectID string, link graph.Link, provenance string) (string, error) {
 	link = graph.NormalizeLink(link)
 	sourceID, err := ensureGraphNode(ctx, database, projectID, link.SourceKind, link.SourceRef, provenance)
@@ -190,21 +150,6 @@ func saveGraphLink(ctx context.Context, database databaseRunner, projectID strin
 	default:
 		return "", nil
 	}
-}
-
-func retireGraphLink(ctx context.Context, database databaseRunner, projectID string, link graph.Link) (bool, error) {
-	link = graph.NormalizeLink(link)
-	result, err := database.ExecContext(ctx, `
-		UPDATE edges SET state = 'retired', retired_at = unixepoch()
-		WHERE project_id = ? AND owner = 'durable' AND state = 'active' AND relation = ?
-		  AND source_id = (SELECT id FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?)
-		  AND target_id = (SELECT id FROM nodes WHERE project_id = ? AND kind = ? AND ref = ?)
-	`, projectID, link.Relation, projectID, link.SourceKind, link.SourceRef, projectID, link.TargetKind, link.TargetRef)
-	if err != nil {
-		return false, fmt.Errorf("retire link: %w", err)
-	}
-	changed, err := result.RowsAffected()
-	return changed > 0, err
 }
 
 func ensureGraphNode(ctx context.Context, database databaseRunner, projectID, kind, ref, provenance string) (string, error) {
@@ -269,12 +214,21 @@ func (s *Store) Graph(ctx context.Context, projectID string) ([]graph.Node, []gr
 
 // ReplaceKnowledge atomically publishes one complete project snapshot.
 // ponytail: rewrite the resolved snapshot; use per-Material writes when measured database time dominates updates.
-func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, materials []material.Material, nodes []graph.Node, claims []graph.Claim, edges []graph.Edge) error {
+func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, materials []material.Material, nodes []graph.Node, claims []graph.Claim, edges []graph.Edge, revision int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("replace knowledge: begin: %w", err)
 	}
 	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, "UPDATE projects SET knowledge_revision = knowledge_revision + 1 WHERE id = ? AND knowledge_revision = ?", projectID, revision)
+	if err != nil {
+		return fmt.Errorf("replace knowledge: claim revision: %w", err)
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count != 1 {
+		return errors.New("replace knowledge: project changed during update; retry")
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE project_id = ? AND owner = 'observed'`, projectID); err != nil {
 		return fmt.Errorf("replace knowledge: clear observed edges: %w", err)
 	}
@@ -352,4 +306,12 @@ func (s *Store) ReplaceKnowledge(ctx context.Context, projectID string, material
 		return fmt.Errorf("replace knowledge: commit: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) KnowledgeRevision(ctx context.Context, projectID string) (int64, error) {
+	var revision int64
+	if err := s.db.QueryRowContext(ctx, "SELECT knowledge_revision FROM projects WHERE id = ?", projectID).Scan(&revision); err != nil {
+		return 0, fmt.Errorf("load knowledge revision: %w", err)
+	}
+	return revision, nil
 }
