@@ -12,18 +12,15 @@ import (
 
 	product "github.com/sehwan505/purpory/internal/app"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
-	"github.com/sehwan505/purpory/internal/reconcile"
 )
 
 const maximumHookInput = 1 << 20
 
 type hookPayload struct {
-	Event          string `json:"hook_event_name"`
-	Prompt         string `json:"prompt"`
-	SessionID      string `json:"session_id"`
-	CWD            string `json:"cwd"`
-	TranscriptPath string `json:"transcript_path"`
-	Reason         string `json:"reason"`
+	Event     string `json:"hook_event_name"`
+	Prompt    string `json:"prompt"`
+	SessionID string `json:"session_id"`
+	CWD       string `json:"cwd"`
 }
 
 type hookResponse struct {
@@ -75,7 +72,7 @@ func runPreflight(ctx context.Context, service *product.Service, agent string, i
 	}
 	prepared, err := service.PrepareContext(ctx, contextprepare.Request{
 		Message: payload.Prompt, SessionID: sessionID, WorkingDirectory: payload.CWD,
-		TokenBudget: budget, RetainInput: retainHookInput(),
+		TokenBudget: budget,
 	})
 	if err != nil {
 		return writeHookFailure(output)
@@ -110,48 +107,22 @@ func hookTokenBudget() (int, error) {
 }
 
 func hookContext(result product.PrepareResult) string {
-	var parts []string
-	if result.Action == "retrieve" {
-		if hints := contextprepare.RenderHintMap(result.Hints); hints != "" {
-			parts = append(parts, hints)
-		}
-	}
-	if result.Action == "ask" && result.Clarification != nil {
-		requestID := ""
-		if result.RequestID != nil {
-			requestID = fmt.Sprintf("\nRequest ID: %d", *result.RequestID)
-		}
-		parts = append(parts, "[PURPORY INTENT ALIGNMENT SUGGESTION]\nKeep the original prompt active and ask the user this clarification:"+requestID+"\n"+*result.Clarification)
-	}
-	return strings.Join(parts, "\n\n")
+	return contextprepare.RenderHintMap(result.Hints)
 }
 
-func retainHookInput() bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv("PURPORY_CONTEXT_RETAIN_INPUT")))
-	return value != "0" && value != "false" && value != "no"
-}
-
-func runSessionEnd(ctx context.Context, service *product.Service, agent string, input io.Reader) (string, error) {
+func runSessionEnd(ctx context.Context, service *product.Service, agent string, input io.Reader) error {
 	payload, err := readHook(input)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if payload.Event != "SessionEnd" {
-		return "", errors.New("session-end: expected SessionEnd")
+		return errors.New("session-end: expected SessionEnd")
 	}
 	sessionID, err := agentSession(agent, payload.SessionID)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return service.QueueSessionEnd(ctx, payload.CWD, sessionID, agent, payload.TranscriptPath, payload.Reason)
-}
-
-func startReconciliation() error {
-	executable, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("start reconciliation: executable: %w", err)
-	}
-	return reconcile.StartWorker(executable)
+	return service.SaveSessionAt(ctx, payload.CWD, sessionID, agent, "ended")
 }
 
 func agentSession(agent, sessionID string) (string, error) {

@@ -41,7 +41,7 @@ func (s *Store) Project(ctx context.Context, id string) (project.Project, error)
 }
 
 func (s *Store) Projects(ctx context.Context) ([]project.Project, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, name, root FROM projects WHERE registered = 1 ORDER BY updated_at DESC, created_at DESC")
+	rows, err := s.db.QueryContext(ctx, "SELECT id, name, root FROM projects WHERE registered = 1 ORDER BY updated_at DESC, created_at DESC, id")
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}

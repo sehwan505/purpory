@@ -51,46 +51,6 @@ func (c *Client) Configured() bool {
 	return c.apiKey != "" || parsed != nil && loopback(parsed.Hostname())
 }
 
-func (c *Client) GenerateJSON(ctx context.Context, model, system, prompt string, schema, target any, contextTokens int, timeout time.Duration) error {
-	model, prompt = strings.TrimSpace(model), strings.TrimSpace(prompt)
-	if model == "" || prompt == "" || schema == nil || target == nil || contextTokens < 1024 || timeout <= 0 {
-		return fmt.Errorf("call openai: valid model, prompt, schema, target, context, and timeout are required")
-	}
-	messages := []map[string]string{}
-	if strings.TrimSpace(system) != "" {
-		messages = append(messages, map[string]string{"role": "system", "content": system})
-	}
-	messages = append(messages, map[string]string{"role": "user", "content": prompt})
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-				Refusal string `json:"refusal"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := c.post(ctx, "/chat/completions", map[string]any{
-		"model": model, "messages": messages,
-		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "purpory", "strict": true, "schema": schema}},
-	}, &result, timeout); err != nil {
-		return err
-	}
-	if len(result.Choices) == 0 {
-		return fmt.Errorf("call openai: response contains no choices")
-	}
-	if refusal := strings.TrimSpace(result.Choices[0].Message.Refusal); refusal != "" {
-		return fmt.Errorf("call openai: model refused the request")
-	}
-	content := strings.TrimSpace(result.Choices[0].Message.Content)
-	if content == "" {
-		return fmt.Errorf("call openai: response contains no content")
-	}
-	if err := json.Unmarshal([]byte(content), target); err != nil {
-		return fmt.Errorf("call openai: decode structured response: %w", err)
-	}
-	return nil
-}
-
 func (c *Client) Embed(ctx context.Context, model string, texts []string, dimensions int) ([][]float64, error) {
 	model = strings.TrimSpace(model)
 	if model == "" || len(texts) == 0 || dimensions <= 0 {

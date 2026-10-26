@@ -7,7 +7,6 @@ import (
 
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/memory"
-	"github.com/sehwan505/purpory/internal/store"
 )
 
 func TestAgentExplorationUsesOneShotBaselineRollback(t *testing.T) {
@@ -23,8 +22,10 @@ func TestAgentExplorationUsesOneShotBaselineRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.store.ReconcileMemories(ctx, "codex:reconcile", []store.MemoryProposal{{Memory: shared}, {Memory: bridge}}); err != nil {
-		t.Fatal(err)
+	for _, entry := range []memory.Memory{shared, bridge} {
+		if _, err := service.store.SaveMemory(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := service.store.SaveLink(ctx, "demo", graph.Link{SourceKind: graph.KindIntent, SourceRef: "policy.shared", Relation: graph.RelationDependsOn, TargetKind: graph.KindIntent, TargetRef: "dependency.bridge"}); err != nil {
 		t.Fatal(err)

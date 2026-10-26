@@ -33,13 +33,11 @@ type Service struct {
 	project             project.Project
 	activeRoot          string
 	store               *store.Store
-	databasePath        string
 	ollama              *ollama.Client
 	ollamaURL           string
 	credentials         credentialStore
 	workspace           WorkspaceObserver
 	preserveAssignments bool
-	gate                contextprepare.Provider
 	update              sync.Mutex
 }
 
@@ -257,14 +255,9 @@ func newService(ctx context.Context, databasePath string, database *store.Store,
 		return nil, err
 	}
 	service := &Service{
-		store: database, databasePath: databasePath, workspace: observer,
+		store: database, workspace: observer,
 		ollama: client, ollamaURL: ollamaURL, credentials: credentials,
 	}
-	gate, err := service.modelName(ctx, "gate")
-	if err != nil {
-		return nil, err
-	}
-	service.gate = service.newGateProvider(ctx, gate)
 	return service, nil
 }
 
@@ -422,11 +415,8 @@ func (s *Service) ConfirmMemory(ctx context.Context, key string) (bool, error) {
 	return s.store.ConfirmMemory(ctx, s.project.ID, key)
 }
 
-func (s *Service) ReconcileMemoryBatch(ctx context.Context, changes []memory.BatchChange, apply bool, sessionID string) (memory.BatchResult, error) {
-	if strings.TrimSpace(sessionID) == "" {
-		sessionID = currentSessionID("")
-	}
-	result, err := s.store.PreviewMemoryBatch(ctx, s.project.ID, changes, apply, sessionID)
+func (s *Service) MemoryBatch(ctx context.Context, changes []memory.BatchChange, apply bool) (memory.BatchResult, error) {
+	result, err := s.store.PreviewMemoryBatch(ctx, s.project.ID, changes, apply)
 	if err != nil || !result.Applied {
 		return result, err
 	}
@@ -454,22 +444,6 @@ func (s *Service) NeedsReviews(ctx context.Context, status string) ([]memory.Rev
 
 func (s *Service) ResolveNeedsReview(ctx context.Context, reviewID int64, outcome string, resultVersionID *int64) (*memory.Review, error) {
 	return s.store.ResolveNeedsReview(ctx, s.project.ID, reviewID, outcome, resultVersionID)
-}
-
-func (s *Service) ContextRequests(ctx context.Context, status string) ([]contextprepare.ContextRequest, error) {
-	return s.store.ContextRequests(ctx, s.project.ID, status)
-}
-
-func (s *Service) ResolveContextRequest(ctx context.Context, requestID int64, key string) (bool, error) {
-	return s.store.ResolveContextRequest(ctx, s.project.ID, requestID, key)
-}
-
-func (s *Service) ContextDecisions(ctx context.Context, limit int) ([]contextprepare.Decision, error) {
-	return s.store.PrepareDecisions(ctx, s.project.ID, limit)
-}
-
-func (s *Service) ContextFeedback(ctx context.Context, feedback contextprepare.Feedback) (contextprepare.Feedback, error) {
-	return s.store.SavePrepareFeedback(ctx, s.project.ID, feedback)
 }
 
 func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResult, error) {
@@ -542,7 +516,7 @@ func (s *Service) Query(ctx context.Context, query string, limit int) (QueryResu
 	}
 	result := QueryResult{Matches: matches, Nodes: nodeReferences(nodes), Edges: edges, Paths: contextGraph.branches(query, limit)}
 	if sessionID != "anon" && len(matches) > 0 {
-		if err := s.recordNavigation(ctx, sessionID, "query", matches[0].Node.ID, "", nil); err != nil {
+		if err := s.recordNavigation(ctx, sessionID, "query", matches[0].Node.ID, ""); err != nil {
 			return QueryResult{}, err
 		}
 	}
@@ -630,7 +604,7 @@ func (s *Service) Path(ctx context.Context, source, target string) (graph.Path, 
 		return result, err
 	}
 	if sessionID := currentSessionID(""); sessionID != "anon" && len(result.Nodes) > 0 {
-		if err := s.recordNavigation(ctx, sessionID, "path", result.Nodes[0].ID, result.Nodes[len(result.Nodes)-1].ID, nil); err != nil {
+		if err := s.recordNavigation(ctx, sessionID, "path", result.Nodes[0].ID, result.Nodes[len(result.Nodes)-1].ID); err != nil {
 			return graph.Path{}, err
 		}
 	}
@@ -659,17 +633,21 @@ func (s *Service) navigationNodeIDs(ctx context.Context, sessionID string) ([]st
 	return result, nil
 }
 
-func (s *Service) recordNavigation(ctx context.Context, sessionID, action, sourceID, targetID string, decisionID *int64) error {
+func (s *Service) recordNavigation(ctx context.Context, sessionID, action, sourceID, targetID string) error {
 	if err := s.SaveSessionAt(ctx, s.currentRoot(ctx), sessionID, sessionAgent(sessionID), "active"); err != nil {
 		return err
 	}
-	return s.store.AppendNavigation(ctx, s.project.ID, sessionID, []contextprepare.NavigationEvent{{Action: action, SourceNodeID: sourceID, TargetNodeID: targetID, DecisionID: decisionID}})
+	return s.store.AppendNavigation(ctx, s.project.ID, sessionID, []contextprepare.NavigationEvent{{Action: action, SourceNodeID: sourceID, TargetNodeID: targetID}})
 }
 
 func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 	// ponytail: serialize whole-project snapshots; add parallel extraction only after profiling real projects.
 	s.update.Lock()
 	defer s.update.Unlock()
+	revision, err := s.store.KnowledgeRevision(ctx, s.project.ID)
+	if err != nil {
+		return UpdateResult{}, err
+	}
 	workspace, err := s.store.Workspace(ctx, s.project)
 	if err != nil {
 		return UpdateResult{}, err
@@ -749,6 +727,9 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 	result := UpdateResult{MaterialCount: len(materials), Processed: len(changed), Changes: changes}
 	for _, value := range changed {
 		facts, extractErr := extract.Material(ctx, materialRoots[value.ID], value)
+		if errors.Is(extractErr, extract.ErrMaterialChanged) {
+			return UpdateResult{}, extractErr
+		}
 		nodes = append(nodes, facts.Nodes...)
 		claims = append(claims, facts.Claims...)
 		if extractErr != nil {
@@ -761,7 +742,7 @@ func (s *Service) Update(ctx context.Context) (UpdateResult, error) {
 		return left.MaterialID+left.SourceID+left.TargetID+left.TargetLabel+left.Relation < right.MaterialID+right.SourceID+right.TargetID+right.TargetLabel+right.Relation
 	})
 	edges := resolve.Claims(nodes, claims)
-	if err := s.store.ReplaceKnowledge(ctx, s.project.ID, materials, nodes, claims, edges); err != nil {
+	if err := s.store.ReplaceKnowledge(ctx, s.project.ID, materials, nodes, claims, edges, revision); err != nil {
 		return UpdateResult{}, err
 	}
 	if err := s.store.SaveWorkspace(ctx, s.project.ID, observed); err != nil {
@@ -853,8 +834,7 @@ func (s *Service) currentRoot(ctx context.Context) string {
 	if s.activeRoot != "" {
 		return s.activeRoot
 	}
-	s.activeRoot = s.firstProjectRoot(ctx)
-	return s.activeRoot
+	return s.firstProjectRoot(ctx)
 }
 
 func (s *Service) ModelStatus(ctx context.Context) ollama.Status {
@@ -863,8 +843,4 @@ func (s *Service) ModelStatus(ctx context.Context) ollama.Status {
 
 func (s *Service) Models(ctx context.Context) ([]ollama.Model, error) {
 	return s.ollama.Models(ctx)
-}
-
-func (s *Service) RunModel(ctx context.Context, model, prompt string) (string, error) {
-	return s.ollama.Chat(ctx, model, prompt)
 }

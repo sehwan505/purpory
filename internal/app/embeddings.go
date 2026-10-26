@@ -46,7 +46,7 @@ type semanticMatch struct {
 }
 
 func (s *Service) EmbeddingStatus(ctx context.Context) (EmbeddingStatus, error) {
-	selected, err := s.modelName(ctx, "embedding")
+	selected, err := s.embeddingModel(ctx)
 	if err != nil {
 		return EmbeddingStatus{}, err
 	}
@@ -74,7 +74,7 @@ func (s *Service) EmbeddingStatus(ctx context.Context) (EmbeddingStatus, error) 
 // SyncEmbeddings fills every missing or stale intent/knowledge embedding.
 // A positive limit bounds one invocation; zero processes the whole project.
 func (s *Service) SyncEmbeddings(ctx context.Context, limit int) (EmbeddingSyncResult, error) {
-	selected, err := s.modelName(ctx, "embedding")
+	selected, err := s.embeddingModel(ctx)
 	if err != nil {
 		return EmbeddingSyncResult{}, err
 	}
@@ -90,7 +90,7 @@ func (s *Service) SyncEmbeddings(ctx context.Context, limit int) (EmbeddingSyncR
 }
 
 func (s *Service) syncNodeEmbeddings(ctx context.Context, nodeIDs []string) error {
-	selected, err := s.modelName(ctx, "embedding")
+	selected, err := s.embeddingModel(ctx)
 	if err != nil || selected.Model == "" || selected.Source == "default" || len(nodeIDs) == 0 {
 		return err
 	}
@@ -168,7 +168,7 @@ func (s *Service) semanticMatchesBatch(ctx context.Context, queries []string, no
 	if len(queries) == 0 {
 		return nil, nil
 	}
-	selected, err := s.modelName(ctx, "embedding")
+	selected, err := s.embeddingModel(ctx)
 	if err != nil || selected.Model == "" || selected.Source == "default" {
 		return make([][]semanticMatch, len(queries)), err
 	}

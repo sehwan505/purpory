@@ -74,7 +74,7 @@ func saveObservations(ctx context.Context, tx *sql.Tx, resources []project.Resou
 func (s *Store) Observations(ctx context.Context) ([]project.Observation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, provider, label, identity, observed_at
-		FROM resource_observations ORDER BY observed_at DESC, label
+		FROM resource_observations ORDER BY observed_at DESC, label, id
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list observations: %w", err)
@@ -101,7 +101,7 @@ func (s *Store) Observations(ctx context.Context) ([]project.Observation, error)
 		value := &values[index]
 		viewRows, err := s.db.QueryContext(ctx, `
 			SELECT id, root, branch, revision, dirty, available, observed_at
-			FROM view_observations WHERE resource_id = ? ORDER BY observed_at DESC
+			FROM view_observations WHERE resource_id = ? ORDER BY observed_at DESC, id
 		`, value.Resource.ID)
 		if err != nil {
 			return nil, fmt.Errorf("list observations: views: %w", err)
@@ -157,7 +157,7 @@ func (s *Store) AssignObservation(ctx context.Context, projectID, resourceID str
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, root, branch, revision, dirty, available, observed_at
-		FROM view_observations WHERE resource_id = ? ORDER BY observed_at DESC
+		FROM view_observations WHERE resource_id = ? ORDER BY observed_at DESC, id
 	`, resourceID)
 	if err != nil {
 		return fmt.Errorf("assign observation: views: %w", err)
@@ -255,7 +255,7 @@ func (s *Store) SaveSession(ctx context.Context, projectID, viewID, sessionID, a
 
 func (s *Store) Workspace(ctx context.Context, current project.Project) (project.Workspace, error) {
 	result := project.Workspace{Project: current, Resources: []project.Resource{}, UnmappedSessions: []project.Session{}}
-	rows, err := s.db.QueryContext(ctx, "SELECT id, provider, label, identity FROM resources WHERE project_id = ? ORDER BY label", current.ID)
+	rows, err := s.db.QueryContext(ctx, "SELECT id, provider, label, identity FROM resources WHERE project_id = ? ORDER BY label, id", current.ID)
 	if err != nil {
 		return result, fmt.Errorf("load workspace: resources: %w", err)
 	}
@@ -272,7 +272,7 @@ func (s *Store) Workspace(ctx context.Context, current project.Project) (project
 	}
 	for resourceIndex := range result.Resources {
 		resource := &result.Resources[resourceIndex]
-		viewRows, err := s.db.QueryContext(ctx, `SELECT id, root, branch, revision, dirty, available, observed_at FROM views WHERE project_id = ? AND resource_id = ? ORDER BY observed_at DESC`, current.ID, resource.ID)
+		viewRows, err := s.db.QueryContext(ctx, `SELECT id, root, branch, revision, dirty, available, observed_at FROM views WHERE project_id = ? AND resource_id = ? ORDER BY observed_at DESC, id`, current.ID, resource.ID)
 		if err != nil {
 			return result, fmt.Errorf("load workspace: views: %w", err)
 		}
@@ -297,7 +297,7 @@ func (s *Store) Workspace(ctx context.Context, current project.Project) (project
 			views[view.ID] = view
 		}
 	}
-	sessionRows, err := s.db.QueryContext(ctx, `SELECT id, view_id, agent, status, started_at, updated_at FROM sessions WHERE project_id = ? ORDER BY updated_at DESC`, current.ID)
+	sessionRows, err := s.db.QueryContext(ctx, `SELECT id, view_id, agent, status, started_at, updated_at FROM sessions WHERE project_id = ? ORDER BY updated_at DESC, id`, current.ID)
 	if err != nil {
 		return result, fmt.Errorf("load workspace: sessions: %w", err)
 	}
@@ -326,7 +326,7 @@ func (s *Store) Workspace(ctx context.Context, current project.Project) (project
 	deliveries := map[string][]project.Delivery{}
 	deliveryRows, err := s.db.QueryContext(ctx, `
 		SELECT session_id, key, kind, label, source, preview, value_hash, delivered_at
-		FROM session_items WHERE project_id = ? ORDER BY delivered_at DESC, key
+		FROM session_items WHERE project_id = ? ORDER BY delivered_at DESC, key, value_hash, session_id
 	`, current.ID)
 	if err != nil {
 		return result, fmt.Errorf("load workspace: session items: %w", err)

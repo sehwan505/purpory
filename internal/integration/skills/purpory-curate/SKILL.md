@@ -33,7 +33,7 @@ Use the current agent session detected by Purpory. If none is available, place
   `purpory explore link SOURCE RELATION TARGET [REASON]` or
   `purpory explore unlink SOURCE RELATION TARGET`.
 - Keep each reason short and tied to inspected project evidence.
-- Do not use `remember`, reconciliation commands, direct database writes, or
+- Do not use `remember`, direct database writes, or
   source-file edits as substitutes for these graph operations.
 - Stay inside the target supplied with the invocation.
 

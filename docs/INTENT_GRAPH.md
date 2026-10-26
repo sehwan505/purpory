@@ -9,37 +9,6 @@ connecting it to the Materials and Knowledge that show what the project
 actually became. The graph is a memory index for autonomous work, not a claim
 that observed output can rewrite human intent.
 
-## Considered hypotheses
-
-1. Link every Intent to similar Materials during `update`. This has high recall,
-   but similarity alone produces false traceability links and lets observation
-   mutate durable meaning. Rejected.
-2. Infer links only at query time. This avoids stored mistakes, but repeats model
-   cost, loses provenance, and cannot expose drift before a related query arrives.
-   Rejected as the canonical representation.
-3. Link after every tool call or file write. This is timely, but couples the core
-   to agent-specific event formats and mistakes touched files for completed
-   evidence. Rejected.
-4. Require manual links. This is precise but cannot support autonomous operation.
-   Retained only as an override path through the durable link store.
-5. At session end, read the last committed Materials and reconcile explicit user intent.
-   Admit only memories whose absence could materially harm future work, allow at
-   most 12 new durable keys per run, compact directly duplicated or superseded
-   memories in each candidate's bounded neighborhood, balance locality with
-   creation age and recent navigation usage, and let the model select typed
-   relationships only to bounded existing Intent candidates and transcript-mentioned
-   targets from an existence-checked Material catalog.
-   Persist the memory node and durable edges in one transaction. Selected.
-
-The selected boundary has both forms of evidence available: explicit user
-statements establish durable intent, while the refreshed project snapshot
-establishes which targets actually exist. A model may choose from real targets
-but cannot invent a target reference or link a merely changed file. `update`
-remains responsible only for observation and never deletes durable edges.
-Workspace, View, and Session data remain outside the canonical graph; the
-reconciliation audit records the originating session and exact cited user
-evidence spans.
-
 ## Canonical graph
 
 ```text
@@ -63,15 +32,14 @@ switch to `state=missing`, preserving reconnectability and making drift visible.
 The stored graph therefore has two ownership zones:
 
 - `update` atomically replaces rows with `owner=observed`.
-- reconcile or an explicit human action owns rows with `owner=durable`.
+- explicit memory and graph edits own rows with `owner=durable`.
 
 Both zones live in the same `nodes` and `edges` tables. `provenance` records the
 writer. Retired durable edges remain auditable but are excluded from the active
 projection. Query-time planning remains outside this canonical graph.
 
-Workspace topology is operational state used as reconciliation input and is not
-projected into this graph. Session IDs and transcript evidence IDs remain in the
-reconciliation audit as provenance rather than becoming graph nodes.
+Workspace topology is operational state and never becomes canonical graph
+nodes. Session-end hooks record status without inspecting transcripts.
 
 ## Retrieval
 
@@ -96,28 +64,23 @@ There is no forced minimum result count: no semantic, exact, or recent-session
 seed means no hint. Workspace Resources remain outside the physical knowledge
 graph. Exact per-session content suppression and token budgeting still apply.
 
-Navigation events are operational state, not graph evidence. They may broaden a
-bounded reconciliation candidate set but cannot authorize a durable edge; exact
-USER evidence is still required for both additions and retirements.
+Navigation events are operational state and never authorize durable graph
+changes. The engine performs no model classification or automatic memory write.
 
 ## Evaluation contract
 
 The engine must keep these checks runnable without a model or network:
 
-1. reconciliation commits a new Intent node and its Material edges atomically;
-2. unavailable model-proposed Material references are rejected;
-3. unsupported relation types and merely changed Materials are not linked;
-4. reconciliation admits at most 12 new durable memories per run without
-   suppressing grounded updates to existing keys;
-5. reconciliation replaces only an admitted candidate's bounded duplicate or
-   superseded neighbors, preserves their versions and before-image audit, and
-   rolls back the whole change set on conflict;
-6. `update` preserves durable edges while targets disappear and reconnects them when
-   targets return;
-7. Graph, Explain, and Path traverse Intent and observed evidence together;
-8. query and prepare use the same Typed PPR ranking, keep results within the
-   token budget, and never include unopened node content;
-9. an unresolved durable target is visible rather than silently discarded;
-10. Workspace Sessions never project into the canonical graph;
-11. default `query`, `explain`, and `path` output stays within its character and
-   item budgets, omits unopened content, and preserves that boundary in JSON.
+1. Explicit memory batches apply atomically and reject stale expected hashes.
+2. Unsupported durable relation types are rejected.
+3. Updates preserve durable links while targets disappear and reconnect them
+   when targets return.
+4. Graph, Explain, and Path traverse Intent and observed evidence together.
+5. Query and prepare use the same Typed PPR ranking, keep results within budget,
+   and never include unopened node content.
+6. Unresolved durable targets remain visible.
+7. Workspace Sessions never project into the canonical graph.
+8. Default query, explain, and path output stays within character and item
+   budgets and preserves the progressive content boundary in JSON.
+9. A fixed snapshot, session state, and embedding response yield identical
+   retrieval results.

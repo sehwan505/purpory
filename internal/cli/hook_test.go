@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	product "github.com/sehwan505/purpory/internal/app"
 	"github.com/sehwan505/purpory/internal/memory"
 	contextprepare "github.com/sehwan505/purpory/internal/prepare"
-	"github.com/sehwan505/purpory/internal/reconcile"
 )
 
 func TestAgentHooksTrackSession(t *testing.T) {
@@ -41,24 +39,10 @@ func TestAgentHooksTrackSession(t *testing.T) {
 	if err != nil || len(workspace.Resources[0].Views[0].Sessions) != 1 || workspace.Resources[0].Views[0].Sessions[0].Status != "active" || len(workspace.Resources[0].Views[0].Sessions[0].Deliveries) != 0 || output.Len() == 0 || !strings.Contains(output.String(), `purpory explain`) || strings.Contains(output.String(), intent) {
 		t.Fatalf("session not started: %#v %q %v", workspace, output.String(), err)
 	}
-	decisions, err := service.ContextDecisions(context.Background(), 1)
-	if err != nil || len(decisions) != 1 || decisions[0].Hints == nil || len(decisions[0].Hints.Nodes) == 0 {
-		t.Fatalf("hint map audit missing: %#v %v", decisions, err)
-	}
 	payload["hook_event_name"] = "SessionEnd"
-	transcript := filepath.Join(root, "session.jsonl")
-	if err := os.WriteFile(transcript, []byte("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Keep intent visible.\"}}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	payload["transcript_path"] = transcript
-	t.Setenv("PURPORY_RECONCILE_DIR", filepath.Join(t.TempDir(), "reconcile"))
 	encoded, _ = json.Marshal(payload)
-	jobPath, err := runSessionEnd(context.Background(), service, "codex", bytes.NewReader(encoded))
-	if err != nil {
+	if err := runSessionEnd(context.Background(), service, "codex", bytes.NewReader(encoded)); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(jobPath); err != nil {
-		t.Fatalf("reconciliation was not queued: %v", err)
 	}
 	workspace, _ = service.Workspace(context.Background())
 	if workspace.Resources[0].Views[0].Sessions[0].Status != "ended" {
@@ -66,13 +50,7 @@ func TestAgentHooksTrackSession(t *testing.T) {
 	}
 }
 
-func TestHookContextPreservesAskAndReturnsHintMap(t *testing.T) {
-	requestID := int64(17)
-	clarification := "Which environment do you mean?"
-	ask := hookContext(product.PrepareResult{Action: "ask", RequestID: &requestID, Clarification: &clarification})
-	if !strings.Contains(ask, "INTENT ALIGNMENT SUGGESTION") || !strings.Contains(ask, "Request ID: 17") || !strings.Contains(ask, clarification) {
-		t.Fatalf("ask response missing: %q", ask)
-	}
+func TestHookContextReturnsHintMap(t *testing.T) {
 	hints := hookContext(product.PrepareResult{Action: "retrieve", Hints: &contextprepare.HintMap{Nodes: []contextprepare.HintNode{{ID: "knowledge:token", Label: "TokenRepository", Kind: "knowledge", Match: "semantic"}}}})
 	if !strings.Contains(hints, "MEMORY MAP — CONTENT NOT LOADED") || !strings.Contains(hints, `purpory explain`) || strings.Contains(hints, "USE FOR THIS TURN") {
 		t.Fatalf("hint map was promoted to evidence: %q", hints)
@@ -96,48 +74,5 @@ func TestAgentSessionSupportsHermes(t *testing.T) {
 	session, err := agentSession("HERMES", "one")
 	if err != nil || session != "hermes:one" {
 		t.Fatalf("Hermes session was not accepted: %q %v", session, err)
-	}
-}
-
-func TestReconciliationWorkerDrainsQueue(t *testing.T) {
-	root := t.TempDir()
-	database := filepath.Join(t.TempDir(), "purpory.db")
-	transcript := filepath.Join(root, "session.jsonl")
-	if err := os.WriteFile(transcript, []byte("{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"temporary\"}}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PURPORY_RECONCILE_DIR", filepath.Join(t.TempDir(), "reconcile"))
-	service := openCLIService(t, root, database, "demo")
-	job, err := service.QueueSessionEnd(context.Background(), root, "codex:worker", "codex", transcript, "exit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = service.Close()
-	if err := drainReconciliations(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(job); !os.IsNotExist(err) {
-		t.Fatalf("worker did not complete queued job: %v", err)
-	}
-}
-
-func TestHermesSessionEndCanDeferReconciliation(t *testing.T) {
-	root := t.TempDir()
-	transcript := filepath.Join(root, "session.jsonl")
-	if err := os.WriteFile(transcript, []byte("{\"role\":\"user\",\"content\":\"Remember SQLite.\"}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PURPORY_RECONCILE_DIR", filepath.Join(t.TempDir(), "reconcile"))
-	service := openCLIService(t, root, filepath.Join(t.TempDir(), "purpory.db"), "demo")
-	payload, _ := json.Marshal(map[string]string{
-		"hook_event_name": "SessionEnd", "session_id": "one", "cwd": root,
-		"transcript_path": transcript, "reason": "hermes-session-end",
-	})
-	if err := runCLI(context.Background(), service, []string{"session-end", "hermes", "--defer"}, bytes.NewReader(payload), io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	paths, err := reconcile.Pending()
-	if err != nil || len(paths) != 1 {
-		t.Fatalf("deferred reconciliation queue = %v, %v", paths, err)
 	}
 }

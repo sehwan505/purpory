@@ -15,9 +15,9 @@ func TestContractAndBudget(t *testing.T) {
 	}
 }
 
-func TestFallback(t *testing.T) {
-	if proposal := Fallback("안녕하세요"); proposal.Action != "skip" || proposal.ReasonCode != "SELF_CONTAINED" {
-		t.Fatalf("greeting was not skipped: %#v", proposal)
+func TestGreeting(t *testing.T) {
+	if !IsGreeting("안녕하세요") {
+		t.Fatal("greeting was not recognized")
 	}
 }
 

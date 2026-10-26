@@ -5,14 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/sehwan505/purpory/internal/agent"
-	"github.com/sehwan505/purpory/internal/codexoauth"
 	"github.com/sehwan505/purpory/internal/ollama"
 	"github.com/sehwan505/purpory/internal/openai"
 )
@@ -20,41 +17,12 @@ import (
 const (
 	providerOllama              = "ollama"
 	providerOpenAI              = "openai"
-	providerCodex               = "codex"
-	providerCodexOAuth          = "openai-codex"
-	providerClaude              = "claude"
 	defaultOpenAIURL            = "https://api.openai.com/v1"
 	openAIEndpointSetting       = "provider.openai.url"
 	openAICredentialAccount     = "provider.openai.api-key"
 	openAIEndpointEnvironment   = "PURPORY_OPENAI_BASE_URL"
 	openAICredentialEnvironment = "PURPORY_OPENAI_API_KEY"
 )
-
-var modelRoles = map[string]struct {
-	providerEnvironment  string
-	modelEnvironment     string
-	parameterEnvironment string
-	defaultModel         string
-	defaultContext       int
-	defaultDimensions    int
-}{
-	"gate": {
-		providerEnvironment: "PURPORY_GATE_PROVIDER", modelEnvironment: "PURPORY_GATE_MODEL",
-		parameterEnvironment: "PURPORY_GATE_CONTEXT_TOKENS", defaultContext: 8_192,
-	},
-	"reconcile": {
-		providerEnvironment: "PURPORY_RECONCILE_PROVIDER", modelEnvironment: "PURPORY_RECONCILE_MODEL",
-		parameterEnvironment: "PURPORY_RECONCILE_CONTEXT_TOKENS", defaultModel: "qwen3.5:9b", defaultContext: 32_768,
-	},
-	"embedding": {
-		providerEnvironment: "PURPORY_EMBEDDING_PROVIDER", modelEnvironment: "PURPORY_EMBEDDING_MODEL",
-		parameterEnvironment: "PURPORY_EMBEDDING_DIMENSIONS", defaultModel: "qwen3-embedding:0.6b", defaultDimensions: 512,
-	},
-}
-
-type structuredGenerator interface {
-	GenerateJSON(context.Context, string, string, string, any, any, int, time.Duration) error
-}
 
 type embedder interface {
 	Embed(context.Context, string, []string, int) ([][]float64, error)
@@ -67,12 +35,11 @@ type credentialStore interface {
 }
 
 type ModelSelection struct {
-	Role          string `json:"role"`
-	Provider      string `json:"provider"`
-	Model         string `json:"model,omitempty"`
-	ContextTokens int    `json:"contextTokens,omitempty"`
-	Dimensions    int    `json:"dimensions,omitempty"`
-	Source        string `json:"source"`
+	Role       string `json:"role"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model,omitempty"`
+	Dimensions int    `json:"dimensions,omitempty"`
+	Source     string `json:"source"`
 }
 
 type ProviderState struct {
@@ -93,97 +60,53 @@ type ModelState struct {
 }
 
 type storedModelBinding struct {
-	Provider      string `json:"provider"`
-	Model         string `json:"model"`
-	ContextTokens int    `json:"contextTokens,omitempty"`
-	Dimensions    int    `json:"dimensions,omitempty"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions,omitempty"`
 }
 
-func (s *Service) modelName(ctx context.Context, role string) (ModelSelection, error) {
-	role = strings.ToLower(strings.TrimSpace(role))
-	config, found := modelRoles[role]
-	if !found {
-		return ModelSelection{}, errors.New("select model: role must be gate, reconcile, or embedding")
-	}
-	selected := ModelSelection{
-		Role: role, Provider: providerOllama, Model: config.defaultModel,
-		ContextTokens: config.defaultContext, Dimensions: config.defaultDimensions, Source: "default",
-	}
-	if value, found, err := s.store.Setting(ctx, "model."+role); err != nil {
+func (s *Service) embeddingModel(ctx context.Context) (ModelSelection, error) {
+	selected := ModelSelection{Role: "embedding", Provider: providerOllama, Model: "qwen3-embedding:0.6b", Dimensions: 512, Source: "default"}
+	if value, found, err := s.store.Setting(ctx, "model.embedding"); err != nil {
 		return ModelSelection{}, err
 	} else if found {
-		selected.Source = "setting"
-		if strings.HasPrefix(strings.TrimSpace(value), "{") {
-			var binding storedModelBinding
-			if err := json.Unmarshal([]byte(value), &binding); err != nil {
-				return ModelSelection{}, fmt.Errorf("load model binding: %w", err)
-			}
-			selected.Provider, selected.Model = binding.Provider, binding.Model
-			if binding.ContextTokens > 0 {
-				selected.ContextTokens = binding.ContextTokens
-			}
-			if binding.Dimensions > 0 {
-				selected.Dimensions = binding.Dimensions
-			}
-		} else {
-			selected.Model = value // Legacy model-only settings belong to Ollama.
+		var binding storedModelBinding
+		if err := json.Unmarshal([]byte(value), &binding); err != nil {
+			return ModelSelection{}, fmt.Errorf("load embedding binding: %w", err)
 		}
+		selected.Provider, selected.Model, selected.Dimensions, selected.Source = binding.Provider, binding.Model, binding.Dimensions, "setting"
 	}
-	providerOverride := strings.TrimSpace(os.Getenv(config.providerEnvironment))
-	modelOverride := strings.TrimSpace(os.Getenv(config.modelEnvironment))
-	if providerOverride != "" {
-		previousProvider := selected.Provider
-		selected.Provider = strings.ToLower(providerOverride)
-		if (selected.Provider == providerCodex || selected.Provider == providerClaude) && modelOverride == "" {
-			selected.Model = ""
-		}
-		if selected.Provider == providerCodexOAuth && previousProvider != providerCodexOAuth && modelOverride == "" {
-			selected.Model = ""
-		}
-		selected.Source = "environment"
+	if value := strings.TrimSpace(os.Getenv("PURPORY_EMBEDDING_PROVIDER")); value != "" {
+		selected.Provider, selected.Source = strings.ToLower(value), "environment"
 	}
-	if modelOverride != "" {
-		selected.Model = modelOverride
-		selected.Source = "environment"
+	if value := strings.TrimSpace(os.Getenv("PURPORY_EMBEDDING_MODEL")); value != "" {
+		selected.Model, selected.Source = value, "environment"
 	}
-	if raw := strings.TrimSpace(os.Getenv(config.parameterEnvironment)); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("PURPORY_EMBEDDING_DIMENSIONS")); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil {
-			return ModelSelection{}, fmt.Errorf("configure %s model: %s must be an integer", role, config.parameterEnvironment)
+			return ModelSelection{}, errors.New("embedding dimensions must be an integer")
 		}
-		if role == "embedding" {
-			selected.Dimensions = value
-		} else {
-			selected.ContextTokens = value
-		}
-		selected.Source = "environment"
+		selected.Dimensions, selected.Source = value, "environment"
 	}
-	if err := validateModelSelection(selected, false); err != nil {
+	if err := validateModelSelection(selected); err != nil {
 		return ModelSelection{}, err
 	}
 	return selected, nil
 }
 
-func validateModelSelection(selected ModelSelection, requireModel bool) error {
-	if _, found := modelRoles[selected.Role]; !found {
-		return errors.New("select model: role must be gate, reconcile, or embedding")
+func validateModelSelection(selected ModelSelection) error {
+	if selected.Role != "embedding" {
+		return errors.New("model role must be embedding")
 	}
 	if selected.Provider != providerOllama && selected.Provider != providerOpenAI {
-		if selected.Role != "reconcile" || selected.Provider != providerCodex && selected.Provider != providerClaude && selected.Provider != providerCodexOAuth {
-			return errors.New("select model: provider must be ollama or openai, or codex, openai-codex, or claude for reconcile")
-		}
+		return errors.New("embedding provider must be ollama or openai")
 	}
-	if len(selected.Model) > 255 || requireModel && strings.TrimSpace(selected.Model) == "" && selected.Provider != providerCodex && selected.Provider != providerClaude {
-		return errors.New("select model: model is required")
+	if selected.Model == "" || len(selected.Model) > 255 {
+		return errors.New("embedding model is required and must be at most 255 characters")
 	}
-	if selected.Role == "embedding" {
-		if selected.Dimensions < 1 || selected.Dimensions > 16_384 {
-			return errors.New("select model: embedding dimensions must be between 1 and 16384")
-		}
-	} else if selected.ContextTokens < 1_024 || selected.ContextTokens > 1_048_576 {
-		return errors.New("select model: context tokens must be between 1024 and 1048576")
-	} else if selected.Role == "reconcile" && selected.ContextTokens < 8_192 {
-		return errors.New("select model: reconcile context tokens must be between 8192 and 1048576")
+	if selected.Dimensions < 1 || selected.Dimensions > 16_384 {
+		return errors.New("embedding dimensions must be between 1 and 16384")
 	}
 	return nil
 }
@@ -191,7 +114,6 @@ func validateModelSelection(selected ModelSelection, requireModel bool) error {
 func (s *Service) ModelState(ctx context.Context) (ModelState, error) {
 	ollamaStatus := s.ollama.Status(ctx)
 	openAIState := s.openAIState(ctx)
-	codexOAuthState := s.codexOAuthState(ctx)
 	ollamaEndpointSource := "default"
 	if strings.TrimSpace(os.Getenv("PURPORY_OLLAMA_URL")) != "" {
 		ollamaEndpointSource = "environment"
@@ -201,70 +123,36 @@ func (s *Service) ModelState(ctx context.Context) (ModelState, error) {
 		Providers: []ProviderState{
 			{ID: providerOllama, Label: "Ollama", Configured: true, Available: ollamaStatus.Available, Endpoint: s.ollamaURL, EndpointSource: ollamaEndpointSource, CredentialSource: "none", Error: ollamaStatus.Error},
 			openAIState,
-			codexOAuthState,
 		},
 	}
-	for _, role := range []string{"gate", "reconcile", "embedding"} {
-		selected, err := s.modelName(ctx, role)
-		if err != nil {
-			return ModelState{}, err
-		}
-		result.Models = append(result.Models, selected)
+	selected, err := s.embeddingModel(ctx)
+	if err != nil {
+		return ModelState{}, err
 	}
+	result.Models = []ModelSelection{selected}
 	return result, nil
 }
 
-// SelectModel keeps the original CLI/API behavior: a model-only selection uses Ollama.
 func (s *Service) SelectModel(ctx context.Context, role, model string) (ModelSelection, error) {
-	config, found := modelRoles[strings.ToLower(strings.TrimSpace(role))]
-	if !found {
-		return ModelSelection{}, errors.New("select model: role must be gate, reconcile, or embedding")
-	}
-	return s.SelectModelProvider(ctx, role, providerOllama, model, config.defaultContext, config.defaultDimensions)
+	return s.SelectModelProvider(ctx, role, providerOllama, model, 512)
 }
 
-func (s *Service) SelectModelProvider(ctx context.Context, role, provider, model string, contextTokens, dimensions int) (ModelSelection, error) {
-	role, provider, model = strings.ToLower(strings.TrimSpace(role)), strings.ToLower(strings.TrimSpace(provider)), strings.TrimSpace(model)
-	config, found := modelRoles[role]
-	if !found {
-		return ModelSelection{}, errors.New("select model: role must be gate, reconcile, or embedding")
-	}
-	if contextTokens == 0 {
-		contextTokens = config.defaultContext
-	}
+func (s *Service) SelectModelProvider(ctx context.Context, role, provider, model string, dimensions int) (ModelSelection, error) {
 	if dimensions == 0 {
-		dimensions = config.defaultDimensions
+		dimensions = 512
 	}
-	selected := ModelSelection{Role: role, Provider: provider, Model: model, ContextTokens: contextTokens, Dimensions: dimensions, Source: "setting"}
-	if err := validateModelSelection(selected, true); err != nil {
+	selected := ModelSelection{Role: strings.ToLower(strings.TrimSpace(role)), Provider: strings.ToLower(strings.TrimSpace(provider)), Model: strings.TrimSpace(model), Dimensions: dimensions, Source: "setting"}
+	if err := validateModelSelection(selected); err != nil {
 		return ModelSelection{}, err
 	}
-	encoded, err := json.Marshal(storedModelBinding{Provider: provider, Model: model, ContextTokens: contextTokens, Dimensions: dimensions})
+	encoded, err := json.Marshal(storedModelBinding{Provider: selected.Provider, Model: selected.Model, Dimensions: selected.Dimensions})
 	if err != nil {
-		return ModelSelection{}, fmt.Errorf("save model binding: %w", err)
-	}
-	if err := s.store.SaveSetting(ctx, "model."+role, string(encoded)); err != nil {
 		return ModelSelection{}, err
 	}
-	if role == "gate" {
-		s.gate = s.newGateProvider(ctx, selected)
+	if err := s.store.SaveSetting(ctx, "model.embedding", string(encoded)); err != nil {
+		return ModelSelection{}, err
 	}
 	return selected, nil
-}
-
-func (s *Service) generator(ctx context.Context, provider string) (structuredGenerator, error) {
-	switch provider {
-	case providerOllama:
-		return s.ollama, nil
-	case providerOpenAI:
-		return s.openAIClient(ctx)
-	case providerCodex, providerClaude:
-		return agent.New(provider)
-	case providerCodexOAuth:
-		return codexoauth.New(s.credentials), nil
-	default:
-		return nil, fmt.Errorf("configure model: unknown provider %q", provider)
-	}
 }
 
 func (s *Service) embeddingProvider(ctx context.Context, provider string) (embedder, error) {
@@ -333,19 +221,12 @@ func (s *Service) ConfigureProvider(ctx context.Context, provider, endpoint, api
 			return ProviderState{}, err
 		}
 	}
-	s.refreshGate(ctx)
 	return s.openAIState(ctx), nil
 }
 
 func (s *Service) ClearProviderCredential(ctx context.Context, provider string) (ProviderState, error) {
-	if strings.ToLower(strings.TrimSpace(provider)) == providerCodexOAuth {
-		if err := codexoauth.New(s.credentials).Clear(ctx); err != nil {
-			return ProviderState{}, err
-		}
-		return s.codexOAuthState(ctx), nil
-	}
 	if strings.ToLower(strings.TrimSpace(provider)) != providerOpenAI {
-		return ProviderState{}, errors.New("clear provider credential: provider must be openai or openai-codex")
+		return ProviderState{}, errors.New("clear provider credential: provider must be openai")
 	}
 	if strings.TrimSpace(os.Getenv(openAICredentialEnvironment)) != "" {
 		return ProviderState{}, fmt.Errorf("clear provider credential: credential is controlled by %s", openAICredentialEnvironment)
@@ -353,42 +234,7 @@ func (s *Service) ClearProviderCredential(ctx context.Context, provider string) 
 	if err := s.credentials.Delete(ctx, openAICredentialAccount); err != nil {
 		return ProviderState{}, err
 	}
-	s.refreshGate(ctx)
 	return s.openAIState(ctx), nil
-}
-
-func (s *Service) LoginCodexOAuth(ctx context.Context, output io.Writer) (ProviderState, error) {
-	if err := codexoauth.New(s.credentials).Login(ctx, output); err != nil {
-		return ProviderState{}, err
-	}
-	return s.codexOAuthState(ctx), nil
-}
-
-func (s *Service) StartCodexOAuth(ctx context.Context) (codexoauth.DeviceCode, error) {
-	return codexoauth.New(s.credentials).Start(ctx)
-}
-
-func (s *Service) FinishCodexOAuth(ctx context.Context, device codexoauth.DeviceCode) (ProviderState, error) {
-	if err := codexoauth.New(s.credentials).Finish(ctx, device); err != nil {
-		return ProviderState{}, err
-	}
-	return s.codexOAuthState(ctx), nil
-}
-
-func (s *Service) codexOAuthState(ctx context.Context) ProviderState {
-	state := ProviderState{ID: providerCodexOAuth, Label: "ChatGPT Codex OAuth", Endpoint: "https://chatgpt.com/backend-api/codex", EndpointSource: "default", CredentialSource: "none"}
-	configured, err := codexoauth.New(s.credentials).Configured(ctx)
-	if err != nil {
-		state.Error = err.Error()
-		return state
-	}
-	state.Configured = configured
-	if configured {
-		state.CredentialSource = "database"
-	} else {
-		state.Error = "sign in from Settings or run `purpory model provider login openai-codex`"
-	}
-	return state
 }
 
 func (s *Service) openAIClient(ctx context.Context) (*openai.Client, error) {
@@ -458,13 +304,6 @@ func (s *Service) openAICredential(ctx context.Context) (string, string, error) 
 	return "", "none", nil
 }
 
-func (s *Service) refreshGate(ctx context.Context) {
-	selected, err := s.modelName(ctx, "gate")
-	if err == nil {
-		s.gate = s.newGateProvider(ctx, selected)
-	}
-}
-
 func (s *Service) StartModels(ctx context.Context, wait time.Duration) ollama.Status {
 	if wait <= 0 || wait > time.Minute {
 		wait = 10 * time.Second
@@ -473,6 +312,9 @@ func (s *Service) StartModels(ctx context.Context, wait time.Duration) ollama.St
 }
 
 func (s *Service) InstallModel(ctx context.Context, model, role string) (ModelSelection, error) {
+	if role != "" && role != "embedding" {
+		return ModelSelection{}, errors.New("model role must be embedding")
+	}
 	model = strings.TrimSpace(model)
 	if model == "" || len(model) > 255 {
 		return ModelSelection{}, errors.New("install model: model is required")

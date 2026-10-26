@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -21,6 +22,8 @@ import (
 	"github.com/sehwan505/purpory/internal/graph"
 	"github.com/sehwan505/purpory/internal/material"
 )
+
+var ErrMaterialChanged = errors.New("material changed during update")
 
 var declarations = map[string][]pattern{
 	"text/x-python": {
@@ -85,20 +88,36 @@ func Material(ctx context.Context, root string, value material.Material) (Facts,
 	if err != nil {
 		return result, err
 	}
+	if Processor(value) == "catalog/v1" {
+		return result, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return result, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	reader := io.TeeReader(file, hash)
 	var facts Facts
 	switch value.MediaType {
 	case "text/markdown":
-		facts, err = extractMarkdown(ctx, path, relative, value.ID, result)
+		facts, err = extractMarkdown(ctx, reader, relative, value.ID, result)
 	case "text/x-go":
-		facts, err = extractGo(ctx, path, relative, value.ID, result)
+		facts, err = extractGo(ctx, reader, relative, value.ID, result)
 	default:
 		if patterns := declarations[value.MediaType]; len(patterns) > 0 {
-			facts, err = extractText(ctx, path, relative, value.ID, result, patterns)
+			facts, err = extractText(ctx, reader, relative, value.ID, result, patterns)
 		} else if strings.HasPrefix(value.MediaType, "text/") || value.MediaType == "application/json" || value.MediaType == "application/yaml" || value.MediaType == "application/xml" {
-			facts, err = extractContent(ctx, path, result)
+			facts, err = extractContent(ctx, reader, result)
 		} else {
 			facts = result
 		}
+	}
+	if _, readErr := io.Copy(io.Discard, reader); readErr != nil {
+		return Facts{}, readErr
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != value.Hash {
+		return Facts{}, fmt.Errorf("%w: %s", ErrMaterialChanged, value.URI)
 	}
 	if err != nil && len(facts.Nodes) == 0 {
 		facts = result
@@ -106,13 +125,8 @@ func Material(ctx context.Context, root string, value material.Material) (Facts,
 	return facts, err
 }
 
-func extractMarkdown(ctx context.Context, path, relative, materialID string, result Facts) (Facts, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return Facts{}, err
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
+func extractMarkdown(ctx context.Context, reader io.Reader, relative, materialID string, result Facts) (Facts, error) {
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	parents := [7]string{}
 	occurrences := map[string]int{}
@@ -168,16 +182,11 @@ func extractMarkdown(ctx context.Context, path, relative, materialID string, res
 	return result, nil
 }
 
-func extractContent(ctx context.Context, path string, result Facts) (Facts, error) {
+func extractContent(ctx context.Context, reader io.Reader, result Facts) (Facts, error) {
 	if err := ctx.Err(); err != nil {
 		return Facts{}, err
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return Facts{}, err
-	}
-	defer file.Close()
-	content, err := io.ReadAll(io.LimitReader(file, 256<<10))
+	content, err := io.ReadAll(io.LimitReader(reader, 256<<10))
 	if err != nil {
 		return Facts{}, err
 	}
@@ -212,13 +221,8 @@ func appendContent(destination *string, line string) {
 	*destination += line
 }
 
-func extractText(ctx context.Context, path, relative, materialID string, result Facts, patterns []pattern) (Facts, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return Facts{}, err
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
+func extractText(ctx context.Context, reader io.Reader, relative, materialID string, result Facts, patterns []pattern) (Facts, error) {
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	occurrences := map[string]int{}
 	for line := 1; scanner.Scan(); line++ {
@@ -246,9 +250,9 @@ func extractText(ctx context.Context, path, relative, materialID string, result 
 	return result, nil
 }
 
-func extractGo(ctx context.Context, path, relative, materialID string, result Facts) (Facts, error) {
+func extractGo(ctx context.Context, reader io.Reader, relative, materialID string, result Facts) (Facts, error) {
 	set := token.NewFileSet()
-	parsed, err := parser.ParseFile(set, path, nil, parser.SkipObjectResolution)
+	parsed, err := parser.ParseFile(set, relative, reader, parser.SkipObjectResolution)
 	if err != nil {
 		return Facts{}, err
 	}

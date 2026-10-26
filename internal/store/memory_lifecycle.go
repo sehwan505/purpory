@@ -85,9 +85,9 @@ func (s *Store) ConfirmMemory(ctx context.Context, projectID, key string) (bool,
 	return changed > 0, nil
 }
 
-func (s *Store) PreviewMemoryBatch(ctx context.Context, projectID string, changes []memory.BatchChange, apply bool, sessionID string) (memory.BatchResult, error) {
+func (s *Store) PreviewMemoryBatch(ctx context.Context, projectID string, changes []memory.BatchChange, apply bool) (memory.BatchResult, error) {
 	if len(changes) == 0 || len(changes) > 20 {
-		return memory.BatchResult{}, errors.New("reconcile memory batch: 1-20 changes are required")
+		return memory.BatchResult{}, errors.New("memory batch: 1-20 changes are required")
 	}
 	prepared := make([]memory.Memory, len(changes))
 	current := make([]*memory.Memory, len(changes))
@@ -103,7 +103,7 @@ func (s *Store) PreviewMemoryBatch(ctx context.Context, projectID string, change
 			return memory.BatchResult{}, err
 		}
 		if seen[entry.Key] {
-			return memory.BatchResult{}, fmt.Errorf("reconcile memory batch: duplicate key %q", entry.Key)
+			return memory.BatchResult{}, fmt.Errorf("memory batch: duplicate key %q", entry.Key)
 		}
 		seen[entry.Key] = true
 		prepared[index] = entry
@@ -132,11 +132,7 @@ func (s *Store) PreviewMemoryBatch(ctx context.Context, projectID string, change
 	if !apply || conflict {
 		return result, nil
 	}
-	proposals := make([]MemoryProposal, len(prepared))
-	for index, entry := range prepared {
-		proposals[index] = MemoryProposal{Memory: entry, ExpectedHash: changes[index].ExpectedHash}
-	}
-	results, err := s.ReconcileMemories(ctx, sessionID, proposals)
+	results, err := s.saveMemoryBatch(ctx, projectID, prepared, changes)
 	if err != nil {
 		return memory.BatchResult{}, err
 	}
@@ -291,4 +287,39 @@ func scanReview(row reviewScanner) (memory.Review, error) {
 		item.ResolvedAt = time.Unix(resolvedAt.Int64, 0).UTC().Format(time.RFC3339)
 	}
 	return item, nil
+}
+
+func (s *Store) saveMemoryBatch(ctx context.Context, projectID string, entries []memory.Memory, changes []memory.BatchChange) ([]SaveResult, error) {
+	connection, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("memory batch: begin: %w", err)
+	}
+	defer connection.ExecContext(context.Background(), "ROLLBACK")
+	for index, entry := range entries {
+		var hash string
+		err := connection.QueryRowContext(ctx, "SELECT content_hash FROM memories WHERE project_id = ? AND key = ?", projectID, entry.Key).Scan(&hash)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		expected := changes[index].ExpectedHash
+		if errors.Is(err, sql.ErrNoRows) && expected != nil || err == nil && (expected == nil || *expected != hash) {
+			return nil, errors.New("memory batch: concurrent change")
+		}
+	}
+	results := make([]SaveResult, len(entries))
+	for index, entry := range entries {
+		saved, err := saveMemory(ctx, connection, entry)
+		if err != nil {
+			return nil, err
+		}
+		results[index] = saved
+	}
+	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("memory batch: commit: %w", err)
+	}
+	return results, nil
 }

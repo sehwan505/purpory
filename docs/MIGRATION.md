@@ -4,18 +4,20 @@ Reference implementation: `../purpory-python` at upstream `main`.
 
 ## Keep
 
-- standalone CLI workflows: `remember`, memory review and batch reconciliation,
-  context request/decision audit, `prepare`, `query`, `embed`, `explain`, `path`,
+- standalone CLI workflows: `remember`, memory review and atomic batch edits, `prepare`, `query`, `embed`, `explain`, `path`,
   `update`, and model lifecycle management; plus the separate desktop dashboard
 - working-directory project selection and the Project → Resource → View → Session
   model, with Projects created only through explicit registration
 - SQLite persistence, audit history, domain-neutral Material ingestion,
   structural knowledge extraction, Codex and Claude hook installation, and
-  optional Ollama and OpenAI-compatible model integration
+  optional Ollama and OpenAI-compatible embeddings
 - the existing React dashboard's useful workflows, redesigned as a native-feeling
   Wails application
 
 ## Deliberately removed
+
+- automatic transcript inference, background workers, generated clarification,
+  model-decision audit/feedback, and generation-only providers
 
 - legacy MCP graph server and graph-database exporters
 - `affected`, benchmark, PR, clustering-only, label-only, report, wiki, and HTML
@@ -34,8 +36,7 @@ Reference implementation: `../purpory-python` at upstream `main`.
 4. Make `update` discover Materials, incrementally extract facts, resolve
    relationships, and atomically publish project knowledge.
 5. Add optional Ollama features and model management.
-6. Port context request resolution, gate feedback, memory review,
-   embedding/Typed PPR HintMaps, and explicit fail-closed submit hooks.
+6. Add memory review, embedding/Typed PPR HintMaps, and fail-closed submit hooks.
 7. Complete the separate dashboard and CLI, hooks, installers, and cross-OS
    release checks.
 

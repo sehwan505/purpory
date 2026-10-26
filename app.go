@@ -2,26 +2,20 @@ package main
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 
 	product "github.com/sehwan505/purpory/internal/app"
-	"github.com/sehwan505/purpory/internal/codexoauth"
 	"github.com/sehwan505/purpory/internal/memory"
 	"github.com/sehwan505/purpory/internal/ollama"
-	contextprepare "github.com/sehwan505/purpory/internal/prepare"
 	"github.com/sehwan505/purpory/internal/project"
-	"github.com/sehwan505/purpory/internal/reconcile"
 	"github.com/sehwan505/purpory/internal/store"
 )
 
 type App struct {
-	ctx            context.Context
-	service        *product.Service
-	mu             sync.RWMutex
-	oauthPending   *codexoauth.DeviceCode
-	oauthFinishing bool
+	ctx     context.Context
+	service *product.Service
+	mu      sync.RWMutex
 }
 
 func NewApp(service *product.Service) *App {
@@ -116,30 +110,6 @@ func (a *App) ResolveNeedsReview(id int64, outcome string, resultVersionID *int6
 	return a.service.ResolveNeedsReview(a.ctx, id, outcome, resultVersionID)
 }
 
-func (a *App) ContextRequests(status string) ([]contextprepare.ContextRequest, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.ContextRequests(a.ctx, status)
-}
-
-func (a *App) ResolveContextRequest(id int64, key string) (bool, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.ResolveContextRequest(a.ctx, id, key)
-}
-
-func (a *App) ContextDecisions(limit int) ([]contextprepare.Decision, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.ContextDecisions(a.ctx, limit)
-}
-
-func (a *App) ContextFeedback(feedback contextprepare.Feedback) (contextprepare.Feedback, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.ContextFeedback(a.ctx, feedback)
-}
-
 func (a *App) Query(query string, limit int) (product.QueryResult, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -182,10 +152,10 @@ func (a *App) SelectModel(role, model string) (product.ModelSelection, error) {
 	return a.service.SelectModel(a.ctx, role, model)
 }
 
-func (a *App) SelectModelProvider(role, provider, model string, contextTokens, dimensions int) (product.ModelSelection, error) {
+func (a *App) SelectModelProvider(role, provider, model string, dimensions int) (product.ModelSelection, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.service.SelectModelProvider(a.ctx, role, provider, model, contextTokens, dimensions)
+	return a.service.SelectModelProvider(a.ctx, role, provider, model, dimensions)
 }
 
 func (a *App) ConfigureProvider(provider, endpoint, apiKey string) (product.ProviderState, error) {
@@ -198,37 +168,6 @@ func (a *App) ClearProviderCredential(provider string) (product.ProviderState, e
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.service.ClearProviderCredential(a.ctx, provider)
-}
-
-func (a *App) StartCodexOAuth() (codexoauth.DeviceCode, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.oauthPending != nil {
-		return codexoauth.DeviceCode{}, errors.New("Codex login is already waiting for approval")
-	}
-	device, err := a.service.StartCodexOAuth(a.ctx)
-	if err == nil {
-		a.oauthPending = &device
-	}
-	return device, err
-}
-
-func (a *App) FinishCodexOAuth() (product.ProviderState, error) {
-	a.mu.Lock()
-	if a.oauthPending == nil || a.oauthFinishing {
-		a.mu.Unlock()
-		return product.ProviderState{}, errors.New("Codex login has no pending device code")
-	}
-	device := *a.oauthPending
-	a.oauthFinishing = true
-	a.mu.Unlock()
-
-	state, err := a.service.FinishCodexOAuth(a.ctx, device)
-	a.mu.Lock()
-	a.oauthPending = nil
-	a.oauthFinishing = false
-	a.mu.Unlock()
-	return state, err
 }
 
 func (a *App) InstallModel(model, role string) (product.ModelSelection, error) {
@@ -253,16 +192,4 @@ func (a *App) Workspace() (project.Workspace, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.service.Workspace(a.ctx)
-}
-
-func (a *App) Reconciliations() ([]reconcile.Run, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.Reconciliations(a.ctx)
-}
-
-func (a *App) ReconciliationEvents() ([]memory.ReconcileEvent, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.service.ReconciliationEvents(a.ctx)
 }
